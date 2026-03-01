@@ -919,9 +919,10 @@ export class AnalysisArtifactGenerator {
           }
         }
 
-        // Call graph (Python + TypeScript/JavaScript only, exclude test files)
+        // Call graph — all languages supported by tree-sitter extractors, exclude test files
         const lang = detectLanguage(file.path);
-        if (!isTest && (lang === 'Python' || lang === 'TypeScript' || lang === 'JavaScript')) {
+        const CALL_GRAPH_LANGS = new Set(['Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Java']);
+        if (!isTest && CALL_GRAPH_LANGS.has(lang)) {
           callGraphFiles.push({ path: file.path, content, language: lang });
         }
       } catch {

@@ -2,7 +2,7 @@
  * Call Graph Analyzer
  *
  * Performs static analysis of function calls across source files using tree-sitter.
- * Supports Python and TypeScript/JavaScript — no LLM involved, pure AST analysis.
+ * Supports TypeScript/JavaScript, Python, Go, Rust, Ruby, Java — no LLM, pure AST.
  *
  * Produces:
  *  - FunctionNode[]  — all identified functions/methods
@@ -82,7 +82,7 @@ export interface SerializedCallGraph {
 
 const HUB_THRESHOLD = 5;
 
-/** Python/JS/TS keywords and builtins to ignore as call targets */
+/** Common builtins and stdlib names to ignore as call targets (across all languages) */
 const IGNORED_CALLEES = new Set([
   // Python builtins
   'print', 'len', 'range', 'str', 'int', 'float', 'list', 'dict', 'set', 'tuple',
@@ -101,6 +101,17 @@ const IGNORED_CALLEES = new Set([
   // Node.js common
   'readFile', 'writeFile', 'mkdir', 'join', 'resolve', 'basename', 'dirname',
   'existsSync', 'readFileSync', 'writeFileSync',
+  // Go builtins
+  'make', 'new', 'append', 'copy', 'delete', 'close', 'panic', 'recover',
+  'println', 'printf', 'sprintf', 'errorf', 'fprintf',
+  // Rust macros / common stdlib
+  'println', 'eprintln', 'format', 'vec', 'assert', 'unwrap', 'expect',
+  'ok', 'err', 'some', 'none',
+  // Ruby builtins
+  'puts', 'print', 'p', 'raise', 'require', 'require_relative', 'include',
+  'extend', 'attr_accessor', 'attr_reader', 'attr_writer',
+  // Java common
+  'toString', 'equals', 'hashCode', 'getClass', 'println', 'printf',
 ]);
 
 // ============================================================================
@@ -109,8 +120,16 @@ const IGNORED_CALLEES = new Set([
 
 let _tsParser: Parser | undefined;
 let _pyParser: Parser | undefined;
+let _goParser: Parser | undefined;
+let _rustParser: Parser | undefined;
+let _rubyParser: Parser | undefined;
+let _javaParser: Parser | undefined;
 let _TsLanguage: object | undefined;
 let _PyLanguage: object | undefined;
+let _GoLanguage: object | undefined;
+let _RustLanguage: object | undefined;
+let _RubyLanguage: object | undefined;
+let _JavaLanguage: object | undefined;
 
 async function getTSParser(): Promise<{ parser: Parser; lang: object }> {
   if (!_tsParser) {
@@ -130,6 +149,46 @@ async function getPyParser(): Promise<{ parser: Parser; lang: object }> {
     (_pyParser as Parser).setLanguage(_PyLanguage as unknown as Parser.Language);
   }
   return { parser: _pyParser!, lang: _PyLanguage! };
+}
+
+async function getGoParser(): Promise<{ parser: Parser; lang: object }> {
+  if (!_goParser) {
+    const goModule = await import('tree-sitter-go');
+    _GoLanguage = goModule.default;
+    _goParser = new Parser();
+    (_goParser as Parser).setLanguage(_GoLanguage as unknown as Parser.Language);
+  }
+  return { parser: _goParser!, lang: _GoLanguage! };
+}
+
+async function getRustParser(): Promise<{ parser: Parser; lang: object }> {
+  if (!_rustParser) {
+    const rustModule = await import('tree-sitter-rust');
+    _RustLanguage = rustModule.default;
+    _rustParser = new Parser();
+    (_rustParser as Parser).setLanguage(_RustLanguage as unknown as Parser.Language);
+  }
+  return { parser: _rustParser!, lang: _RustLanguage! };
+}
+
+async function getRubyParser(): Promise<{ parser: Parser; lang: object }> {
+  if (!_rubyParser) {
+    const rubyModule = await import('tree-sitter-ruby');
+    _RubyLanguage = rubyModule.default;
+    _rubyParser = new Parser();
+    (_rubyParser as Parser).setLanguage(_RubyLanguage as unknown as Parser.Language);
+  }
+  return { parser: _rubyParser!, lang: _RubyLanguage! };
+}
+
+async function getJavaParser(): Promise<{ parser: Parser; lang: object }> {
+  if (!_javaParser) {
+    const javaModule = await import('tree-sitter-java');
+    _JavaLanguage = javaModule.default;
+    _javaParser = new Parser();
+    (_javaParser as Parser).setLanguage(_JavaLanguage as unknown as Parser.Language);
+  }
+  return { parser: _javaParser!, lang: _JavaLanguage! };
 }
 
 // ============================================================================
@@ -424,6 +483,321 @@ async function extractPyGraph(
 }
 
 // ============================================================================
+// GO EXTRACTOR
+// ============================================================================
+
+const GO_FN_QUERY = `
+  (function_declaration
+    name: (identifier) @fn.name) @fn.node
+
+  (method_declaration
+    name: (field_identifier) @fn.name) @fn.node
+`;
+
+const GO_CALL_QUERY = `
+  (call_expression
+    function: (identifier) @call.name) @call.node
+
+  (call_expression
+    function: (selector_expression
+      field: (field_identifier) @call.name)) @call.node
+`;
+
+async function extractGoGraph(
+  filePath: string,
+  content: string
+): Promise<{ nodes: FunctionNode[]; rawEdges: Array<{ callerId: string; calleeName: string; line: number }> }> {
+  const { parser, lang } = await getGoParser();
+  const tree = (parser as Parser).parse(content);
+
+  const fnQuery = new Parser.Query(lang as unknown as Parser.Language, GO_FN_QUERY);
+  const callQuery = new Parser.Query(lang as unknown as Parser.Language, GO_CALL_QUERY);
+
+  const nodes: FunctionNode[] = [];
+  for (const match of fnQuery.matches(tree.rootNode)) {
+    const nameCapture = match.captures.find(c => c.name === 'fn.name');
+    const nodeCapture = match.captures.find(c => c.name === 'fn.node');
+    if (!nameCapture || !nodeCapture) continue;
+
+    const name = nameCapture.node.text;
+    const fnNode = nodeCapture.node;
+
+    // Receiver type for method_declaration → use as className
+    let className: string | undefined;
+    if (fnNode.type === 'method_declaration') {
+      const receiver = fnNode.children.find(c => c.type === 'parameter_list');
+      if (receiver) {
+        // Extract type name from receiver: (r *MyStruct) → MyStruct
+        const typeNode = receiver.descendantsOfType('type_identifier')[0]
+          ?? receiver.descendantsOfType('pointer_type')[0];
+        if (typeNode) className = typeNode.text.replace(/^\*/, '');
+      }
+    }
+
+    const id = className ? `${filePath}::${className}.${name}` : `${filePath}::${name}`;
+    nodes.push({
+      id, name, filePath, className,
+      isAsync: false, // Go has goroutines, not async/await
+      language: 'Go',
+      startIndex: fnNode.startIndex,
+      endIndex: fnNode.endIndex,
+      fanIn: 0, fanOut: 0,
+    });
+  }
+
+  const rawEdges: Array<{ callerId: string; calleeName: string; line: number }> = [];
+  for (const match of callQuery.matches(tree.rootNode)) {
+    const nameCapture = match.captures.find(c => c.name === 'call.name');
+    const nodeCapture = match.captures.find(c => c.name === 'call.node');
+    if (!nameCapture || !nodeCapture) continue;
+
+    const calleeName = nameCapture.node.text;
+    if (IGNORED_CALLEES.has(calleeName)) continue;
+
+    const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
+    if (!caller) continue;
+
+    rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1 });
+  }
+
+  return { nodes, rawEdges };
+}
+
+// ============================================================================
+// RUST EXTRACTOR
+// ============================================================================
+
+const RUST_FN_QUERY = `
+  (function_item
+    name: (identifier) @fn.name) @fn.node
+`;
+
+const RUST_CALL_QUERY = `
+  (call_expression
+    function: (identifier) @call.name) @call.node
+
+  (call_expression
+    function: (field_expression
+      field: (field_identifier) @call.name)) @call.node
+`;
+
+async function extractRustGraph(
+  filePath: string,
+  content: string
+): Promise<{ nodes: FunctionNode[]; rawEdges: Array<{ callerId: string; calleeName: string; line: number }> }> {
+  const { parser, lang } = await getRustParser();
+  const tree = (parser as Parser).parse(content);
+
+  const fnQuery = new Parser.Query(lang as unknown as Parser.Language, RUST_FN_QUERY);
+  const callQuery = new Parser.Query(lang as unknown as Parser.Language, RUST_CALL_QUERY);
+
+  const nodes: FunctionNode[] = [];
+  for (const match of fnQuery.matches(tree.rootNode)) {
+    const nameCapture = match.captures.find(c => c.name === 'fn.name');
+    const nodeCapture = match.captures.find(c => c.name === 'fn.node');
+    if (!nameCapture || !nodeCapture) continue;
+
+    const name = nameCapture.node.text;
+    const fnNode = nodeCapture.node;
+
+    // Find enclosing impl block → use as className
+    let className: string | undefined;
+    let cursor = fnNode.parent;
+    while (cursor) {
+      if (cursor.type === 'impl_item') {
+        const typeNode = cursor.children.find(c => c.type === 'type_identifier');
+        if (typeNode) className = typeNode.text;
+        break;
+      }
+      cursor = cursor.parent;
+    }
+
+    const isAsync = fnNode.children.some(c => c.type === 'async');
+    const id = className ? `${filePath}::${className}.${name}` : `${filePath}::${name}`;
+    nodes.push({
+      id, name, filePath, className,
+      isAsync,
+      language: 'Rust',
+      startIndex: fnNode.startIndex,
+      endIndex: fnNode.endIndex,
+      fanIn: 0, fanOut: 0,
+    });
+  }
+
+  const rawEdges: Array<{ callerId: string; calleeName: string; line: number }> = [];
+  for (const match of callQuery.matches(tree.rootNode)) {
+    const nameCapture = match.captures.find(c => c.name === 'call.name');
+    const nodeCapture = match.captures.find(c => c.name === 'call.node');
+    if (!nameCapture || !nodeCapture) continue;
+
+    const calleeName = nameCapture.node.text;
+    if (IGNORED_CALLEES.has(calleeName)) continue;
+
+    const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
+    if (!caller) continue;
+
+    rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1 });
+  }
+
+  return { nodes, rawEdges };
+}
+
+// ============================================================================
+// RUBY EXTRACTOR
+// ============================================================================
+
+const RUBY_FN_QUERY = `
+  (method
+    name: (identifier) @fn.name) @fn.node
+
+  (singleton_method
+    name: (identifier) @fn.name) @fn.node
+`;
+
+const RUBY_DIRECT_CALL_QUERY = `
+  (call
+    method: (identifier) @call.name) @call.node
+`;
+
+async function extractRubyGraph(
+  filePath: string,
+  content: string
+): Promise<{ nodes: FunctionNode[]; rawEdges: Array<{ callerId: string; calleeName: string; line: number }> }> {
+  const { parser, lang } = await getRubyParser();
+  const tree = (parser as Parser).parse(content);
+
+  const fnQuery = new Parser.Query(lang as unknown as Parser.Language, RUBY_FN_QUERY);
+  const callQuery = new Parser.Query(lang as unknown as Parser.Language, RUBY_DIRECT_CALL_QUERY);
+
+  const nodes: FunctionNode[] = [];
+  for (const match of fnQuery.matches(tree.rootNode)) {
+    const nameCapture = match.captures.find(c => c.name === 'fn.name');
+    const nodeCapture = match.captures.find(c => c.name === 'fn.node');
+    if (!nameCapture || !nodeCapture) continue;
+
+    const name = nameCapture.node.text;
+    const fnNode = nodeCapture.node;
+
+    // Find enclosing class/module
+    let className: string | undefined;
+    let cursor = fnNode.parent;
+    while (cursor) {
+      if (cursor.type === 'class' || cursor.type === 'module') {
+        const nameNode = cursor.children.find(c => c.type === 'constant' || c.type === 'scope_resolution');
+        if (nameNode) className = nameNode.text;
+        break;
+      }
+      cursor = cursor.parent;
+    }
+
+    const id = className ? `${filePath}::${className}.${name}` : `${filePath}::${name}`;
+    nodes.push({
+      id, name, filePath, className,
+      isAsync: false,
+      language: 'Ruby',
+      startIndex: fnNode.startIndex,
+      endIndex: fnNode.endIndex,
+      fanIn: 0, fanOut: 0,
+    });
+  }
+
+  const rawEdges: Array<{ callerId: string; calleeName: string; line: number }> = [];
+  for (const match of callQuery.matches(tree.rootNode)) {
+    const nameCapture = match.captures.find(c => c.name === 'call.name');
+    const nodeCapture = match.captures.find(c => c.name === 'call.node');
+    if (!nameCapture || !nodeCapture) continue;
+
+    const calleeName = nameCapture.node.text;
+    if (IGNORED_CALLEES.has(calleeName)) continue;
+
+    const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
+    if (!caller) continue;
+
+    rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1 });
+  }
+
+  return { nodes, rawEdges };
+}
+
+// ============================================================================
+// JAVA EXTRACTOR
+// ============================================================================
+
+const JAVA_FN_QUERY = `
+  (method_declaration
+    name: (identifier) @fn.name) @fn.node
+
+  (constructor_declaration
+    name: (identifier) @fn.name) @fn.node
+`;
+
+const JAVA_CALL_QUERY = `
+  (method_invocation
+    name: (identifier) @call.name) @call.node
+`;
+
+async function extractJavaGraph(
+  filePath: string,
+  content: string
+): Promise<{ nodes: FunctionNode[]; rawEdges: Array<{ callerId: string; calleeName: string; line: number }> }> {
+  const { parser, lang } = await getJavaParser();
+  const tree = (parser as Parser).parse(content);
+
+  const fnQuery = new Parser.Query(lang as unknown as Parser.Language, JAVA_FN_QUERY);
+  const callQuery = new Parser.Query(lang as unknown as Parser.Language, JAVA_CALL_QUERY);
+
+  const nodes: FunctionNode[] = [];
+  for (const match of fnQuery.matches(tree.rootNode)) {
+    const nameCapture = match.captures.find(c => c.name === 'fn.name');
+    const nodeCapture = match.captures.find(c => c.name === 'fn.node');
+    if (!nameCapture || !nodeCapture) continue;
+
+    const name = nameCapture.node.text;
+    const fnNode = nodeCapture.node;
+
+    // Find enclosing class/interface/enum
+    let className: string | undefined;
+    let cursor = fnNode.parent;
+    while (cursor) {
+      if (cursor.type === 'class_declaration' || cursor.type === 'interface_declaration' || cursor.type === 'enum_declaration') {
+        const nameNode = cursor.children.find(c => c.type === 'identifier');
+        if (nameNode) className = nameNode.text;
+        break;
+      }
+      cursor = cursor.parent;
+    }
+
+    const isAsync = false; // Java uses Future/CompletableFuture, not async keyword
+    const id = className ? `${filePath}::${className}.${name}` : `${filePath}::${name}`;
+    nodes.push({
+      id, name, filePath, className,
+      isAsync,
+      language: 'Java',
+      startIndex: fnNode.startIndex,
+      endIndex: fnNode.endIndex,
+      fanIn: 0, fanOut: 0,
+    });
+  }
+
+  const rawEdges: Array<{ callerId: string; calleeName: string; line: number }> = [];
+  for (const match of callQuery.matches(tree.rootNode)) {
+    const nameCapture = match.captures.find(c => c.name === 'call.name');
+    const nodeCapture = match.captures.find(c => c.name === 'call.node');
+    if (!nameCapture || !nodeCapture) continue;
+
+    const calleeName = nameCapture.node.text;
+    if (IGNORED_CALLEES.has(calleeName)) continue;
+
+    const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
+    if (!caller) continue;
+
+    rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1 });
+  }
+
+  return { nodes, rawEdges };
+}
+
+// ============================================================================
 // CALL GRAPH BUILDER
 // ============================================================================
 
@@ -451,6 +825,14 @@ export class CallGraphBuilder {
           result = await extractPyGraph(file.path, file.content);
         } else if (file.language === 'TypeScript' || file.language === 'JavaScript') {
           result = await extractTSGraph(file.path, file.content);
+        } else if (file.language === 'Go') {
+          result = await extractGoGraph(file.path, file.content);
+        } else if (file.language === 'Rust') {
+          result = await extractRustGraph(file.path, file.content);
+        } else if (file.language === 'Ruby') {
+          result = await extractRubyGraph(file.path, file.content);
+        } else if (file.language === 'Java') {
+          result = await extractJavaGraph(file.path, file.content);
         } else {
           continue;
         }
