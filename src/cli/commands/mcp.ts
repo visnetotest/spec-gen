@@ -205,7 +205,7 @@ const TOOL_DEFINITIONS = [
  * traversal attacks where a client supplies `"../../../../etc"` or a plain
  * file path instead of a project directory.
  */
-async function validateDirectory(directory: string): Promise<string> {
+export async function validateDirectory(directory: string): Promise<string> {
   if (!directory || typeof directory !== 'string') {
     throw new Error('directory parameter is required and must be a string');
   }
@@ -226,7 +226,7 @@ async function validateDirectory(directory: string): Promise<string> {
  * Strip common API key and token patterns from an error message before
  * returning it to MCP clients, to prevent secret leakage via error responses.
  */
-function sanitizeMcpError(err: unknown): string {
+export function sanitizeMcpError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   return msg
     .replace(/sk-ant-[A-Za-z0-9\-_]{10,}/g, '[REDACTED]')

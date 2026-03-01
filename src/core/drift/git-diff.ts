@@ -152,7 +152,7 @@ export async function getCurrentBranch(rootPath: string): Promise<string> {
  * Allows branch/tag names, SHA hashes, relative refs (HEAD~1, @{upstream}), and
  * the empty-tree SHA. Rejects refs containing shell metacharacters or null bytes.
  */
-function validateGitRef(ref: string): void {
+export function validateGitRef(ref: string): void {
   if (ref === GIT_EMPTY_TREE_SHA || ref === 'auto') return;
   // Allow: alphanumeric, -, _, ., /, ~, ^, @, {, }, :
   if (!/^[\w\-./~^@{}:]+$/.test(ref)) {
