@@ -164,39 +164,87 @@ spec-gen drift --no-color                # Plain output for CI logs
 | **Reproducibility** | Identical every run | May vary |
 | **Best for** | CI, pre-commit hooks, quick checks | Initial generation, reducing false positives |
 
-## Custom LLM Endpoints
+## LLM Providers
 
-spec-gen works with any OpenAI-compatible API endpoint. Configuration is available through three methods, in priority order:
+spec-gen supports four providers. The default is Anthropic Claude.
 
-**1. CLI flags** (per-invocation):
-```bash
-spec-gen generate --api-base http://localhost:8000/v1
-spec-gen generate --api-base http://localhost:8000/v1 --insecure
+| Provider | `provider` value | API key env var | Default model |
+|----------|-----------------|-----------------|---------------|
+| Anthropic Claude | `anthropic` *(default)* | `ANTHROPIC_API_KEY` | `claude-sonnet-4-20250514` |
+| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4o` |
+| OpenAI-compatible *(Mistral, Groq, Ollama…)* | `openai-compat` | `OPENAI_COMPAT_API_KEY` | `mistral-large-latest` |
+| Google Gemini | `gemini` | `GEMINI_API_KEY` | `gemini-2.0-flash` |
+
+### Selecting a provider
+
+Set `provider` (and optionally `model`) in the `generation` block of `.spec-gen/config.json`:
+
+```json
+{
+  "generation": {
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "domains": "auto"
+  }
+}
 ```
 
-**2. Environment variables** (per-session):
+Override the model for a single run:
 ```bash
-export OPENAI_API_BASE=http://localhost:8000/v1
-export OPENAI_API_KEY=dummy-key
-
-# Or for Anthropic-compatible endpoints
-export ANTHROPIC_API_BASE=https://internal-proxy.corp.net/v1
-export ANTHROPIC_API_KEY=sk-ant-...
+spec-gen generate --model claude-opus-4-20250514
 ```
 
-**3. Config file** (per-project):
+### OpenAI-compatible servers (Ollama, Mistral, Groq, LM Studio, vLLM…)
+
+Use `provider: "openai-compat"` with a base URL and API key:
+
+**Environment variables:**
+```bash
+export OPENAI_COMPAT_BASE_URL=http://localhost:11434/v1   # Ollama
+export OPENAI_COMPAT_API_KEY=ollama                       # any value for local servers
+```
+
+**Config file** (per-project):
+```json
+{
+  "generation": {
+    "provider": "openai-compat",
+    "model": "llama3.2",
+    "openaiCompatBaseUrl": "http://localhost:11434/v1",
+    "domains": "auto"
+  }
+}
+```
+
+Works with: Ollama, LM Studio, Mistral AI, Groq, Together AI, LiteLLM, vLLM,
+text-generation-inference, LocalAI, Azure OpenAI, and any `/v1/chat/completions` server.
+
+### Custom base URL for Anthropic or OpenAI
+
+To redirect the built-in Anthropic or OpenAI provider to a proxy or self-hosted endpoint:
+
+```bash
+# CLI (one-off)
+spec-gen generate --api-base https://my-proxy.corp.net/v1
+
+# Environment variable
+export ANTHROPIC_API_BASE=https://my-proxy.corp.net/v1
+export OPENAI_API_BASE=https://my-proxy.corp.net/v1
+```
+
+Or in `config.json` under the `llm` block:
 ```json
 {
   "llm": {
-    "apiBase": "http://localhost:8000/v1",
+    "apiBase": "https://my-proxy.corp.net/v1",
     "sslVerify": false
   }
 }
 ```
 
-Priority: CLI flags > environment variables > config file > provider defaults.
+`sslVerify: false` disables TLS certificate validation — use only for internal servers with self-signed certificates.
 
-Compatible with vLLM, Ollama, LiteLLM, Azure OpenAI, text-generation-inference, LocalAI, and any OpenAI-compatible server.
+Priority: CLI flags > environment variables > config file > provider defaults.
 
 ## Commands
 
@@ -214,12 +262,17 @@ Compatible with vLLM, Ollama, LiteLLM, Azure OpenAI, text-generation-inference, 
 ### Global Options
 
 ```bash
---api-base <url>       # Custom LLM API base URL
+--api-base <url>       # Custom LLM API base URL (proxy / self-hosted)
 --insecure             # Disable SSL certificate verification
 --config <path>        # Config file path (default: .spec-gen/config.json)
 -q, --quiet            # Errors only
 -v, --verbose          # Debug output
 --no-color             # Plain text output (enables timestamps)
+```
+
+Generate-specific options:
+```bash
+--model <name>         # Override LLM model (e.g. gpt-4o-mini, llama3.2)
 ```
 
 ### Drift Options
@@ -325,36 +378,29 @@ Static analysis output is stored in `.spec-gen/analysis/`:
 }
 ```
 
-Add an optional `llm` block for custom endpoints:
-
-```json
-{
-  "llm": {
-    "apiBase": "http://localhost:8000/v1",
-    "sslVerify": false
-  }
-}
-```
-
 ### Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `ANTHROPIC_API_KEY` | Anthropic API key (used by default) |
-| `OPENAI_API_KEY` | OpenAI API key (fallback) |
-| `ANTHROPIC_API_BASE` | Custom Anthropic-compatible endpoint |
-| `OPENAI_API_BASE` | Custom OpenAI-compatible endpoint |
-| `DEBUG` | Enable stack traces on errors |
-| `CI` | Auto-detected; enables timestamps in output |
+| Variable | Provider | Description |
+|----------|----------|-------------|
+| `ANTHROPIC_API_KEY` | `anthropic` | Anthropic API key |
+| `ANTHROPIC_API_BASE` | `anthropic` | Custom base URL (proxy / self-hosted) |
+| `OPENAI_API_KEY` | `openai` | OpenAI API key |
+| `OPENAI_API_BASE` | `openai` | Custom base URL (Azure, proxy…) |
+| `OPENAI_COMPAT_API_KEY` | `openai-compat` | API key for OpenAI-compatible server |
+| `OPENAI_COMPAT_BASE_URL` | `openai-compat` | Base URL, e.g. `https://api.mistral.ai/v1` |
+| `GEMINI_API_KEY` | `gemini` | Google Gemini API key |
+| `DEBUG` | — | Enable stack traces on errors |
+| `CI` | — | Auto-detected; enables timestamps in output |
 
 ## Requirements
 
 - Node.js 20+
-- API key for `generate`, `verify`, and `drift --use-llm`:
+- API key for `generate`, `verify`, and `drift --use-llm` — set the env var for your chosen provider:
   ```bash
-  export ANTHROPIC_API_KEY=sk-ant-...
-  # or
-  export OPENAI_API_KEY=sk-...
+  export ANTHROPIC_API_KEY=sk-ant-...       # Anthropic (default)
+  export OPENAI_API_KEY=sk-...              # OpenAI
+  export OPENAI_COMPAT_API_KEY=ollama       # OpenAI-compatible local server
+  export GEMINI_API_KEY=...                 # Google Gemini
   ```
 - `analyze`, `drift`, and `init` require no API key
 
