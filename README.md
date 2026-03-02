@@ -363,18 +363,28 @@ spec-gen verify [options]
 
 **Cline / Roo Code / Kilocode** — add the same block under `mcpServers` in the MCP settings JSON of your editor.
 
-### Quick Start with Cline
+### Quick Start
 
-**1. Build and link spec-gen**
+**1. Build spec-gen**
 
 ```bash
 git clone https://github.com/clay-good/spec-gen
 cd spec-gen && npm install && npm run build
 ```
 
-**2. Configure the MCP server in your editor**
+**2. Generate specs once** (required for drift detection and naming alignment)
 
-Open your editor's MCP settings (Cline / Roo Code / Kilocode: settings → MCP Servers) and add:
+```bash
+cd /path/to/your-project
+spec-gen init      # detect project type, create config
+spec-gen generate  # generate OpenSpec specs (requires LLM API key)
+```
+
+**3. Connect your editor**
+
+#### Claude Code
+
+The repo ships a `.mcp.json` — edit the path and you are done:
 
 ```json
 {
@@ -387,9 +397,11 @@ Open your editor's MCP settings (Cline / Roo Code / Kilocode: settings → MCP S
 }
 ```
 
-**3. Install the slash command workflows in your project**
+The MCP tools (`analyze_codebase`, `check_spec_drift`, `get_refactor_report`, …) are then available directly in any Claude Code conversation — just ask naturally: *"analyse my codebase"*, *"check spec drift"*, *"help me refactor X"*.
 
-Cline, Roo Code, and Kilocode all load slash command workflows from `.clinerules/workflows/`:
+#### Cline / Roo Code / Kilocode
+
+Add the same `mcpServers` block in the editor's MCP settings JSON, then install the pre-built slash command workflows:
 
 ```bash
 cd /path/to/your-project
@@ -397,16 +409,7 @@ mkdir -p .clinerules/workflows
 cp /path/to/spec-gen/examples/cline-workflows/*.md .clinerules/workflows/
 ```
 
-**4. Generate specs once** (required for `/spec-gen-check-spec-drift` and naming alignment)
-
-```bash
-spec-gen init      # detect project type, create config
-spec-gen generate  # generate OpenSpec specs (requires LLM API key)
-```
-
-**5. Use the slash commands**
-
-In any Cline conversation, type one of:
+Type one of the following commands in a conversation:
 
 | Command | Needs API key | What it does |
 |---------|:---:|-------------|
