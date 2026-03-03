@@ -179,6 +179,12 @@ restore any file to its pre-edit state.
 Make the agreed code edits. Do not change observable behaviour — rename and
 restructure only.
 
+**Editing tool rule**: Always prefer a targeted edit tool (`replace_in_file`,
+`str_replace_based_edit`, `apply_diff`, or equivalent) over a full-file
+rewrite tool (`write_to_file`). Only use `write_to_file` if the file is under
+100 lines in total. If a change seems to require `write_to_file` on a larger
+file, stop and split the change into smaller targeted edits instead.
+
 **Model capability note**: If using a small model (Mistral Small, Phi, Gemma,
 or any model under 13B parameters), enforce an additional constraint: each edit
 must touch a contiguous block of at most 50 lines. If the intended change
