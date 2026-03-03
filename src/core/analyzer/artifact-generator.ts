@@ -957,6 +957,18 @@ export class AnalysisArtifactGenerator {
       // non-fatal if output dir doesn't exist yet
     }
 
+    // Duplicate detection — static analysis, no LLM (Types 1-2-3)
+    const { detectDuplicates } = await import('./duplicate-detector.js');
+    const duplicates = detectDuplicates(callGraphFiles, callGraphResult);
+    try {
+      await writeFile(
+        join(this.options.outputDir, 'duplicates.json'),
+        JSON.stringify(duplicates, null, 2)
+      );
+    } catch {
+      // non-fatal
+    }
+
     return {
       phase1_survey: phase1,
       phase2_deep: phase2,
