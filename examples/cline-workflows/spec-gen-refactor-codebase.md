@@ -155,15 +155,53 @@ If coverage is below 40%, tell the user clearly:
 
 Only continue past this point with explicit user confirmation.
 
+**Large file warning**: If the target function spans more than 300 lines, add
+this constraint regardless of coverage:
+> "This function is X lines long. Small models (< 13B parameters) may lose
+> code when editing files of this size in a single pass. Recommended approach:
+> use `get_low_risk_refactor_candidates` to extract smaller sub-functions first,
+> reducing the target below 200 lines before the main refactor."
+
+**Git restore point**: Before making any edit, verify the working tree is clean
+and note the restore point:
+
+```bash
+git status            # must show: nothing to commit, working tree clean
+git log --oneline -1  # note this commit hash — your restore point
+```
+
+If there are uncommitted changes, stop and ask the user to commit or stash them
+first. A clean tree guarantees that `git checkout HEAD -- <file>` will fully
+restore any file to its pre-edit state.
+
 ## Step 9: Apply changes
 
 Make the agreed code edits. Do not change observable behaviour — rename and
 restructure only.
 
+**Model capability note**: If using a small model (Mistral Small, Phi, Gemma,
+or any model under 13B parameters), enforce an additional constraint: each edit
+must touch a contiguous block of at most 50 lines. If the intended change
+exceeds this, split it into multiple smaller extractions and apply them one by
+one.
+
 After **each individual change** (one extracted function, one rename, one moved
-block), re-run the test suite before proceeding to the next change. If any test
-fails after a change, revert that change immediately rather than accumulating
-broken state.
+block):
+
+1. **Verify the diff** before running tests:
+   ```bash
+   git diff --stat   # only the target file should appear
+   git diff          # scan deleted lines (-)  and confirm each removal is
+                     # intentional — moved to a new function or file,
+                     # not silently dropped.
+                     # If deleted lines >> added lines with no new file
+                     # created, code was likely lost — abort immediately.
+   ```
+2. **Run the test suite.** If any test fails, restore the file right away:
+   ```bash
+   git checkout HEAD -- <file>
+   ```
+   Do NOT accumulate broken state before restoring.
 
 ## Step 10: Verify improvement
 
