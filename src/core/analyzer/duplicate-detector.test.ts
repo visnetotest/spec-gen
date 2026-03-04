@@ -37,7 +37,7 @@ function makeCallGraph(nodes: FunctionNode[]): CallGraphResult {
     hubFunctions: [],
     entryPoints: [],
     layerViolations: [],
-    stats: { totalNodes: nodes.length, totalEdges: 0, hubCount: 0, entryPointCount: 0, layerViolationCount: 0 },
+    stats: { totalNodes: nodes.length, totalEdges: 0, avgFanIn: 0, avgFanOut: 0 },
   };
 }
 
