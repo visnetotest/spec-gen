@@ -59,6 +59,46 @@ function parseGraph(raw) {
   return { nodes, edges, clusters, statistics: raw.statistics || {}, rankings: raw.rankings || {} };
 }
 
+function enrichGraphWithRefactors(graph, refReport) {
+  if (!graph || !refReport || !refReport.priorities) return graph;
+
+  const byFile = new Map();
+  refReport.priorities.forEach((entry) => {
+    const list = byFile.get(entry.file) || [];
+    list.push(entry);
+    byFile.set(entry.file, list);
+  });
+
+  const nodes = graph.nodes.map((n) => {
+    const entries = byFile.get(n.path) || [];
+    if (!entries.length) return { ...n, refactor: null };
+
+    let maxPriority = 0;
+    const issuesSet = new Set();
+    entries.forEach((e) => {
+      if (typeof e.priorityScore === "number") {
+        maxPriority = Math.max(maxPriority, e.priorityScore);
+      }
+      (e.issues || []).forEach((iss) => issuesSet.add(iss));
+    });
+
+    return {
+      ...n,
+      refactor: {
+        functions: entries.length,
+        maxPriority,
+        issues: Array.from(issuesSet),
+      },
+    };
+  });
+
+  return {
+    ...graph,
+    nodes,
+    refactorStats: refReport.stats || null,
+  };
+}
+
 // ─── BFS blast radius ─────────────────────────────────────────────────────────
 function computeBlast(edges, nodeId) {
   const affected = new Set();
@@ -159,18 +199,79 @@ function computeClusterLayout(clusters, W=900, H=540) {
   return pos;
 }
 
+// ─── Pan/Zoom hook ────────────────────────────────────────────────────────────
+function usePanZoom() {
+  const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
+  const dragging = useRef(false);
+  const hasDragged = useRef(false);
+  const last = useRef({ x: 0, y: 0 });
+
+  const onMouseDown = useCallback((e) => {
+    if (e.button !== 0) return;
+    dragging.current = true;
+    hasDragged.current = false;
+    last.current = { x: e.clientX, y: e.clientY };
+    e.currentTarget.style.cursor = "grabbing";
+  }, []);
+
+  const onMouseMove = useCallback((e) => {
+    if (!dragging.current) return;
+    const dx = e.clientX - last.current.x;
+    const dy = e.clientY - last.current.y;
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) hasDragged.current = true;
+    last.current = { x: e.clientX, y: e.clientY };
+    setTransform(t => ({ ...t, x: t.x + dx, y: t.y + dy }));
+  }, []);
+
+  const onMouseUp = useCallback((e) => {
+    dragging.current = false;
+    e.currentTarget.style.cursor = "grab";
+  }, []);
+
+  const onWheel = useCallback((e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+    setTransform(t => {
+      const k = Math.max(0.15, Math.min(8, t.k * factor));
+      const ratio = k / t.k;
+      return {
+        k,
+        x: cx - ratio * (cx - t.x),
+        y: cy - ratio * (cy - t.y),
+      };
+    });
+  }, []);
+
+  const onMouseLeave = useCallback((e) => {
+    dragging.current = false;
+    e.currentTarget.style.cursor = "grab";
+  }, []);
+
+  const reset = useCallback(() => setTransform({ x: 0, y: 0, k: 1 }), []);
+
+  // Expose whether the last mousedown→mouseup was a drag (to suppress click on nodes)
+  const isDrag = useCallback(() => hasDragged.current, []);
+
+  return { transform, onMouseDown, onMouseMove, onMouseUp, onWheel, onMouseLeave, reset, isDrag };
+}
+
 // ─── Flat SVG graph ───────────────────────────────────────────────────────────
-function FlatGraph({ nodes, edges, selectedId, affectedIds, focusedIds, onSelect }) {
+function FlatGraph({ nodes, edges, selectedId, affectedIds, focusedIds, onSelect, refactorOnly, linkedIds }) {
   const posRef = useRef(null);
   const prevKey = useRef(null);
   const [, tick] = useState(0);
   const key = nodes.map(n=>n.id).sort().join("|");
+  const { transform, onMouseDown, onMouseMove, onMouseUp, onWheel, onMouseLeave, reset, isDrag } = usePanZoom();
 
   useEffect(() => {
     if (key !== prevKey.current) {
       posRef.current = computeLayout(nodes, edges);
       prevKey.current = key;
       tick(t => t+1);
+      reset();
     }
   }, [key]);
 
@@ -185,7 +286,10 @@ function FlatGraph({ nodes, edges, selectedId, affectedIds, focusedIds, onSelect
   };
 
   return (
-    <svg viewBox="0 0 900 540" style={{ width:"100%", height:"100%" }}>
+    <svg viewBox="0 0 900 540" style={{ width:"100%", height:"100%", cursor:"grab" }}
+      onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
+      onMouseLeave={onMouseLeave} onWheel={onWheel}
+    >
       <defs>
         <marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="2.5" orient="auto">
           <path d="M0,0 L0,5 L6,2.5z" fill="#1e2340"/>
@@ -209,6 +313,7 @@ function FlatGraph({ nodes, edges, selectedId, affectedIds, focusedIds, onSelect
         </filter>
       </defs>
 
+      <g transform={`translate(${transform.x},${transform.y}) scale(${transform.k})`}>
       {/* Cluster halos */}
       {Object.entries(
         nodes.reduce((acc, n) => {
@@ -255,17 +360,33 @@ function FlatGraph({ nodes, edges, selectedId, affectedIds, focusedIds, onSelect
         const isSel = state === "selected";
         const isAff = state === "affected";
         const isDim = state === "dimmed";
+        const isZeroScore = refactorOnly && n.score === 0 && !linkedIds.has(n.id);
         const r = 15 + Math.min(n.score/14, 6);
+        const hasRef = !!n.refactor;
+        let refColor = null;
+        if (hasRef) {
+          const p = n.refactor.maxPriority || 0;
+          refColor = p >= 5 ? "#f97373" : p >= 3 ? "#fbbf24" : "#4ade80";
+        }
 
         return (
           <g key={n.id} transform={`translate(${p.x},${p.y})`}
-            onClick={() => onSelect(n.id)}
+            onClick={() => { if (!isDrag()) onSelect(n.id); }}
             style={{ cursor:"pointer" }}
-            opacity={isDim ? 0.08 : 1}
+            opacity={isDim ? 0.08 : isZeroScore ? 0.18 : 1}
             filter={isSel ? "url(#glow)" : isAff ? "url(#glow-aff)" : undefined}
           >
             <circle r={r+4} fill="none" stroke={n.cluster.color}
               strokeWidth={1} strokeOpacity={isSel ? 0.5 : 0.1}/>
+            {hasRef && (
+              <circle
+                r={r+7}
+                fill="none"
+                stroke={refColor}
+                strokeWidth={1.3}
+                strokeOpacity={0.9}
+              />
+            )}
             <circle r={r}
               fill={isSel ? `${col}1a` : isAff ? `${col}0d` : "#0b0d1e"}
               stroke={isSel ? col : isAff ? col : "#1c2038"}
@@ -288,19 +409,31 @@ function FlatGraph({ nodes, edges, selectedId, affectedIds, focusedIds, onSelect
           </g>
         );
       })}
+      </g>
+      {(transform.x !== 0 || transform.y !== 0 || transform.k !== 1) && (
+        <foreignObject x="8" y="8" width="60" height="22">
+          <button onClick={reset} style={{ fontSize:8,padding:"3px 8px",background:"#0d0f22",border:"1px solid #7c6af7",borderRadius:4,color:"#7c6af7",cursor:"pointer",fontFamily:"'JetBrains Mono',monospace",letterSpacing:"0.05em" }}>⌖ reset</button>
+        </foreignObject>
+      )}
     </svg>
   );
 }
 
 // ─── Cluster SVG graph ────────────────────────────────────────────────────────
-function ClusterGraph({ clusters, edges, nodes, expandedClusters, onToggle, onSelectNode, selectedId, affectedIds }) {
+function ClusterGraph({ clusters, edges, nodes, allNodes, expandedClusters, onToggle, onSelectNode, selectedId, affectedIds, linkedIds }) {
   const clusterPos = useMemo(() => computeClusterLayout(clusters), [clusters.map(c=>c.id).join()]);
+  const visibleIds = useMemo(() => new Set(nodes.map(n => n.id)), [nodes]);
+  const { transform, onMouseDown, onMouseMove, onMouseUp, onWheel, onMouseLeave, reset, isDrag } = usePanZoom();
+
+  // Reset pan/zoom when clusters change significantly
+  const clusterKey = clusters.map(c=>c.id).join("|");
+  useEffect(() => { reset(); }, [clusterKey]);
 
   const nodeLayouts = useMemo(() => {
     const layouts = {};
     clusters.forEach((cl) => {
       if (!expandedClusters.has(cl.id)) return;
-      const members = nodes.filter(n => n.cluster.id === cl.id);
+      const members = (allNodes || nodes).filter(n => n.cluster.id === cl.id);
       const cp = clusterPos[cl.id]; if (!cp) return;
       const r = 55 + members.length * 9;
       const layout = {};
@@ -311,7 +444,7 @@ function ClusterGraph({ clusters, edges, nodes, expandedClusters, onToggle, onSe
       layouts[cl.id] = layout;
     });
     return layouts;
-  }, [clusters, expandedClusters, nodes, clusterPos]);
+  }, [clusters, expandedClusters, allNodes, nodes, clusterPos]);
 
   // inter-cluster edges (deduplicated, weighted by count)
   const clusterEdges = useMemo(() => {
@@ -330,7 +463,10 @@ function ClusterGraph({ clusters, edges, nodes, expandedClusters, onToggle, onSe
   }, [edges, nodes]);
 
   return (
-    <svg viewBox="0 0 900 540" style={{ width:"100%", height:"100%" }}>
+    <svg viewBox="0 0 900 540" style={{ width:"100%", height:"100%", cursor:"grab" }}
+      onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
+      onMouseLeave={onMouseLeave} onWheel={onWheel}
+    >
       <defs>
         <marker id="carr" markerWidth="6" markerHeight="6" refX="5" refY="2.5" orient="auto">
           <path d="M0,0 L0,5 L6,2.5z" fill="#2a3060"/>
@@ -348,6 +484,7 @@ function ClusterGraph({ clusters, edges, nodes, expandedClusters, onToggle, onSe
         </filter>
       </defs>
 
+      <g transform={`translate(${transform.x},${transform.y}) scale(${transform.k})`}>
       {/* Inter-cluster edges */}
       {clusterEdges.map((e) => {
         const s = clusterPos[e.source], t = clusterPos[e.target];
@@ -411,25 +548,28 @@ function ClusterGraph({ clusters, edges, nodes, expandedClusters, onToggle, onSe
       {/* Cluster bubbles */}
       {clusters.map((cl) => {
         const p = clusterPos[cl.id]; if (!p) return null;
-        const members = nodes.filter(n => n.cluster.id === cl.id);
+        const allMembers = (allNodes || nodes).filter(n => n.cluster.id === cl.id);
+        const visibleMembers = allMembers.filter(n => visibleIds.has(n.id));
         const isExpanded = expandedClusters.has(cl.id);
-        const r = 32 + Math.min(members.length * 1.4, 18);
+        const r = 32 + Math.min(allMembers.length * 1.4, 18);
         const inDeg = clusterEdges.filter(e=>e.target===cl.id).reduce((s,e)=>s+e.count,0);
         const outDeg = clusterEdges.filter(e=>e.source===cl.id).reduce((s,e)=>s+e.count,0);
 
         return (
           <g key={cl.id}>
             {/* Expanded member nodes */}
-            {isExpanded && members.map(n => {
+            {isExpanded && allMembers.map(n => {
               const np = nodeLayouts[cl.id]?.[n.id]; if (!np) return null;
               const isSel = n.id === selectedId;
               const isAff = affectedIds.includes(n.id);
               const col = extColor(n.ext);
+              const isGreyed = !visibleIds.has(n.id) && !linkedIds.has(n.id);
               return (
                 <g key={n.id} transform={`translate(${np.x},${np.y})`}
-                  onClick={e => { e.stopPropagation(); onSelectNode(n.id); }}
+                  onClick={e => { e.stopPropagation(); if (!isDrag()) onSelectNode(n.id); }}
                   style={{ cursor:"pointer" }}
                   filter={isSel ? "url(#nglow)" : undefined}
+                  opacity={isGreyed ? 0.18 : 1}
                 >
                   <circle r={13}
                     fill={isSel ? `${col}1a` : "#0b0d1e"}
@@ -447,63 +587,86 @@ function ClusterGraph({ clusters, edges, nodes, expandedClusters, onToggle, onSe
             })}
 
             {/* Cluster bubble */}
-            <g transform={`translate(${p.x},${p.y})`}
-              onClick={() => onToggle(cl.id)}
-              style={{ cursor:"pointer" }}
-              filter={isExpanded ? "url(#cglow)" : undefined}
-            >
-              <circle r={r}
-                fill={`${cl.color}10`}
-                stroke={cl.color}
-                strokeWidth={isExpanded ? 1.8 : 1}
-                strokeOpacity={isExpanded ? 0.85 : 0.35}
-              />
-              {/* cluster name */}
-              <text textAnchor="middle" y={-10}
-                fontSize={8.5} fontWeight={700} fill={cl.color}
-                fontFamily="'JetBrains Mono',monospace"
-                style={{ pointerEvents:"none" }}
-              >{cl.name.split("/").pop()}</text>
-              {/* file count */}
-              <text textAnchor="middle" y={3}
-                fontSize={7} fill={`${cl.color}90`}
-                fontFamily="'JetBrains Mono',monospace"
-                style={{ pointerEvents:"none" }}
-              >{members.length} files</text>
-              {/* in/out */}
-              <text textAnchor="middle" y={14}
-                fontSize={6.5} fill={`${cl.color}60`}
-                fontFamily="'JetBrains Mono',monospace"
-                style={{ pointerEvents:"none" }}
-              >↙{inDeg} ↗{outDeg}</text>
-              {/* expand toggle */}
-              <text textAnchor="middle" y={r-8}
-                fontSize={9} fill={`${cl.color}80`}
-                fontFamily="'JetBrains Mono',monospace"
-                style={{ pointerEvents:"none" }}
-              >{isExpanded ? "▲" : "▼"}</text>
-            </g>
+            {(() => {
+              const clusterLinked = linkedIds.size > 0 && allMembers.some(n => linkedIds.has(n.id));
+              const isClusterGreyed = visibleMembers.length === 0 && !clusterLinked;
+              return (
+                <g transform={`translate(${p.x},${p.y})`}
+                  onClick={() => { if (!isDrag()) onToggle(cl.id); }}
+                  style={{ cursor:"pointer" }}
+                  filter={isExpanded ? "url(#cglow)" : undefined}
+                  opacity={isClusterGreyed ? 0.18 : 1}
+                >
+                  <circle r={r}
+                    fill={`${cl.color}10`}
+                    stroke={cl.color}
+                    strokeWidth={isExpanded ? 1.8 : 1}
+                    strokeOpacity={isExpanded ? 0.85 : 0.35}
+                  />
+                  <text textAnchor="middle" y={-10}
+                    fontSize={8.5} fontWeight={700} fill={cl.color}
+                    fontFamily="'JetBrains Mono',monospace"
+                    style={{ pointerEvents:"none" }}
+                  >{cl.name.split("/").pop()}</text>
+                  <text textAnchor="middle" y={3}
+                    fontSize={7} fill={`${cl.color}90`}
+                    fontFamily="'JetBrains Mono',monospace"
+                    style={{ pointerEvents:"none" }}
+                  >{visibleMembers.length}/{allMembers.length} files</text>
+                  <text textAnchor="middle" y={14}
+                    fontSize={6.5} fill={`${cl.color}60`}
+                    fontFamily="'JetBrains Mono',monospace"
+                    style={{ pointerEvents:"none" }}
+                  >↙{inDeg} ↗{outDeg}</text>
+                  <text textAnchor="middle" y={r-8}
+                    fontSize={9} fill={`${cl.color}80`}
+                    fontFamily="'JetBrains Mono',monospace"
+                    style={{ pointerEvents:"none" }}
+                  >{isExpanded ? "▲" : "▼"}</text>
+                </g>
+              );
+            })()}
           </g>
         );
       })}
+      </g>
+      {(transform.x !== 0 || transform.y !== 0 || transform.k !== 1) && (
+        <foreignObject x="8" y="8" width="60" height="22">
+          <button onClick={reset} style={{ fontSize:8,padding:"3px 8px",background:"#0d0f22",border:"1px solid #7c6af7",borderRadius:4,color:"#7c6af7",cursor:"pointer",fontFamily:"'JetBrains Mono',monospace",letterSpacing:"0.05em" }}>⌖ reset</button>
+        </foreignObject>
+      )}
     </svg>
   );
 }
 
 // ─── Filter bar ───────────────────────────────────────────────────────────────
 function FilterBar({ filters, setFilters, stats, clusterNames }) {
-  const hasActive = filters.hideOrphans || filters.minScore > 0 || filters.topN < 999 || filters.cluster !== "";
+  const hasActive =
+    filters.hideOrphans ||
+    filters.minScore > 0 ||
+    filters.topN < 999 ||
+    filters.cluster !== "" ||
+    filters.refactorOnly;
   return (
     <div style={{ display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",padding:"7px 18px",borderBottom:"1px solid #0f1224",background:"#07091a",flexShrink:0,fontSize:9 }}>
-      <span style={{ color:"#2a2f4a",letterSpacing:"0.08em",fontWeight:700 }}>FILTRES</span>
+      <span style={{ color:"#2a2f4a",letterSpacing:"0.08em",fontWeight:700 }}>FILTERS</span>
 
       {/* Orphans toggle */}
       <FToggle
         active={filters.hideOrphans}
         onChange={v => setFilters(f => ({...f, hideOrphans:v}))}
-        label="Masquer orphelins"
+        label="Hide orphans"
         badge={stats.orphanCount}
         activeColor="#f77c6a"
+      />
+
+      {/* Refactor candidates */}
+      <FToggle
+        active={filters.refactorOnly}
+        onChange={v => setFilters(f => ({...f, refactorOnly:v}))}
+        label="Nodes to refactor"
+        badge={stats.refactorVisible}
+        activeColor="#f97373"
       />
 
       {/* Score */}
@@ -525,10 +688,10 @@ function FilterBar({ filters, setFilters, stats, clusterNames }) {
           style={{ background:"#0d0f22",border:"1px solid #1a1f38",color:"#c8cde8",borderRadius:4,padding:"2px 5px",fontSize:9,fontFamily:"inherit" }}
         >
           {[999,50,30,20,10].map(n => (
-            <option key={n} value={n}>{n===999?"Tous":String(n)}</option>
+            <option key={n} value={n}>{n===999?"All":String(n)}</option>
           ))}
         </select>
-        <span style={{ color:"#2a2f4a" }}>nœuds</span>
+        <span style={{ color:"#2a2f4a" }}>nodes</span>
       </div>
 
       {/* Cluster */}
@@ -538,22 +701,22 @@ function FilterBar({ filters, setFilters, stats, clusterNames }) {
           onChange={e => setFilters(f => ({...f, cluster:e.target.value}))}
           style={{ background:"#0d0f22",border:"1px solid #1a1f38",color:"#c8cde8",borderRadius:4,padding:"2px 5px",fontSize:9,fontFamily:"inherit",maxWidth:130 }}
         >
-          <option value="">Tous</option>
+          <option value="">All</option>
           {clusterNames.map(n => <option key={n} value={n}>{n}</option>)}
         </select>
       </div>
 
       {hasActive && (
-        <button onClick={() => setFilters({ hideOrphans:false, minScore:0, topN:999, cluster:"" })}
+        <button onClick={() => setFilters({ hideOrphans:false, minScore:0, topN:999, cluster:"", refactorOnly:false })}
           style={{ background:"none",border:"1px solid #2a2f4a",borderRadius:4,color:"#3a3f5c",padding:"2px 7px",cursor:"pointer",fontSize:9,fontFamily:"inherit" }}
         >reset</button>
       )}
 
       <div style={{ marginLeft:"auto",color:"#2a2f4a",display:"flex",gap:8 }}>
-        <span><span style={{color:"#7c6af7"}}>{stats.visible}</span>/<span style={{color:"#3a4060"}}>{stats.total}</span> nœuds</span>
-        <span><span style={{color:"#3ecfcf"}}>{stats.visibleEdges}</span> liens</span>
+        <span><span style={{color:"#7c6af7"}}>{stats.visible}</span>/<span style={{color:"#3a4060"}}>{stats.total}</span> nodes</span>
+        <span><span style={{color:"#3ecfcf"}}>{stats.visibleEdges}</span> edges</span>
         {stats.orphanCount > 0 && !filters.hideOrphans && (
-          <span style={{color:"#f77c6a66"}}>{stats.orphanCount} orphelins</span>
+          <span style={{color:"#f77c6a66"}}>{stats.orphanCount} orphans</span>
         )}
       </div>
     </div>
@@ -580,6 +743,7 @@ function FToggle({ active, onChange, label, badge, activeColor="#7c6af7" }) {
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App({ graphUrl }) {
   const [graph, setGraph] = useState(null);
+  const [refReport, setRefReport] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [affectedIds, setAffectedIds] = useState([]);
   const [focusedIds, setFocusedIds] = useState([]);
@@ -587,7 +751,7 @@ export default function App({ graphUrl }) {
   const [tab, setTab] = useState("node");
   const [viewMode, setViewMode] = useState("clusters");
   const [expandedClusters, setExpandedClusters] = useState(new Set());
-  const [filters, setFilters] = useState({ hideOrphans:false, minScore:0, topN:999, cluster:"" });
+  const [filters, setFilters] = useState({ hideOrphans:false, minScore:0, topN:999, cluster:"", refactorOnly:false });
   const [loaded, setLoaded] = useState(false);
   const fileRef = useRef();
   const hasAutoLoadedRef = useRef(false);
@@ -597,12 +761,12 @@ export default function App({ graphUrl }) {
   const loadGraph = useCallback((jsonStr) => {
     try {
       const g = parseGraph(JSON.parse(jsonStr));
-      setGraph(g);
+      setGraph(refReport ? enrichGraphWithRefactors(g, refReport) : g);
       setSelectedId(null); setAffectedIds([]); setFocusedIds([]); setSearch("");
-      setFilters({ hideOrphans:false, minScore:0, topN:999, cluster:"" });
+      setFilters({ hideOrphans:false, minScore:0, topN:999, cluster:"", refactorOnly:false });
       setExpandedClusters(new Set());
-    } catch(e) { alert("JSON invalide : "+e.message); }
-  }, []);
+    } catch(e) { alert("Invalid JSON: "+e.message); }
+  }, [refReport]);
 
   // Auto-load graph from API when a URL is provided (used by `spec-gen view`)
   useEffect(() => {
@@ -614,6 +778,18 @@ export default function App({ graphUrl }) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const text = await res.text();
         loadGraph(text);
+
+        // Best-effort: load refactor priorities if available
+        try {
+          const refRes = await fetch("/api/refactor-priorities");
+          if (refRes.ok) {
+            const report = await refRes.json();
+            setRefReport(report);
+            setGraph(g => g ? enrichGraphWithRefactors(g, report) : g);
+          }
+        } catch {
+          // ignore, viewer still works without refactors
+        }
       } catch (e) {
         // Fall back to manual upload UI; errors are shown in console.
         // eslint-disable-next-line no-console
@@ -639,6 +815,10 @@ export default function App({ graphUrl }) {
       ? graph.nodes.filter(n => n.cluster.name === filters.cluster)
       : graph.nodes;
 
+    if (filters.refactorOnly) {
+      nodes = nodes.filter(n => n.refactor);
+    }
+
     if (filters.hideOrphans) nodes = nodes.filter(n => connectedIds.has(n.id));
     if (filters.minScore > 0) nodes = nodes.filter(n => n.score >= filters.minScore);
 
@@ -651,10 +831,20 @@ export default function App({ graphUrl }) {
     const vset = new Set(nodes.map(n=>n.id));
     const edges = graph.edges.filter(e => vset.has(e.source) && vset.has(e.target));
 
+    const refactorTotal = graph.refactorStats?.withIssues ?? graph.nodes.filter(n => n.refactor).length;
+    const refactorVisible = nodes.filter(n => n.refactor).length;
+
     return {
       visibleNodes: nodes,
       visibleEdges: edges,
-      filterStats: { total:graph.nodes.length, visible:nodes.length, visibleEdges:edges.length, orphanCount },
+      filterStats: {
+        total: graph.nodes.length,
+        visible: nodes.length,
+        visibleEdges: edges.length,
+        orphanCount,
+        refactorTotal,
+        refactorVisible,
+      },
     };
   }, [graph, filters]);
 
@@ -689,6 +879,17 @@ export default function App({ graphUrl }) {
     if (!selectedId) return [];
     return visibleEdges.filter(e => e.source === selectedId || e.target === selectedId);
   }, [selectedId, visibleEdges]);
+
+  // All nodes that should be "lit" when a node is selected (direct neighbors + blast radius)
+  const linkedIds = useMemo(() => {
+    if (!selectedId) return new Set();
+    const set = new Set([selectedId, ...affectedIds]);
+    visibleEdges.forEach(e => {
+      if (e.source === selectedId) set.add(e.target);
+      if (e.target === selectedId) set.add(e.source);
+    });
+    return set;
+  }, [selectedId, affectedIds, visibleEdges]);
   const stats = graph?.statistics || {};
   const clusterNames = graph?.clusters.map(c=>c.name) || [];
 
@@ -704,9 +905,9 @@ export default function App({ graphUrl }) {
       >
         <div style={{ fontSize:32,marginBottom:14,color:"#7c6af7" }}>⬡</div>
         <div style={{ fontSize:12,color:"#8890b0",marginBottom:6 }}>
-          Glisse un <code style={{color:"#7c6af7"}}>dependency-graph.json</code>
+          Drop a <code style={{color:"#7c6af7"}}>dependency-graph.json</code>
         </div>
-        <div style={{ fontSize:10,color:"#3a3f5c" }}>ou clique pour parcourir</div>
+        <div style={{ fontSize:10,color:"#3a3f5c" }}>or click to browse</div>
       </div>
       <input ref={fileRef} type="file" accept=".json" style={{display:"none"}} onChange={handleFile}/>
     </div>
@@ -756,11 +957,13 @@ export default function App({ graphUrl }) {
               clusters={graph.clusters.filter(cl => !filters.cluster || cl.name===filters.cluster)}
               edges={visibleEdges}
               nodes={visibleNodes}
+              allNodes={graph.nodes.filter(n => !filters.cluster || n.cluster.name===filters.cluster)}
               expandedClusters={expandedClusters}
               onToggle={toggleCluster}
               onSelectNode={handleSelect}
               selectedId={selectedId}
               affectedIds={affectedIds}
+              linkedIds={linkedIds}
             />
           ) : (
             <FlatGraph
@@ -770,11 +973,13 @@ export default function App({ graphUrl }) {
               affectedIds={affectedIds}
               focusedIds={focusedIds}
               onSelect={handleSelect}
+              refactorOnly={filters.refactorOnly}
+              linkedIds={linkedIds}
             />
           )}
           {!selectedId && (
             <div style={{ position:"absolute",bottom:12,left:"50%",transform:"translateX(-50%)",fontSize:9,color:"#181c38",letterSpacing:"0.1em",pointerEvents:"none",whiteSpace:"nowrap" }}>
-              {viewMode==="clusters" ? "CLIC CLUSTER → EXPAND  ·  CLIC NŒUD → INSPECTER" : "CLIC NŒUD → INSPECTER"}
+              {viewMode==="clusters" ? "CLICK CLUSTER → EXPAND  ·  CLICK NODE → INSPECT" : "CLICK NODE → INSPECT"}
             </div>
           )}
         </div>
@@ -790,14 +995,14 @@ export default function App({ graphUrl }) {
           <div style={{ flex:1,overflow:"auto",padding:13 }}>
 
             {/* NODE */}
-            {tab==="node"&&!selectedNode&&<Hint>Sélectionne un nœud pour l'inspecter.</Hint>}
+            {tab==="node"&&!selectedNode&&<Hint>Select a node to inspect it.</Hint>}
             {tab==="node"&&selectedNode&&(
               <div>
                 <div style={{ fontSize:12,fontWeight:700,color:"#e0e4f0",marginBottom:2 }}>{selectedNode.label}</div>
                 <div style={{ fontSize:8,color:"#3a3f5c",marginBottom:9,wordBreak:"break-all",lineHeight:1.7 }}>{selectedNode.path}</div>
                 <Row label="ext" value={<Chip color={extColor(selectedNode.ext)}>{selectedNode.ext||"—"}</Chip>}/>
-                <Row label="lignes" value={selectedNode.lines}/>
-                <Row label="taille" value={`${(selectedNode.size/1024).toFixed(1)} KB`}/>
+                <Row label="lines" value={selectedNode.lines}/>
+                <Row label="size" value={`${(selectedNode.size/1024).toFixed(1)} KB`}/>
                 <Row label="score" value={<span style={{color:"#7c6af7",fontWeight:700}}>{selectedNode.score}</span>}/>
                 <Row label="cluster" value={<Chip color={selectedNode.cluster.color}>{selectedNode.cluster.name}</Chip>}/>
                 <div style={{ display:"flex",gap:4,marginTop:8,flexWrap:"wrap" }}>
@@ -818,15 +1023,39 @@ export default function App({ graphUrl }) {
                     ))}
                   </>
                 )}
-                <SL>Métriques</SL>
+                <SL>Metrics</SL>
                 {[["inDegree","↙"],["outDegree","↗"],["pageRank","PR"],["betweenness","⋈"]].map(([k,s])=>(
                   <Row key={k} label={`${s} ${k}`} value={typeof selectedNode.metrics[k]==="number"?selectedNode.metrics[k].toFixed(3):"-"}/>
                 ))}
+                {selectedNode.refactor && (
+                  <>
+                    <SL>Refactor</SL>
+                    <Row
+                      label="Functions affected"
+                      value={selectedNode.refactor.functions}
+                    />
+                    <Row
+                      label="Max priority"
+                      value={
+                        <span style={{color:selectedNode.refactor.maxPriority>=5?"#f97373":"#fbbf24",fontWeight:700}}>
+                          {selectedNode.refactor.maxPriority.toFixed(1)}
+                        </span>
+                      }
+                    />
+                    <div style={{ marginTop:6, display:"flex", flexWrap:"wrap", gap:4 }}>
+                      {selectedNode.refactor.issues.map((iss) => (
+                        <Chip key={iss} color="#f97373">
+                          {iss.replace(/_/g," ")}
+                        </Chip>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
             {/* LINKS */}
-            {tab==="links"&&!selectedId&&<Hint>Sélectionne un nœud pour voir ses imports/exports directs.</Hint>}
+            {tab==="links"&&!selectedId&&<Hint>Select a node to see its direct imports/exports.</Hint>}
             {tab==="links"&&selectedId&&(
               <div>
                 {/* imports (edges where this node is source) */}
@@ -835,8 +1064,8 @@ export default function App({ graphUrl }) {
                   const inEdges  = selectedEdges.filter(e=>e.target===selectedId);
                   return (
                     <>
-                      <SL>Importe ({outEdges.length})</SL>
-                      {outEdges.length===0&&<div style={{color:"#2a2f4a",fontSize:9}}>Aucun import.</div>}
+                      <SL>Imports ({outEdges.length})</SL>
+                      {outEdges.length===0&&<div style={{color:"#2a2f4a",fontSize:9}}>No imports.</div>}
                       {outEdges.map((e,i)=>{
                         const tn = graph.nodes.find(n=>n.id===e.target);
                         return (
@@ -855,8 +1084,8 @@ export default function App({ graphUrl }) {
                           </div>
                         );
                       })}
-                      <SL>Importé par ({inEdges.length})</SL>
-                      {inEdges.length===0&&<div style={{color:"#2a2f4a",fontSize:9}}>Pas importé par d'autres fichiers visibles.</div>}
+                      <SL>Imported by ({inEdges.length})</SL>
+                      {inEdges.length===0&&<div style={{color:"#2a2f4a",fontSize:9}}>Not imported by any visible files.</div>}
                       {inEdges.map((e,i)=>{
                         const sn = graph.nodes.find(n=>n.id===e.source);
                         return (
@@ -882,14 +1111,14 @@ export default function App({ graphUrl }) {
             )}
 
             {/* BLAST */}
-            {tab==="blast"&&!selectedId&&<Hint>Sélectionne un nœud pour calculer l'impact downstream.</Hint>}
+            {tab==="blast"&&!selectedId&&<Hint>Select a node to compute downstream impact.</Hint>}
             {tab==="blast"&&selectedId&&(
               <div>
                 <div style={{ fontSize:9,color:"#8890b0",marginBottom:10 }}>
-                  Modifier <span style={{color:"#7c6af7"}}>{selectedNode?.label}</span> impacte :
+                  Modifying <span style={{color:"#7c6af7"}}>{selectedNode?.label}</span> impacts:
                 </div>
                 {affectedIds.length===0
-                  ?<div style={{color:"#2a2f4a",fontSize:9}}>Aucun nœud downstream visible.</div>
+                  ?<div style={{color:"#2a2f4a",fontSize:9}}>No visible downstream nodes.</div>
                   :affectedIds.map(id=>{
                     const n=graph.nodes.find(x=>x.id===id);
                     return (
@@ -905,7 +1134,7 @@ export default function App({ graphUrl }) {
                 <div style={{ marginTop:10,padding:"8px 10px",background:"#0c0e20",borderRadius:5,border:"1px solid #1a1f38" }}>
                   <div style={{fontSize:8,color:"#3a3f5c",marginBottom:2}}>BLAST RADIUS</div>
                   <div style={{fontSize:22,fontWeight:700,color:affectedIds.length>8?"#f77c6a":affectedIds.length>3?"#f7c76a":"#7c6af7"}}>
-                    {affectedIds.length} <span style={{fontSize:10,fontWeight:400,color:"#3a3f5c"}}>nœuds</span>
+                    {affectedIds.length} <span style={{fontSize:10,fontWeight:400,color:"#3a3f5c"}}>nodes</span>
                   </div>
                 </div>
               </div>
@@ -914,15 +1143,15 @@ export default function App({ graphUrl }) {
             {/* INFO */}
             {tab==="info"&&(
               <div>
-                <SL>Statistiques</SL>
+                <SL>Statistics</SL>
                 {[["Nodes",stats.nodeCount],["Edges",stats.edgeCount],["Clusters",stats.clusterCount],["Cycles",stats.cycleCount],["Avg degree",stats.avgDegree?.toFixed(2)],["Density",stats.density?.toFixed(4)]].map(([l,v])=>(
                   <Row key={l} label={l} value={v??"-"}/>
                 ))}
-                <SL>Filtres actifs</SL>
-                <Row label="Nœuds visibles" value={<span style={{color:"#7c6af7"}}>{filterStats.visible}</span>}/>
-                <Row label="Liens visibles" value={<span style={{color:"#3ecfcf"}}>{filterStats.visibleEdges}</span>}/>
-                <Row label="Orphelins" value={filterStats.orphanCount}/>
-                <SL>Top 10 par score</SL>
+                <SL>Active filters</SL>
+                <Row label="Visible nodes" value={<span style={{color:"#7c6af7"}}>{filterStats.visible}</span>}/>
+                <Row label="Visible edges" value={<span style={{color:"#3ecfcf"}}>{filterStats.visibleEdges}</span>}/>
+                <Row label="Orphans" value={filterStats.orphanCount}/>
+                <SL>Top 10 by score</SL>
                 {(graph.rankings.byImportance||[]).slice(0,10).map((fid,i)=>{
                   const n=graph.nodes.find(x=>x.id===fid); if(!n) return null;
                   return (
@@ -941,7 +1170,7 @@ export default function App({ graphUrl }) {
 
           {/* Cluster legend — clickable to filter */}
           <div style={{ padding:"9px 13px",borderTop:"1px solid #0f1224",flexShrink:0 }}>
-            <div style={{ fontSize:8,color:"#1e2240",letterSpacing:"0.08em",marginBottom:5 }}>CLUSTERS · clic pour filtrer</div>
+            <div style={{ fontSize:8,color:"#1e2240",letterSpacing:"0.08em",marginBottom:5 }}>CLUSTERS · click to filter</div>
             <div style={{ display:"flex",flexWrap:"wrap",gap:5 }}>
               {graph.clusters.map(cl=>(
                 <div key={cl.id}
