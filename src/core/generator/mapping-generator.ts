@@ -169,6 +169,48 @@ export class MappingGenerator {
           functions,
         });
       }
+
+      // Sub-spec operations: map each sub-component's operations to its callee function
+      for (const sub of service.subSpecs ?? []) {
+        // The callee is a direct LLM-identified function name — prefer exact match
+        const calleeRefs = exportIndex.get(sub.callee) ?? [];
+
+        for (const op of sub.operations ?? []) {
+          const functions: FunctionRef[] = [];
+
+          // 1. LLM-provided callee — direct lookup
+          if (calleeRefs.length > 0) {
+            for (const ref of calleeRefs) {
+              functions.push({ ...ref, confidence: 'llm' });
+              mappedFunctionNames.add(`${ref.name}::${ref.file}`);
+            }
+          }
+
+          // 2. Heuristic fallback on operation name
+          if (functions.length === 0) {
+            const scored: Array<{ ref: FunctionRef; score: number }> = [];
+            for (const [name, refs] of exportIndex) {
+              const score = similarityScore(op.name, name);
+              if (score >= 0.7) {
+                for (const ref of refs) scored.push({ ref, score });
+              }
+            }
+            scored.sort((a, b) => b.score - a.score);
+            for (const { ref } of scored.slice(0, 2)) {
+              functions.push({ ...ref, confidence: 'heuristic' });
+              mappedFunctionNames.add(`${ref.name}::${ref.file}`);
+            }
+          }
+
+          mappings.push({
+            requirement: op.name,
+            service: `${service.name}/${sub.name}`,
+            domain,
+            specFile,
+            functions,
+          });
+        }
+      }
     }
 
     // Orphan functions: exported, non-type, not referenced in any mapping

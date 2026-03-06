@@ -19,6 +19,19 @@ export default tseslint.config(
     },
   },
   {
+    files: ['src/viewer/**/*.jsx', 'src/viewer/**/*.js'],
+    languageOptions: {
+      parserOptions: {
+        ecmaVersion: 'latest',
+        ecmaFeatures: { jsx: true },
+        sourceType: 'module',
+      },
+    },
+    rules: {
+      'no-console': 'off',
+    },
+  },
+  {
     ignores: ['dist/**', 'node_modules/**', 'examples/**', '*.config.js', '*.config.ts'],
   }
 );

@@ -36,8 +36,8 @@ const extColor = (ext) => EXT_COLOR[ext] || '#64748b';
 function parseSpecRequirements(mdText) {
   const reqs = {};
   if (!mdText) return reqs;
-  // Split on "### Requirement:" headings and index by exact heading title.
-  const sections = mdText.split(/^###\s+Requirement:\s*/m);
+  // Split on "### Requirement:" and "#### Requirement:" headings (sub-specs use 4 hashes).
+  const sections = mdText.split(/^#{3,4}\s+Requirement:\s*/m);
   for (let i = 1; i < sections.length; i++) {
     const lines = sections[i].split('\n');
     const rawTitle = lines[0].trim();
@@ -2172,10 +2172,6 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
               (() => {
                 // Find all matching entries for this node's path
                 const nodePath = normalizePath(selectedNode?.path || selectedId);
-                // Try several path normalizations for fuzzy matching
-                const matches = Object.entries(mapping).find(
-                  ([k]) => nodePath.endsWith(k) || k.endsWith(nodePath) || nodePath === k
-                );
                 // Collect all unique requirements for this file
                 const entries = [];
                 for (const [k, list] of Object.entries(mapping)) {
@@ -2258,7 +2254,7 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
                             </span>
                           </div>
                           {/* Spec body */}
-                          {req ? (
+                          {req?.body ? (
                             <div
                               style={{
                                 padding: '7px 9px',
@@ -2298,8 +2294,9 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
                             </div>
                           ) : (
                             <div style={{ padding: '7px 9px', fontSize: 8, color: '#2a2f4a' }}>
-                              Spec body not found — load the matching{' '}
-                              <code style={{ color: '#7c6af7' }}>spec.md</code>.
+                              {req
+                                ? 'Requirement title mismatch — spec section not found in the spec file.'
+                                : <>Spec not loaded — run <code style={{ color: '#7c6af7' }}>spec-gen view</code> or load <code style={{ color: '#7c6af7' }}>spec.md</code> manually.</>}
                             </div>
                           )}
                           {/* Service */}

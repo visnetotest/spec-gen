@@ -219,7 +219,7 @@ export const viewCommand = new Command('view')
 
                       // Split into Requirement sections and find the one that matches reqName exactly
                       // We will compare titles case-insensitively but otherwise match the title text directly.
-                      const sections = content.split(/^###\s+Requirement:\s*/m);
+                      const sections = content.split(/^#{3,4}\s+Requirement:\s*/m);
                       let found = false;
                       for (let i = 1; i < sections.length; i++) {
                         const lines = sections[i].split('\n');
