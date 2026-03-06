@@ -79,9 +79,23 @@ const mockCreateLLMService = vi.mocked(createLLMService);
 const ROOT = '/test/project';
 const MOCK_CONFIG = {
   version: '1.0.0',
+  projectType: 'nodejs' as const,
   openspecPath: './openspec',
+  analysis: {
+    maxFiles: 1000,
+    includePatterns: ['**/*.ts', '**/*.js', '**/*.py'],
+    excludePatterns: ['node_modules', '**/*.test.*', '**/*.spec.*'],
+  },
+  generation: {
+    provider: undefined,
+    model: undefined,
+    openaiCompatBaseUrl: undefined,
+    skipSslVerify: false,
+    domains: [],
+  },
   llm: {},
-  generation: { provider: undefined, model: undefined, openaiCompatBaseUrl: undefined, skipSslVerify: false, domains: [] },
+  createdAt: new Date().toISOString(),
+  lastRun: null,
 };
 const MOCK_REPO_STRUCTURE = { projectType: 'nodejs', architecture: { pattern: 'layered' }, domains: [], frameworks: [], statistics: { analyzedFiles: 5, totalFiles: 5 } };
 const MOCK_LLM_CONTEXT = {
@@ -118,7 +132,7 @@ function setupMocks() {
     if (p.includes('dependency-graph')) return Promise.resolve(JSON.stringify({ statistics: { nodeCount: 0, edgeCount: 0, clusterCount: 0, cycleCount: 0, avgDegree: 0 } }));
     return Promise.resolve('{}');
   });
-  mockCreateLLMService.mockReturnValue(MOCK_LLM_SERVICE as ReturnType<typeof createLLMService>);
+  mockCreateLLMService.mockReturnValue(MOCK_LLM_SERVICE as unknown as ReturnType<typeof createLLMService>);
 
   vi.mocked(SpecGenerationPipeline).mockImplementation(function(this: unknown) {
     Object.assign(this as object, { run: vi.fn().mockResolvedValue(MOCK_PIPELINE_RESULT) });

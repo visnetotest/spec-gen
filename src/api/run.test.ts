@@ -191,7 +191,7 @@ function setupMocks({ configExists = false, analysisRecent = false } = {}) {
   });
 
   // Generation mocks
-  mockCreateLLMService.mockReturnValue(MOCK_LLM_SERVICE as ReturnType<typeof createLLMService>);
+  mockCreateLLMService.mockReturnValue(MOCK_LLM_SERVICE as unknown as ReturnType<typeof createLLMService>);
   vi.mocked(SpecGenerationPipeline).mockImplementation(function(this: unknown) {
     Object.assign(this as object, { run: vi.fn().mockResolvedValue(MOCK_PIPELINE_RESULT) });
   });

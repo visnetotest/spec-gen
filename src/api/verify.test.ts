@@ -54,13 +54,15 @@ const MOCK_CONFIG = { version: '1.0.0', openspecPath: './openspec' };
 const MOCK_DEP_GRAPH = { statistics: { nodeCount: 5, edgeCount: 3, clusterCount: 1, cycleCount: 0, avgDegree: 0.6 } };
 const MOCK_VERIFY_REPORT = {
   timestamp: new Date().toISOString(),
+  specVersion: '1.0.0',
+  sampledFiles: 3,
+  passedFiles: 3,
   overallConfidence: 0.85,
-  sampleCount: 3,
-  passCount: 3,
-  failCount: 0,
-  byDomain: [],
-  issues: [],
-  recommendations: [],
+  domainBreakdown: [],
+  commonGaps: [],
+  recommendation: 'ready' as const,
+  suggestedImprovements: [],
+  results: [],
 };
 const MOCK_LLM_SERVICE = {
   completeJSON: vi.fn(),
@@ -82,7 +84,7 @@ function setupMocks() {
     if (p.includes('generation-report')) return Promise.resolve(JSON.stringify({ filesWritten: [] }));
     return Promise.resolve('{}');
   });
-  mockCreateLLMService.mockReturnValue(MOCK_LLM_SERVICE as ReturnType<typeof createLLMService>);
+  mockCreateLLMService.mockReturnValue(MOCK_LLM_SERVICE as unknown as ReturnType<typeof createLLMService>);
 
   vi.mocked(SpecVerificationEngine).mockImplementation(function(this: unknown) {
     Object.assign(this as object, {
@@ -151,7 +153,7 @@ describe('specGenVerify', () => {
 
       expect(result.report).toBeDefined();
       expect(result.report.overallConfidence).toBe(0.85);
-      expect(result.report.sampleCount).toBe(3);
+      expect(result.report.sampledFiles).toBe(3);
     });
 
     it('returns non-zero duration', async () => {

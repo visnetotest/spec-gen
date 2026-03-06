@@ -91,7 +91,7 @@ function setupMocks() {
   mockAccess.mockResolvedValue(undefined);
   mockReadFile.mockResolvedValue('{}');
   mockIsGitRepository.mockResolvedValue(true);
-  mockGetChangedFiles.mockResolvedValue({ files: MOCK_CHANGED_FILES, resolvedBase: 'main' } as Awaited<ReturnType<typeof getChangedFiles>>);
+  mockGetChangedFiles.mockResolvedValue({ files: MOCK_CHANGED_FILES, resolvedBase: 'main', hasUnstagedChanges: false, currentBranch: 'main' } as Awaited<ReturnType<typeof getChangedFiles>>);
   mockBuildSpecMap.mockResolvedValue(MOCK_SPEC_MAP);
   mockBuildADRMap.mockResolvedValue(MOCK_ADR_MAP);
   mockDetectDrift.mockResolvedValue(MOCK_DRIFT_RESULT);
@@ -133,7 +133,7 @@ describe('specGenDrift', () => {
 
   describe('no changed files', () => {
     it('returns empty result without running drift detection', async () => {
-      mockGetChangedFiles.mockResolvedValue({ files: [], resolvedBase: 'main' } as Awaited<ReturnType<typeof getChangedFiles>>);
+      mockGetChangedFiles.mockResolvedValue({ files: [], resolvedBase: 'main', hasUnstagedChanges: false, currentBranch: 'main' } as Awaited<ReturnType<typeof getChangedFiles>>);
 
       const result = await specGenDrift({ rootPath: ROOT });
 
@@ -178,7 +178,7 @@ describe('specGenDrift', () => {
         path: `src/file${i}.ts`, status: 'modified' as const,
         additions: 1, deletions: 0, isTest: false, isConfig: false, isGenerated: false, extension: '.ts',
       }));
-      mockGetChangedFiles.mockResolvedValue({ files: manyFiles, resolvedBase: 'main' } as Awaited<ReturnType<typeof getChangedFiles>>);
+      mockGetChangedFiles.mockResolvedValue({ files: manyFiles, resolvedBase: 'main', hasUnstagedChanges: false, currentBranch: 'main' } as Awaited<ReturnType<typeof getChangedFiles>>);
 
       await specGenDrift({ rootPath: ROOT, maxFiles: 5 });
 
