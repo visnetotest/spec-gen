@@ -1794,6 +1794,15 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
     setSkeletonData(null);
   }, []);
 
+  // Escape key: deselect + collapse
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') clearSelection(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [clearSelection]);
+
+  const selectedNode = graph?.nodes.find((n) => n.id === selectedId);
+
   // Fetch skeleton when skeleton tab is active and a node is selected
   const selectedPath = selectedNode?.path ?? null;
   useEffect(() => {
@@ -1804,15 +1813,6 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
       .then(d => { setSkeletonData(d); setSkeletonLoading(false); })
       .catch(() => setSkeletonLoading(false));
   }, [tab, selectedPath]);
-
-  // Escape key: deselect + collapse
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') clearSelection(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [clearSelection]);
-
-  const selectedNode = graph?.nodes.find((n) => n.id === selectedId);
   const selectedEdges = useMemo(() => {
     if (!selectedId) return [];
     return visibleEdges.filter((e) => e.source === selectedId || e.target === selectedId);
