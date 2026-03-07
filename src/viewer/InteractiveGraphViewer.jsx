@@ -610,13 +610,13 @@ function FlatGraph({
           );
         })}
       </g>
-      <foreignObject x="8" y="8" width="82" height="22" style={{ pointerEvents: 'all' }}>
+      <foreignObject x="8" y="8" width="52" height="20" style={{ pointerEvents: 'all' }}>
         <button
           onClick={reset}
           title="Reset pan/zoom (or double-click background)"
           style={{
             fontSize: 8,
-            padding: '3px 8px',
+            padding: '2px 6px',
             background: '#0d0f22',
             border: `1px solid ${transform.x !== 0 || transform.y !== 0 || transform.k !== 1 ? '#7c6af7' : '#1a1f38'}`,
             borderRadius: 4,
@@ -1028,14 +1028,14 @@ function ClusterGraph({
           );
         })}
       </g>
-      <foreignObject x="8" y="8" width="175" height="22" style={{ pointerEvents: 'all' }}>
-        <div style={{ display: 'flex', gap: 4 }}>
+      <foreignObject x="8" y="8" width="52" height="44" style={{ pointerEvents: 'all' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
           <button
             onClick={reset}
             title="Reset pan/zoom (or double-click background)"
             style={{
               fontSize: 8,
-              padding: '3px 8px',
+              padding: '2px 6px',
               background: '#0d0f22',
               border: `1px solid ${transform.x !== 0 || transform.y !== 0 || transform.k !== 1 ? '#7c6af7' : '#1a1f38'}`,
               borderRadius: 4,
@@ -1045,14 +1045,14 @@ function ClusterGraph({
               letterSpacing: '0.05em',
             }}
           >
-            ⌖ reset view
+            ⌖ view
           </button>
           <button
             onClick={onClear}
             title="Clear selection and collapse all clusters (Escape)"
             style={{
               fontSize: 8,
-              padding: '3px 8px',
+              padding: '2px 6px',
               background: '#0d0f22',
               border: `1px solid ${hasSelection ? '#7c6af7' : '#1a1f38'}`,
               borderRadius: 4,
@@ -1062,7 +1062,7 @@ function ClusterGraph({
               letterSpacing: '0.05em',
             }}
           >
-            × clear selection
+            × clear
           </button>
         </div>
       </foreignObject>
