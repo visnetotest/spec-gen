@@ -340,6 +340,11 @@ function usePanZoom() {
 
   const reset = useCallback(() => setTransform({ x: 0, y: 0, k: 1 }), []);
 
+  // Pan so that SVG point (svgX, svgY) is centred in the 900×540 viewBox at current zoom
+  const panToCenter = useCallback((svgX, svgY) => {
+    setTransform((t) => ({ ...t, x: 450 - svgX * t.k, y: 270 - svgY * t.k }));
+  }, []);
+
   // Expose whether the last mousedown→mouseup was a drag (to suppress click on nodes)
   const isDrag = useCallback(() => hasDragged.current, []);
 
@@ -352,6 +357,7 @@ function usePanZoom() {
     onMouseLeave,
     onDblClick,
     reset,
+    panToCenter,
     isDrag,
   };
 }
@@ -655,6 +661,7 @@ function ClusterGraph({
     onMouseLeave,
     onDblClick,
     reset,
+    panToCenter,
     isDrag,
   } = usePanZoom();
 
@@ -663,6 +670,30 @@ function ClusterGraph({
   useEffect(() => {
     reset();
   }, [clusterKey]);
+
+  // When a cluster is expanded, pan to keep its member nodes in view
+  const prevExpandedRef = useRef(new Set());
+  useEffect(() => {
+    for (const cid of expandedClusters) {
+      if (prevExpandedRef.current.has(cid)) continue; // already was expanded
+      const cp = clusterPos[cid];
+      if (!cp) continue;
+      const members = (allNodes || nodes).filter((n) => n.cluster.id === cid);
+      const r = 55 + members.length * 9 + 20; // same radius as nodeLayouts + padding
+      // Check whether the bounding box fits inside the 900×540 viewBox at current zoom
+      // screen_coord = svg_coord * k + transform.{x,y}
+      const { k, x: tx, y: ty } = transform;
+      const inView =
+        (cp.x - r) * k + tx >= 0 &&
+        (cp.x + r) * k + tx <= 900 &&
+        (cp.y - r) * k + ty >= 0 &&
+        (cp.y + r) * k + ty <= 540;
+      if (!inView) {
+        panToCenter(cp.x, cp.y);
+      }
+    }
+    prevExpandedRef.current = new Set(expandedClusters);
+  }, [expandedClusters]);
 
   const nodeLayouts = useMemo(() => {
     const layouts = {};
