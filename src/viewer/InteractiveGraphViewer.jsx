@@ -2021,6 +2021,23 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
           >
             ⌕
           </span>
+          {search && (
+            <span
+              onClick={() => handleSearch('')}
+              style={{
+                position: 'absolute',
+                right: focusedIds.length > 0 ? 22 : 8,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                fontSize: 10,
+                color: '#3a3f5c',
+                cursor: 'pointer',
+                lineHeight: 1,
+              }}
+            >
+              ×
+            </span>
+          )}
           {focusedIds.length > 0 && (
             <span
               style={{
