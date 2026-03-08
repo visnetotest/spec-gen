@@ -166,11 +166,15 @@ export interface ChatAgentResult {
 
 const MAX_ITERATIONS = 8;
 
-const SYSTEM_PROMPT = `You are a code analysis assistant embedded in a dependency diagram viewer.
+function buildSystemPrompt(directory: string): string {
+  return `You are a code analysis assistant embedded in a dependency diagram viewer.
+The project directory is: ${directory}
 You have access to tools that query the codebase's static analysis data.
+When calling tools, always pass directory="${directory}" — never ask the user for it.
 When the user asks a question, use the appropriate tools to gather information,
 then synthesise a clear, concise answer. Always explain what the highlighted files/functions are.
 Keep replies focused and actionable. Use markdown for code and lists.`;
+}
 
 async function executeTool(
   toolMap: Map<string, (typeof CHAT_TOOLS)[number]>,
@@ -213,7 +217,7 @@ async function runOpenAILoop(
   const allFilePaths: string[] = [];
 
   const history: OAIMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: buildSystemPrompt(directory) },
     ...messages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
   ];
 
@@ -289,7 +293,7 @@ async function runGeminiLoop(
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     const body = {
-      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      systemInstruction: { parts: [{ text: buildSystemPrompt(directory) }] },
       contents,
       tools: [{ function_declarations: functionDeclarations }],
       tool_config: { function_calling_config: { mode: 'AUTO' } },
@@ -380,7 +384,7 @@ async function runAnthropicLoop(
       body: JSON.stringify({
         model: cfg.model,
         max_tokens: 4096,
-        system: SYSTEM_PROMPT,
+        system: buildSystemPrompt(directory),
         tools,
         messages: history,
       }),
