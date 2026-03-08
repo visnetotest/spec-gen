@@ -117,8 +117,9 @@ async function resolveProviderConfig(directory: string): Promise<ProviderConfig>
     cfgModel    = cfg?.generation?.model;
   } catch { /* ignore */ }
 
-  // Priority: env key signals > config provider > fallback openai-compat
-  if (geminiKey || cfgProvider === 'gemini') {
+  // Priority: explicit config provider > env key signals > fallback openai-compat
+  // Explicit config always wins so users can override a globally-set env key.
+  if (cfgProvider === 'gemini' || (!cfgProvider && geminiKey)) {
     return {
       kind:    'gemini',
       baseUrl: 'https://generativelanguage.googleapis.com/v1beta/models',
@@ -127,7 +128,7 @@ async function resolveProviderConfig(directory: string): Promise<ProviderConfig>
     };
   }
 
-  if (anthropicKey || cfgProvider === 'anthropic') {
+  if (cfgProvider === 'anthropic' || (!cfgProvider && anthropicKey)) {
     return {
       kind:    'anthropic',
       baseUrl: 'https://api.anthropic.com/v1',
