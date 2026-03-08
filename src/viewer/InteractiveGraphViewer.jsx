@@ -261,6 +261,37 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
     return () => window.removeEventListener('keydown', onKey);
   }, [clearSelection]);
 
+  // Auto-expand clusters when their nodes are highlighted by the chatbot
+  useEffect(() => {
+    if (!graph || focusedIds.length === 0) return;
+    
+    const clusterIdsToExpand = new Set();
+    const validNodeIds = [];
+    focusedIds.forEach((fid) => {
+      const node = graph.nodes.find((n) => n.id === fid);
+      if (node) {
+        if (node.cluster?.id) clusterIdsToExpand.add(node.cluster.id);
+        validNodeIds.push(fid);
+      }
+    });
+    
+    if (clusterIdsToExpand.size > 0) {
+      setExpandedClusters((prev) => {
+        const next = new Set(prev);
+        clusterIdsToExpand.forEach((cid) => next.add(cid));
+        return next;
+      });
+    }
+
+    // Select the first highlighted node to show details and prominent highlight
+    if (validNodeIds.length > 0) {
+      const id = validNodeIds[0];
+      setSelectedId(id);
+      setAffectedIds(computeBlast(visibleEdges, id));
+      setTab(mapping ? 'spec' : 'node');
+    }
+  }, [focusedIds, graph, visibleEdges, mapping, computeBlast]);
+
   const selectedNode = graph?.nodes.find((n) => n.id === selectedId);
 
   const selectedPath = selectedNode?.path ?? null;
