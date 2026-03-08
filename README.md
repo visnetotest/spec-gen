@@ -108,28 +108,17 @@ Compares git changes against spec file mappings to find divergence:
 ## Architecture
 
 ```mermaid
-graph TD
+graph LR
     subgraph CLI["CLI Layer"]
         CMD[spec-gen commands]
     end
 
-    subgraph API["Programmatic API"]
-        API_INIT[specGenInit]
-        API_ANALYZE[specGenAnalyze]
-        API_GENERATE[specGenGenerate]
-        API_VERIFY[specGenVerify]
-        API_DRIFT[specGenDrift]
-        API_RUN[specGenRun]
-    end
-
     subgraph Core["Core Layer"]
         direction TB
-
         subgraph Init["Init"]
             PD[Project Detector]
             CM[Config Manager]
         end
-
         subgraph Analyze["Analyze -- no API key"]
             FW[File Walker] --> SS[Significance Scorer]
             SS --> IP[Import Parser]
@@ -137,41 +126,32 @@ graph TD
             DG --> RM[Repository Mapper]
             RM --> AG[Artifact Generator]
         end
-
         subgraph Generate["Generate -- API key required"]
             SP[Spec Pipeline] --> FF[OpenSpec Formatter]
             FF --> OW[OpenSpec Writer]
             SP --> ADR[ADR Generator]
         end
-
         subgraph Verify["Verify -- API key required"]
             VE[Verification Engine]
         end
-
         subgraph Drift["Drift -- no API key"]
             GA[Git Analyzer] --> SM[Spec Mapper]
             SM --> DD[Drift Detector]
             DD -.->|optional| LE[LLM Enhancer]
         end
-
+        subgraph Chat["MCP Server"]
+            MCP[Tool Handlers]
+            CHAT_AGENT[Chat Agent]
+        end
         LLM[LLM Service -- Anthropic / OpenAI / Compatible]
     end
 
-    CMD --> API_INIT & API_ANALYZE & API_GENERATE & API_VERIFY & API_DRIFT
-    API_RUN --> API_INIT & API_ANALYZE & API_GENERATE
-
-    API_INIT --> Init
-    API_ANALYZE --> Analyze
-    API_GENERATE --> Generate
-    API_VERIFY --> Verify
-    API_DRIFT --> Drift
-
-    Generate --> LLM
-    Verify --> LLM
-    LE -.-> LLM
-
-    AG -->|analysis artifacts| SP
-    AG -->|analysis artifacts| VE
+    subgraph Viewer["Interactive Graph Viewer"]
+        direction TB
+        VIEW[React App]
+        VIEW_API[/api/ endpoints/]
+        VIEW_CHAT[Diagram Chat Panel]
+    end
 
     subgraph Output["Output"]
         SPECS[openspec/specs/*.md]
@@ -180,10 +160,25 @@ graph TD
         REPORT[Drift Report]
     end
 
+    CMD --> Init & Analyze & Generate & Verify & Drift
+    CMD -.->|spec-gen view| VIEW
+
+    Init --> Analyze
+    Analyze --> Generate & Verify & Drift
+    Generate --> LLM
+    Verify --> LLM
+    LE -.-> LLM
+    CHAT_AGENT --> LLM
+
+    AG -->|artifacts| SP & VE & Chat & VIEW_API
     OW --> SPECS
     ADR --> ADRS
     AG --> ANALYSIS
     DD --> REPORT
+
+    VIEW_API --> AG
+    VIEW_CHAT --> MCP
+    MCP --> Chat
 ```
 
 ## Drift Detection
