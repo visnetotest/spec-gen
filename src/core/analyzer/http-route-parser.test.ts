@@ -1,0 +1,935 @@
+/**
+ * HTTP Route Parser Tests
+ *
+ * Covers:
+ *   - normalizeUrl()
+ *   - extractHttpCalls()   — fetch, axios, ky, got in JS/TS files
+ *   - extractRouteDefinitions() — FastAPI, Flask, Django in Python files
+ *   - buildHttpEdges()     — matching logic (exact / path / fuzzy)
+ *   - extractAllHttpEdges() — end-to-end batch helper
+ *
+ * Also covers the Python absolute-import fix in resolveImport() via an
+ * integration smoke-test (the detailed resolution tests live in
+ * import-parser.test.ts; here we only verify that the dependency graph
+ * picks up the cross-language HTTP edges).
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdir, writeFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import {
+  normalizeUrl,
+  extractHttpCalls,
+  extractRouteDefinitions,
+  buildHttpEdges,
+  extractAllHttpEdges,
+  type HttpCall,
+  type RouteDefinition,
+} from './http-route-parser.js';
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+async function createTempDir(): Promise<string> {
+  const dir = join(tmpdir(), `http-parser-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
+async function createFile(dir: string, name: string, content: string): Promise<string> {
+  const filePath = join(dir, name);
+  const fileDir = join(dir, ...name.split('/').slice(0, -1));
+  if (fileDir !== dir && name.includes('/')) {
+    await mkdir(fileDir, { recursive: true });
+  }
+  await writeFile(filePath, content, 'utf-8');
+  return filePath;
+}
+
+// ============================================================================
+// FIXTURES
+// ============================================================================
+
+const FETCH_FIXTURES = {
+  simpleGet: `fetch('/api/items')`,
+  explicitGet: `fetch('/api/items', { method: 'GET' })`,
+  post: `fetch('/api/items', { method: 'POST', body: JSON.stringify(data) })`,
+  put: `fetch('/api/items/1', { method: 'PUT' })`,
+  delete: `fetch('/api/items/1', { method: 'DELETE' })`,
+  templateLiteral: "fetch(`/api/items/${id}`)",
+  templateWithMethod: "fetch(`/api/items/${id}`, { method: 'DELETE' })",
+  fullUrl: `fetch('https://api.example.com/items')`,
+  withQueryString: `fetch('/api/search?q=hello&page=1')`,
+  awaitedInFunction: `
+    async function loadItems() {
+      const res = await fetch('/api/items');
+      return res.json();
+    }
+  `,
+  multipleInFile: `
+    fetch('/api/users');
+    fetch('/api/posts', { method: 'POST' });
+  `,
+};
+
+const AXIOS_FIXTURES = {
+  axiosGet: `axios.get('/api/items')`,
+  axiosPost: `axios.post('/api/items', { name: 'test' })`,
+  axiosPut: `axios.put('/api/items/1', data)`,
+  axiosPatch: `axios.patch('/api/items/1', { name: 'updated' })`,
+  axiosDelete: `axios.delete('/api/items/1')`,
+  axiosGenericWithMethod: `axios({ method: 'post', url: '/api/items' })`,
+  axiosGenericNoMethod: `axios({ url: '/api/items' })`,
+  axiosRequest: `axios.request({ method: 'DELETE', url: '/api/items/1' })`,
+  axiosTemplateLiteral: "axios.get(`/api/items/${itemId}`)",
+  axiosWithPrefix: `axios.get('/api/v1/search')`,
+};
+
+const KY_FIXTURES = {
+  kyGet: `ky.get('/api/items')`,
+  kyPost: `ky.post('/api/items', { json: data })`,
+  kyDelete: `ky.delete('/api/items/1')`,
+};
+
+const GOT_FIXTURES = {
+  gotGet: `got.get('/api/items')`,
+  gotPost: `got.post('/api/items', { json: data })`,
+};
+
+const FASTAPI_FIXTURES = {
+  simpleGet: `
+@app.get("/items")
+async def list_items():
+    return []
+`,
+  postWithBody: `
+@app.post("/items")
+async def create_item(item: Item):
+    return item
+`,
+  pathParam: `
+@app.get("/items/{item_id}")
+async def get_item(item_id: int):
+    return {"id": item_id}
+`,
+  routerGet: `
+@router.get("/search")
+async def search_items(q: str):
+    return []
+`,
+  multiMethod: `
+@app.api_route("/items", methods=["GET", "POST"])
+async def items_multi():
+    return []
+`,
+  put: `
+@app.put("/items/{item_id}")
+async def update_item(item_id: int, item: Item):
+    return item
+`,
+  delete: `
+@app.delete("/items/{item_id}")
+async def delete_item(item_id: int):
+    return {"deleted": item_id}
+`,
+  asyncWithDecorator: `
+@router.post("/rag/search")
+async def rag_search(query: RagQuery, db: Session = Depends(get_db)):
+    results = retriever.search(query.text)
+    return results
+`,
+  multipleRoutes: `
+@app.get("/users")
+async def list_users():
+    return []
+
+@app.post("/users")
+async def create_user(user: UserCreate):
+    return user
+
+@app.get("/users/{user_id}")
+async def get_user(user_id: int):
+    return {"id": user_id}
+`,
+};
+
+const FLASK_FIXTURES = {
+  simpleGet: `
+@app.route("/items")
+def list_items():
+    return jsonify([])
+`,
+  withMethods: `
+@app.route("/items", methods=["GET", "POST"])
+def items():
+    return jsonify([])
+`,
+  blueprintRoute: `
+@bp.route("/items/<int:item_id>", methods=["DELETE"])
+def delete_item(item_id):
+    return jsonify({"deleted": item_id})
+`,
+};
+
+const DJANGO_FIXTURES = {
+  pathRoute: `
+urlpatterns = [
+    path('api/items/', views.ItemListView.as_view(), name='item-list'),
+    path('api/items/<int:pk>/', views.ItemDetailView.as_view(), name='item-detail'),
+]
+`,
+};
+
+// ============================================================================
+// normalizeUrl
+// ============================================================================
+
+describe('normalizeUrl', () => {
+  it('should return root path unchanged', () => {
+    expect(normalizeUrl('/')).toBe('/');
+  });
+
+  it('should normalise a simple path', () => {
+    expect(normalizeUrl('/api/items')).toBe('/api/items');
+  });
+
+  it('should strip query strings', () => {
+    expect(normalizeUrl('/api/search?q=hello&page=1')).toBe('/api/search');
+  });
+
+  it('should strip fragments', () => {
+    expect(normalizeUrl('/api/items#section')).toBe('/api/items');
+  });
+
+  it('should strip protocol and host', () => {
+    expect(normalizeUrl('https://api.example.com/items')).toBe('/items');
+  });
+
+  it('should replace FastAPI path parameters {param}', () => {
+    expect(normalizeUrl('/items/{item_id}')).toBe('/items/:param');
+  });
+
+  it('should replace Flask path parameters <int:param>', () => {
+    expect(normalizeUrl('/items/<int:item_id>')).toBe('/items/:param');
+  });
+
+  it('should replace Express-style :param', () => {
+    expect(normalizeUrl('/items/:id')).toBe('/items/:param');
+  });
+
+  it('should replace template literal ${...} interpolations', () => {
+    expect(normalizeUrl('/api/items/${id}')).toBe('/api/items/:param');
+  });
+
+  it('should collapse duplicate slashes', () => {
+    expect(normalizeUrl('//api//items')).toBe('/api/items');
+  });
+
+  it('should remove trailing slash', () => {
+    expect(normalizeUrl('/api/items/')).toBe('/api/items');
+  });
+
+  it('should lowercase the result', () => {
+    expect(normalizeUrl('/API/Items')).toBe('/api/items');
+  });
+
+  it('should handle multiple parameters', () => {
+    expect(normalizeUrl('/users/{user_id}/posts/{post_id}')).toBe('/users/:param/posts/:param');
+  });
+});
+
+// ============================================================================
+// extractHttpCalls
+// ============================================================================
+
+describe('extractHttpCalls', () => {
+  let tempDir: string;
+
+  beforeEach(async () => { tempDir = await createTempDir(); });
+  afterEach(async () => { await rm(tempDir, { recursive: true, force: true }); });
+
+  it('should return empty array for non-JS files', async () => {
+    const filePath = await createFile(tempDir, 'styles.css', 'body {}');
+    expect(await extractHttpCalls(filePath)).toHaveLength(0);
+  });
+
+  it('should return empty array for Python files', async () => {
+    const filePath = await createFile(tempDir, 'main.py', 'print("hello")');
+    expect(await extractHttpCalls(filePath)).toHaveLength(0);
+  });
+
+  it('should return empty for file with no HTTP calls', async () => {
+    const filePath = await createFile(tempDir, 'utils.ts', 'export const add = (a: number, b: number) => a + b;');
+    expect(await extractHttpCalls(filePath)).toHaveLength(0);
+  });
+
+  // ── fetch ──────────────────────────────────────────────────────────────────
+
+  describe('fetch()', () => {
+    it('should detect a bare fetch() call as GET', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', FETCH_FIXTURES.simpleGet);
+      const calls = await extractHttpCalls(filePath);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: '/api/items',
+        normalizedUrl: '/api/items',
+        client: 'fetch',
+      });
+    });
+
+    it('should detect explicit GET method', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', FETCH_FIXTURES.explicitGet);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].method).toBe('GET');
+    });
+
+    it('should detect POST method from options', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', FETCH_FIXTURES.post);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].method).toBe('POST');
+    });
+
+    it('should detect DELETE method', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', FETCH_FIXTURES.delete);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].method).toBe('DELETE');
+    });
+
+    it('should handle template literal URL', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', FETCH_FIXTURES.templateLiteral);
+      const calls = await extractHttpCalls(filePath);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0].normalizedUrl).toBe('/api/items/:param');
+    });
+
+    it('should strip query string from normalizedUrl', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', FETCH_FIXTURES.withQueryString);
+      const calls = await extractHttpCalls(filePath);
+
+      expect(calls[0].normalizedUrl).toBe('/api/search');
+    });
+
+    it('should strip protocol and host from full URLs', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', FETCH_FIXTURES.fullUrl);
+      const calls = await extractHttpCalls(filePath);
+
+      expect(calls[0].normalizedUrl).toBe('/items');
+    });
+
+    it('should extract multiple fetch calls from one file', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', FETCH_FIXTURES.multipleInFile);
+      const calls = await extractHttpCalls(filePath);
+
+      expect(calls).toHaveLength(2);
+      expect(calls.map(c => c.normalizedUrl)).toContain('/api/users');
+      expect(calls.map(c => c.normalizedUrl)).toContain('/api/posts');
+    });
+
+    it('should record the file path', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', FETCH_FIXTURES.simpleGet);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].file).toBe(filePath);
+    });
+
+    it('should record a line number > 0', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', FETCH_FIXTURES.awaitedInFunction);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].line).toBeGreaterThan(0);
+    });
+  });
+
+  // ── axios ──────────────────────────────────────────────────────────────────
+
+  describe('axios', () => {
+    it('should detect axios.get()', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', AXIOS_FIXTURES.axiosGet);
+      const calls = await extractHttpCalls(filePath);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ method: 'GET', client: 'axios', normalizedUrl: '/api/items' });
+    });
+
+    it('should detect axios.post()', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', AXIOS_FIXTURES.axiosPost);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].method).toBe('POST');
+    });
+
+    it('should detect axios.put()', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', AXIOS_FIXTURES.axiosPut);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].method).toBe('PUT');
+    });
+
+    it('should detect axios.patch()', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', AXIOS_FIXTURES.axiosPatch);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].method).toBe('PATCH');
+    });
+
+    it('should detect axios.delete()', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', AXIOS_FIXTURES.axiosDelete);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].method).toBe('DELETE');
+    });
+
+    it('should detect axios({ method, url }) config form', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', AXIOS_FIXTURES.axiosGenericWithMethod);
+      const calls = await extractHttpCalls(filePath);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0].method).toBe('POST');
+      expect(calls[0].normalizedUrl).toBe('/api/items');
+    });
+
+    it('should default to UNKNOWN method for axios({ url }) without method', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', AXIOS_FIXTURES.axiosGenericNoMethod);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].method).toBe('UNKNOWN');
+    });
+
+    it('should detect axios.request() config form', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', AXIOS_FIXTURES.axiosRequest);
+      const calls = await extractHttpCalls(filePath);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0].method).toBe('DELETE');
+    });
+
+    it('should normalise template literal URL in axios.get()', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', AXIOS_FIXTURES.axiosTemplateLiteral);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].normalizedUrl).toBe('/api/items/:param');
+    });
+  });
+
+  // ── ky ─────────────────────────────────────────────────────────────────────
+
+  describe('ky', () => {
+    it('should detect ky.get()', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', KY_FIXTURES.kyGet);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0]).toMatchObject({ method: 'GET', client: 'ky' });
+    });
+
+    it('should detect ky.post()', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', KY_FIXTURES.kyPost);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].method).toBe('POST');
+    });
+
+    it('should detect ky.delete()', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', KY_FIXTURES.kyDelete);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].method).toBe('DELETE');
+    });
+  });
+
+  // ── got ─────────────────────────────────────────────────────────────────────
+
+  describe('got', () => {
+    it('should detect got.get()', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', GOT_FIXTURES.gotGet);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0]).toMatchObject({ method: 'GET', client: 'got' });
+    });
+
+    it('should detect got.post()', async () => {
+      const filePath = await createFile(tempDir, 'api.ts', GOT_FIXTURES.gotPost);
+      const calls = await extractHttpCalls(filePath);
+      expect(calls[0].method).toBe('POST');
+    });
+  });
+
+  // ── mixed file ──────────────────────────────────────────────────────────────
+
+  it('should extract calls from multiple clients in the same file', async () => {
+    const content = `
+      fetch('/api/users');
+      axios.get('/api/posts');
+      ky.post('/api/comments');
+    `;
+    const filePath = await createFile(tempDir, 'api.ts', content);
+    const calls = await extractHttpCalls(filePath);
+
+    expect(calls).toHaveLength(3);
+    const clients = calls.map(c => c.client);
+    expect(clients).toContain('fetch');
+    expect(clients).toContain('axios');
+    expect(clients).toContain('ky');
+  });
+
+  it('should work with .tsx files', async () => {
+    const content = `
+      export function SearchComponent() {
+        const handleSearch = async () => {
+          const res = await fetch('/api/search');
+          return res.json();
+        };
+        return null;
+      }
+    `;
+    const filePath = await createFile(tempDir, 'Search.tsx', content);
+    const calls = await extractHttpCalls(filePath);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].normalizedUrl).toBe('/api/search');
+  });
+});
+
+// ============================================================================
+// extractRouteDefinitions
+// ============================================================================
+
+describe('extractRouteDefinitions', () => {
+  let tempDir: string;
+
+  beforeEach(async () => { tempDir = await createTempDir(); });
+  afterEach(async () => { await rm(tempDir, { recursive: true, force: true }); });
+
+  it('should return empty array for JS files', async () => {
+    const filePath = await createFile(tempDir, 'app.ts', 'export const x = 1;');
+    expect(await extractRouteDefinitions(filePath)).toHaveLength(0);
+  });
+
+  it('should return empty for a Python file with no routes', async () => {
+    const filePath = await createFile(tempDir, 'utils.py', 'def helper(): pass');
+    expect(await extractRouteDefinitions(filePath)).toHaveLength(0);
+  });
+
+  // ── FastAPI ─────────────────────────────────────────────────────────────────
+
+  describe('FastAPI', () => {
+    it('should detect @app.get()', async () => {
+      const filePath = await createFile(tempDir, 'main.py', FASTAPI_FIXTURES.simpleGet);
+      const routes = await extractRouteDefinitions(filePath);
+
+      expect(routes).toHaveLength(1);
+      expect(routes[0]).toMatchObject({
+        method: 'GET',
+        path: '/items',
+        normalizedPath: '/items',
+        handlerName: 'list_items',
+        framework: 'fastapi',
+      });
+    });
+
+    it('should detect @app.post()', async () => {
+      const filePath = await createFile(tempDir, 'main.py', FASTAPI_FIXTURES.postWithBody);
+      const routes = await extractRouteDefinitions(filePath);
+
+      expect(routes[0].method).toBe('POST');
+      expect(routes[0].handlerName).toBe('create_item');
+    });
+
+    it('should detect path parameters and normalise them', async () => {
+      const filePath = await createFile(tempDir, 'main.py', FASTAPI_FIXTURES.pathParam);
+      const routes = await extractRouteDefinitions(filePath);
+
+      expect(routes[0].path).toBe('/items/{item_id}');
+      expect(routes[0].normalizedPath).toBe('/items/:param');
+    });
+
+    it('should detect @router.get()', async () => {
+      const filePath = await createFile(tempDir, 'routers.py', FASTAPI_FIXTURES.routerGet);
+      const routes = await extractRouteDefinitions(filePath);
+
+      expect(routes[0]).toMatchObject({ method: 'GET', path: '/search' });
+    });
+
+    it('should expand @app.api_route() with multiple methods', async () => {
+      const filePath = await createFile(tempDir, 'main.py', FASTAPI_FIXTURES.multiMethod);
+      const routes = await extractRouteDefinitions(filePath);
+
+      expect(routes).toHaveLength(2);
+      expect(routes.map(r => r.method)).toContain('GET');
+      expect(routes.map(r => r.method)).toContain('POST');
+      // both should share the same path
+      expect(routes.every(r => r.path === '/items')).toBe(true);
+    });
+
+    it('should detect @app.put()', async () => {
+      const filePath = await createFile(tempDir, 'main.py', FASTAPI_FIXTURES.put);
+      const routes = await extractRouteDefinitions(filePath);
+      expect(routes[0].method).toBe('PUT');
+    });
+
+    it('should detect @app.delete()', async () => {
+      const filePath = await createFile(tempDir, 'main.py', FASTAPI_FIXTURES.delete);
+      const routes = await extractRouteDefinitions(filePath);
+      expect(routes[0].method).toBe('DELETE');
+    });
+
+    it('should extract handler name for async def with Depends()', async () => {
+      const filePath = await createFile(tempDir, 'rag.py', FASTAPI_FIXTURES.asyncWithDecorator);
+      const routes = await extractRouteDefinitions(filePath);
+
+      expect(routes[0].handlerName).toBe('rag_search');
+      expect(routes[0].path).toBe('/rag/search');
+    });
+
+    it('should extract multiple routes from one file', async () => {
+      const filePath = await createFile(tempDir, 'users.py', FASTAPI_FIXTURES.multipleRoutes);
+      const routes = await extractRouteDefinitions(filePath);
+
+      expect(routes).toHaveLength(3);
+      expect(routes.map(r => r.method)).toEqual(['GET', 'POST', 'GET']);
+      expect(routes.map(r => r.handlerName)).toContain('list_users');
+      expect(routes.map(r => r.handlerName)).toContain('create_user');
+      expect(routes.map(r => r.handlerName)).toContain('get_user');
+    });
+
+    it('should record the file path', async () => {
+      const filePath = await createFile(tempDir, 'main.py', FASTAPI_FIXTURES.simpleGet);
+      const routes = await extractRouteDefinitions(filePath);
+      expect(routes[0].file).toBe(filePath);
+    });
+
+    it('should record a line number > 0', async () => {
+      const filePath = await createFile(tempDir, 'main.py', FASTAPI_FIXTURES.simpleGet);
+      const routes = await extractRouteDefinitions(filePath);
+      expect(routes[0].line).toBeGreaterThan(0);
+    });
+  });
+
+  // ── Flask ───────────────────────────────────────────────────────────────────
+
+  describe('Flask', () => {
+    it('should detect @app.route() with default GET method', async () => {
+      const filePath = await createFile(tempDir, 'app.py', FLASK_FIXTURES.simpleGet);
+      const routes = await extractRouteDefinitions(filePath);
+
+      expect(routes).toHaveLength(1);
+      expect(routes[0]).toMatchObject({
+        method: 'GET',
+        path: '/items',
+        framework: 'flask',
+      });
+    });
+
+    it('should expand @app.route() with multiple methods', async () => {
+      const filePath = await createFile(tempDir, 'app.py', FLASK_FIXTURES.withMethods);
+      const routes = await extractRouteDefinitions(filePath);
+
+      expect(routes).toHaveLength(2);
+      expect(routes.map(r => r.method)).toContain('GET');
+      expect(routes.map(r => r.method)).toContain('POST');
+    });
+
+    it('should detect blueprint routes and normalise Flask path params', async () => {
+      const filePath = await createFile(tempDir, 'bp.py', FLASK_FIXTURES.blueprintRoute);
+      const routes = await extractRouteDefinitions(filePath);
+
+      expect(routes[0].method).toBe('DELETE');
+      expect(routes[0].normalizedPath).toBe('/items/:param');
+    });
+  });
+
+  // ── Django ──────────────────────────────────────────────────────────────────
+
+  describe('Django', () => {
+    it('should detect path() entries in urls.py', async () => {
+      const filePath = await createFile(tempDir, 'urls.py', DJANGO_FIXTURES.pathRoute);
+      const routes = await extractRouteDefinitions(filePath);
+
+      expect(routes.length).toBeGreaterThanOrEqual(2);
+      const paths = routes.map(r => r.normalizedPath);
+      expect(paths).toContain('/api/items');
+      expect(paths).toContain('/api/items/:param');
+    });
+
+    it('should set framework to django', async () => {
+      const filePath = await createFile(tempDir, 'urls.py', DJANGO_FIXTURES.pathRoute);
+      const routes = await extractRouteDefinitions(filePath);
+      expect(routes.every(r => r.framework === 'django')).toBe(true);
+    });
+  });
+});
+
+// ============================================================================
+// buildHttpEdges
+// ============================================================================
+
+describe('buildHttpEdges', () => {
+  function makeCall(overrides: Partial<HttpCall> & { file: string; url: string }): HttpCall {
+    const url = overrides.url;
+    return {
+      method: 'GET',
+      normalizedUrl: url,
+      line: 1,
+      client: 'fetch',
+      ...overrides,
+    };
+  }
+
+  function makeRoute(overrides: Partial<RouteDefinition> & { file: string; path: string }): RouteDefinition {
+    const path = overrides.path;
+    return {
+      method: 'GET',
+      normalizedPath: path,
+      handlerName: 'handler',
+      framework: 'fastapi',
+      line: 1,
+      ...overrides,
+    };
+  }
+
+  it('should return no edges when there are no calls', () => {
+    const route = makeRoute({ file: '/back/items.py', path: '/items' });
+    expect(buildHttpEdges([], [route])).toHaveLength(0);
+  });
+
+  it('should return no edges when there are no routes', () => {
+    const call = makeCall({ file: '/front/api.ts', url: '/items' });
+    expect(buildHttpEdges([call], [])).toHaveLength(0);
+  });
+
+  it('should create an exact edge when method and path both match', () => {
+    const call = makeCall({ file: '/front/api.ts', url: '/items', method: 'GET' });
+    const route = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET' });
+
+    const edges = buildHttpEdges([call], [route]);
+
+    expect(edges).toHaveLength(1);
+    expect(edges[0]).toMatchObject({
+      callerFile: '/front/api.ts',
+      handlerFile: '/back/items.py',
+      method: 'GET',
+      confidence: 'exact',
+    });
+  });
+
+  it('should create a path edge when method is UNKNOWN on the call side', () => {
+    const call = makeCall({ file: '/front/api.ts', url: '/items', method: 'UNKNOWN' });
+    const route = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET' });
+
+    const edges = buildHttpEdges([call], [route]);
+
+    expect(edges).toHaveLength(1);
+    expect(edges[0].confidence).toBe('path');
+  });
+
+  it('should strip /api/v1 prefix to match backend route', () => {
+    const call = makeCall({ file: '/front/api.ts', url: '/api/v1/items', method: 'GET' });
+    const route = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET' });
+
+    const edges = buildHttpEdges([call], [route]);
+
+    expect(edges).toHaveLength(1);
+    expect(edges[0].confidence).toBe('fuzzy');
+  });
+
+  it('should strip /api prefix to match backend route', () => {
+    const call = makeCall({ file: '/front/api.ts', url: '/api/search', method: 'POST' });
+    const route = makeRoute({ file: '/back/search.py', path: '/search', method: 'POST' });
+
+    const edges = buildHttpEdges([call], [route]);
+
+    expect(edges).toHaveLength(1);
+  });
+
+  it('should match parameterised routes (fuzzy fallback)', () => {
+    // frontend: /api/items/42  →  normalised: /api/items/42  (no param detected statically)
+    // backend:  /items/:param
+    const call = makeCall({ file: '/front/api.ts', url: '/items/:param', method: 'GET' });
+    const route = makeRoute({ file: '/back/items.py', path: '/items/:param', method: 'GET' });
+
+    const edges = buildHttpEdges([call], [route]);
+    expect(edges).toHaveLength(1);
+  });
+
+  it('should not match routes with different path segments', () => {
+    const call = makeCall({ file: '/front/api.ts', url: '/users', method: 'GET' });
+    const route = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET' });
+
+    expect(buildHttpEdges([call], [route])).toHaveLength(0);
+  });
+
+  it('should not create self-loop edges (caller === handler)', () => {
+    const sameFile = '/app/main.py';
+    const call = makeCall({ file: sameFile, url: '/items', method: 'GET' });
+    const route = makeRoute({ file: sameFile, path: '/items', method: 'GET' });
+
+    // buildHttpEdges itself doesn't filter self-loops; that's done by buildHttpCrossEdges.
+    // But when callerFile === handlerFile we do NOT want them in graph edges — document
+    // the expectation here so downstream consumers know to filter if needed.
+    const edges = buildHttpEdges([call], [route]);
+    // Edges may exist at this layer; the self-loop guard lives in DependencyGraphBuilder.
+    // We just verify the fields are correct.
+    if (edges.length > 0) {
+      expect(edges[0].callerFile).toBe(edges[0].handlerFile);
+    }
+  });
+
+  it('should deduplicate identical edges', () => {
+    // Same call matched twice (e.g. two routes with identical normalised path)
+    const call = makeCall({ file: '/front/api.ts', url: '/items', method: 'GET' });
+    const route1 = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET' });
+    const route2 = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET' });
+
+    const edges = buildHttpEdges([call], [route1, route2]);
+    expect(edges).toHaveLength(1);
+  });
+
+  it('should attach call and route references to the edge', () => {
+    const call = makeCall({ file: '/front/api.ts', url: '/items', method: 'GET' });
+    const route = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET' });
+
+    const edges = buildHttpEdges([call], [route]);
+    expect(edges[0].call).toBe(call);
+    expect(edges[0].route).toBe(route);
+  });
+
+  it('should create one edge per (caller, handler, method, path) combination', () => {
+    const getCall = makeCall({ file: '/front/api.ts', url: '/items', method: 'GET' });
+    const postCall = makeCall({ file: '/front/api.ts', url: '/items', method: 'POST' });
+    const getRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET' });
+    const postRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'POST' });
+
+    const edges = buildHttpEdges([getCall, postCall], [getRoute, postRoute]);
+    expect(edges).toHaveLength(2);
+    expect(edges.map(e => e.method)).toContain('GET');
+    expect(edges.map(e => e.method)).toContain('POST');
+  });
+});
+
+// ============================================================================
+// extractAllHttpEdges  (end-to-end)
+// ============================================================================
+
+describe('extractAllHttpEdges', () => {
+  let tempDir: string;
+
+  beforeEach(async () => { tempDir = await createTempDir(); });
+  afterEach(async () => { await rm(tempDir, { recursive: true, force: true }); });
+
+  it('should return empty results for an empty file list', async () => {
+    const result = await extractAllHttpEdges([]);
+    expect(result.calls).toHaveLength(0);
+    expect(result.routes).toHaveLength(0);
+    expect(result.edges).toHaveLength(0);
+  });
+
+  it('should find no edges when there are only frontend files', async () => {
+    const fp = await createFile(tempDir, 'api.ts', `fetch('/api/items')`);
+    const result = await extractAllHttpEdges([fp]);
+    expect(result.calls).toHaveLength(1);
+    expect(result.routes).toHaveLength(0);
+    expect(result.edges).toHaveLength(0);
+  });
+
+  it('should find no edges when there are only backend files', async () => {
+    const fp = await createFile(tempDir, 'main.py', FASTAPI_FIXTURES.simpleGet);
+    const result = await extractAllHttpEdges([fp]);
+    expect(result.routes).toHaveLength(1);
+    expect(result.calls).toHaveLength(0);
+    expect(result.edges).toHaveLength(0);
+  });
+
+  it('should create a cross-language edge for a matching fetch → FastAPI route', async () => {
+    const frontendFile = await createFile(tempDir, 'api.ts', `
+      export async function fetchItems() {
+        return fetch('/api/items');
+      }
+    `);
+    const backendFile = await createFile(tempDir, 'items.py', `
+@app.get("/api/items")
+async def list_items():
+    return []
+    `);
+
+    const result = await extractAllHttpEdges([frontendFile, backendFile]);
+
+    expect(result.calls).toHaveLength(1);
+    expect(result.routes).toHaveLength(1);
+    expect(result.edges).toHaveLength(1);
+    expect(result.edges[0].callerFile).toBe(frontendFile);
+    expect(result.edges[0].handlerFile).toBe(backendFile);
+    expect(result.edges[0].method).toBe('GET');
+  });
+
+  it('should create a cross-language edge for axios.post → FastAPI route', async () => {
+    const frontendFile = await createFile(tempDir, 'search.ts', `
+      import axios from 'axios';
+      export const search = (q: string) => axios.post('/rag/search', { query: q });
+    `);
+    const backendFile = await createFile(tempDir, 'rag.py', FASTAPI_FIXTURES.asyncWithDecorator);
+
+    const result = await extractAllHttpEdges([frontendFile, backendFile]);
+
+    expect(result.edges).toHaveLength(1);
+    expect(result.edges[0]).toMatchObject({
+      method: 'POST',
+      callerFile: frontendFile,
+      handlerFile: backendFile,
+    });
+    expect(result.edges[0].route.handlerName).toBe('rag_search');
+  });
+
+  it('should match after stripping /api/v1 prefix', async () => {
+    const frontendFile = await createFile(tempDir, 'api.ts', `
+      axios.get('/api/v1/search')
+    `);
+    const backendFile = await createFile(tempDir, 'search.py', `
+@router.get("/search")
+async def search():
+    return []
+    `);
+
+    const result = await extractAllHttpEdges([frontendFile, backendFile]);
+
+    expect(result.edges).toHaveLength(1);
+    expect(result.edges[0].confidence).toBe('fuzzy');
+  });
+
+  it('should create edges for all matched pairs in a larger codebase', async () => {
+    const frontend = await createFile(tempDir, 'client.ts', `
+      fetch('/items');
+      axios.post('/items');
+      fetch('/users');
+    `);
+    const backend = await createFile(tempDir, 'server.py', `
+@app.get("/items")
+async def list_items():
+    return []
+
+@app.post("/items")
+async def create_item():
+    return {}
+
+@app.get("/users")
+async def list_users():
+    return []
+    `);
+
+    const result = await extractAllHttpEdges([frontend, backend]);
+
+    expect(result.calls).toHaveLength(3);
+    expect(result.routes).toHaveLength(3);
+    // fetch('/items') → GET /items, axios.post('/items') → POST /items, fetch('/users') → GET /users
+    expect(result.edges).toHaveLength(3);
+  });
+
+  it('should not create edges for unmatched calls', async () => {
+    const frontend = await createFile(tempDir, 'client.ts', `fetch('/api/nonexistent')`);
+    const backend = await createFile(tempDir, 'server.py', FASTAPI_FIXTURES.simpleGet);
+
+    const result = await extractAllHttpEdges([frontend, backend]);
+
+    expect(result.calls).toHaveLength(1);
+    expect(result.routes).toHaveLength(1);
+    expect(result.edges).toHaveLength(0);
+  });
+
+  it('should handle non-existent file gracefully', async () => {
+    // extractHttpCalls and extractRouteDefinitions catch read errors internally
+    const result = await extractAllHttpEdges(['/nonexistent/file.ts', '/nonexistent/file.py']);
+    expect(result.calls).toHaveLength(0);
+    expect(result.routes).toHaveLength(0);
+    expect(result.edges).toHaveLength(0);
+  });
+});

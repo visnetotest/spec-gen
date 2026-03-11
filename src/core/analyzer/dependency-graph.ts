@@ -7,6 +7,7 @@
  */
 
 import { ImportExportParser, resolveImport, type ExportInfo, type FileAnalysis } from './import-parser.js';
+import { extractAllHttpEdges, type HttpEdge } from './http-route-parser.js';
 import type { ScoredFile } from '../../types/index.js';
 
 // ============================================================================
@@ -37,6 +38,8 @@ export interface DependencyEdge {
   importedNames: string[];
   isTypeOnly: boolean;
   weight: number;
+  /** Present when this edge was derived from an HTTP call rather than a static import */
+  httpEdge?: HttpEdge;
 }
 
 /**
@@ -155,6 +158,9 @@ export class DependencyGraphBuilder {
     // Create edges from imports
     await this.buildEdges(files, analyses);
 
+    // Create cross-language edges from HTTP calls (fetch/axios → FastAPI routes)
+    await this.buildHttpCrossEdges(files);
+
     // Calculate metrics
     this.calculateDegrees();
     this.calculateBetweenness();
@@ -201,6 +207,43 @@ export class DependencyGraphBuilder {
   }
 
   /**
+   * Build cross-language edges by matching HTTP calls in JS/TS files to
+   * FastAPI/Flask/Django route definitions in Python files.
+   * Only creates edges between files that are already nodes in the graph.
+   */
+  private async buildHttpCrossEdges(files: ScoredFile[]): Promise<void> {
+    const fileSet = new Set(files.map(f => f.absolutePath));
+    const filePaths = Array.from(fileSet);
+
+    const { edges: httpEdges } = await extractAllHttpEdges(filePaths);
+
+    for (const httpEdge of httpEdges) {
+      // Both ends must be known nodes
+      if (!fileSet.has(httpEdge.callerFile) || !fileSet.has(httpEdge.handlerFile)) continue;
+      // Skip self-loops
+      if (httpEdge.callerFile === httpEdge.handlerFile) continue;
+
+      // Weight by confidence: exact=1.0, path=0.75, fuzzy=0.5
+      const weight =
+        httpEdge.confidence === 'exact' ? 1.0 :
+        httpEdge.confidence === 'path'  ? 0.75 : 0.5;
+
+      const edge: DependencyEdge = {
+        source: httpEdge.callerFile,
+        target: httpEdge.handlerFile,
+        importedNames: [httpEdge.route.handlerName],
+        isTypeOnly: false,
+        weight,
+        httpEdge,
+      };
+
+      this.edges.push(edge);
+      this.adjacencyList.get(httpEdge.callerFile)?.add(httpEdge.handlerFile);
+      this.reverseAdjacencyList.get(httpEdge.handlerFile)?.add(httpEdge.callerFile);
+    }
+  }
+
+  /**
    * Build edges from import relationships
    */
   private async buildEdges(
@@ -213,9 +256,16 @@ export class DependencyGraphBuilder {
       const analysis = analyses.get(file.absolutePath);
       if (!analysis) continue;
 
+      const isPythonFile = file.absolutePath.endsWith('.py') || file.absolutePath.endsWith('.pyw');
+
       for (const imp of analysis.imports) {
-        // Skip non-relative imports (packages, builtins)
-        if (!imp.isRelative) continue;
+        // Skip non-relative imports for JS/TS (those are always npm packages).
+        // For Python files we must NOT skip: `from services.retriever import X`
+        // is flagged isRelative=false but may resolve to a local module.
+        if (!imp.isRelative && !isPythonFile) continue;
+        // Even for Python, skip known builtins and third-party packages that
+        // will never resolve to a file inside the project.
+        if (!imp.isRelative && isPythonFile && imp.isBuiltin) continue;
 
         // Resolve the import to an absolute path
         const resolvedPath = await resolveImport(imp.source, file.absolutePath, {
