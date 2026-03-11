@@ -325,6 +325,9 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
   const displayClusters = graph
     ? (graph.structuralClusters ?? graph.clusters.filter((c) => c.internalEdges > 0))
     : [];
+  console.log('displayClusters', displayClusters);
+  console.log('graph.structuralClusters', graph?.structuralClusters);
+  console.log('graph.clusters', graph?.clusters);
   const clusterNames = displayClusters.map((c) => c.name);
 
   // ── Upload screen ─────────────────────────────────────────────────────────
