@@ -321,9 +321,9 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
 
   const stats = graph?.statistics || {};
   // Use structuralClusters (clusters with real internal edges) for all UI.
-  // Falls back to filtering by isStructural for graphs built before the field existed.
+  // Falls back to filtering by internalEdges for graphs built before the field existed.
   const displayClusters = graph
-    ? (graph.structuralClusters ?? graph.clusters.filter((c) => c.isStructural !== false && c.internalEdges > 0))
+    ? (graph.structuralClusters ?? graph.clusters.filter((c) => c.internalEdges > 0))
     : [];
   const clusterNames = displayClusters.map((c) => c.name);
 
