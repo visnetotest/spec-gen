@@ -86,8 +86,10 @@ npm run dev
 
 Scans your codebase using pure static analysis:
 - Walks the directory tree, respects .gitignore, scores files by significance
-- Parses imports and exports to build a dependency graph
-- Clusters related files into business domains automatically
+- Parses imports and exports to build a dependency graph (TypeScript, JavaScript, Python, Go, Rust, Ruby, Java)
+- Detects HTTP cross-language edges: matches `fetch`/`axios`/`ky`/`got` calls in JS/TS files to FastAPI/Flask/Django route definitions in Python files, creating cross-language dependency edges with `exact`, `path`, or `fuzzy` confidence
+- Resolves Python absolute imports (`from services.retriever import X`) to local files
+- Clusters related files into structural business domains automatically
 - Produces structured context that makes LLM generation more accurate
 
 **2. Generate** (API key required)
@@ -143,6 +145,8 @@ graph TD
             FW[File Walker] --> SS[Significance Scorer]
             SS --> IP[Import Parser]
             IP --> DG[Dependency Graph]
+            SS --> HR[HTTP Route Parser]
+            HR -->|cross-language edges| DG
             DG --> RM[Repository Mapper]
             RM --> AG[Artifact Generator]
         end
@@ -440,6 +444,7 @@ spec-gen drift [options]
   --json                 # JSON output
   --fail-on <severity>   # Exit non-zero threshold: error, warning, info
   --max-files <n>        # Max changed files to analyze (default: 100)
+  --verbose              # Show detailed issue information
   --install-hook         # Install pre-commit hook
   --uninstall-hook       # Remove pre-commit hook
 ```
@@ -455,6 +460,9 @@ spec-gen generate [options]
   --no-overwrite         # Skip existing files
   --adr                  # Also generate ADRs
   --adr-only             # Generate only ADRs
+  --reanalyze            # Force fresh analysis even if recent exists
+  --output-dir <path>    # Override openspec output location
+  -y, --yes              # Skip confirmation prompts
 ```
 
 ### Analyze Options
@@ -478,6 +486,7 @@ spec-gen verify [options]
   --threshold <0-1>      # Minimum score to pass (default: 0.7)
   --files <paths>        # Specific files to verify
   --domains <list>       # Only verify specific domains
+  --verbose              # Show detailed prediction vs actual comparison
   --json                 # JSON output
 ```
 
@@ -875,7 +884,7 @@ Static analysis output is stored in `.spec-gen/analysis/`:
 | File | Description |
 |------|-------------|
 | `repo-structure.json` | Project structure and metadata |
-| `dependency-graph.json` | Import/export relationships |
+| `dependency-graph.json` | Import/export relationships and HTTP cross-language edges (JS/TS → Python) |
 | `llm-context.json` | Context prepared for LLM (signatures, call graph) |
 | `dependencies.mermaid` | Visual dependency graph |
 | `SUMMARY.md` | Human-readable analysis summary |
@@ -1002,7 +1011,7 @@ spec-gen init && spec-gen analyze && spec-gen generate && spec-gen drift --insta
 spec-gen exposes a typed Node.js API for integration into other tools (like [OpenSpec CLI](https://github.com/Fission-AI/OpenSpec)). Every CLI command has a corresponding API function that returns structured results instead of printing to the console.
 
 ```bash
-npm install spec-gen
+npm install spec-gen-cli
 ```
 
 ```typescript
@@ -1062,11 +1071,11 @@ All functions accept an optional `onProgress` callback for status updates and th
 npm install          # Install dependencies
 npm run dev          # Development mode (watch)
 npm run build        # Build
-npm run test:run     # Run tests (1052 unit tests)
+npm run test:run     # Run tests (1526 unit tests)
 npm run typecheck    # Type check
 ```
 
-1052 unit tests covering static analysis, call graph, refactor analysis, spec mapping, drift detection, LLM enhancement, ADR generation, and the full CLI.
+1526 unit tests covering static analysis, call graph, refactor analysis, spec mapping, drift detection, LLM enhancement, ADR generation, and the full CLI.
 
 ## Links
 

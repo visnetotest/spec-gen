@@ -96,7 +96,6 @@ function createMockDepGraph(): DependencyGraphResult {
     edges: [],
     clusters: [],
     structuralClusters: [],
-    directoryClusters: [],
     rankings: {
       byImportance: [],
       byConnectivity: [],
@@ -109,6 +108,8 @@ function createMockDepGraph(): DependencyGraphResult {
     statistics: {
       nodeCount: 40,
       edgeCount: 60,
+      importEdgeCount: 60,
+      httpEdgeCount: 0,
       avgDegree: 3,
       density: 0.1,
       clusterCount: 3,

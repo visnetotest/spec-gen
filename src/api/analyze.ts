@@ -92,7 +92,6 @@ export async function specGenAnalyze(options: AnalyzeApiOptions = {}): Promise<A
             clusters: [],
             cycles: [],
             structuralClusters: [],
-            directoryClusters: [],
             rankings: {
               byImportance: [],
               byConnectivity: [],
@@ -104,6 +103,8 @@ export async function specGenAnalyze(options: AnalyzeApiOptions = {}): Promise<A
             statistics: {
               nodeCount: 0,
               edgeCount: 0,
+              importEdgeCount: 0,
+              httpEdgeCount: 0,
               clusterCount: 0,
               cycleCount: 0,
               avgDegree: 0,

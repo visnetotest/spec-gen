@@ -156,7 +156,11 @@ export async function specGenRun(options: RunApiOptions = {}): Promise<RunResult
 
     analyzeResult = {
       repoMap: repoStructure,
-      depGraph: depGraph ?? { nodes: [], edges: [], statistics: { nodeCount: 0, edgeCount: 0, clusterCount: 0, cycleCount: 0, avgDegree: 0 } },
+      depGraph: depGraph ?? {
+        nodes: [], edges: [], clusters: [], structuralClusters: [], cycles: [],
+        rankings: { byImportance: [], byConnectivity: [], clusterCenters: [], leafNodes: [], bridgeNodes: [], orphanNodes: [] },
+        statistics: { nodeCount: 0, edgeCount: 0, importEdgeCount: 0, httpEdgeCount: 0, avgDegree: 0, density: 0, clusterCount: 0, structuralClusterCount: 0, cycleCount: 0 },
+      },
       artifacts: { repoStructure } as AnalyzeResult['artifacts'],
       duration: 0,
     };

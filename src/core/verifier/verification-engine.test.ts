@@ -151,7 +151,6 @@ export function createUserService(): UserService {
       edges: [],
       clusters: [],
       structuralClusters: [],
-      directoryClusters: [],
       rankings: {
         byImportance: files.map(f => f.path),
         byConnectivity: files.map(f => f.path),
@@ -164,6 +163,8 @@ export function createUserService(): UserService {
       statistics: {
         nodeCount: files.length,
         edgeCount: 0,
+        importEdgeCount: 0,
+        httpEdgeCount: 0,
         avgDegree: 1,
         density: 0.1,
         clusterCount: 1,

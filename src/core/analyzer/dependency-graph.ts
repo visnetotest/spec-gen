@@ -94,12 +94,10 @@ export interface FileCluster {
 export interface DependencyGraphResult {
   nodes: DependencyNode[];
   edges: DependencyEdge[];
-  /** All clusters (structural + directory groups) */
+  /** All clusters (structural + directory groups). Use the `isStructural` flag to filter. */
   clusters: FileCluster[];
   /** Only clusters with internalEdges > 0 — worth highlighting visually */
   structuralClusters: FileCluster[];
-  /** Clusters with no internal edges — pure directory groupings */
-  directoryClusters: FileCluster[];
   rankings: {
     byImportance: string[];
     byConnectivity: string[];
@@ -112,6 +110,10 @@ export interface DependencyGraphResult {
   statistics: {
     nodeCount: number;
     edgeCount: number;
+    /** Edges derived from static imports */
+    importEdgeCount: number;
+    /** Edges derived from HTTP call→route matching */
+    httpEdgeCount: number;
     avgDegree: number;
     density: number;
     /** Total clusters including directory-only groups */
@@ -150,6 +152,7 @@ export class DependencyGraphBuilder {
   private edges: DependencyEdge[] = [];
   private adjacencyList: Map<string, Set<string>> = new Map();
   private reverseAdjacencyList: Map<string, Set<string>> = new Map();
+  private httpEdgeCount = 0;
   private parser: ImportExportParser;
   private options: Required<DependencyGraphOptions>;
 
@@ -173,6 +176,7 @@ export class DependencyGraphBuilder {
     this.edges = [];
     this.adjacencyList.clear();
     this.reverseAdjacencyList.clear();
+    this.httpEdgeCount = 0;
 
     // Parse all files and create nodes
     const analyses = await this.parseFiles(files);
@@ -230,14 +234,12 @@ export class DependencyGraphBuilder {
     const statistics = this.calculateStatistics(clusters, cycles);
 
     const structuralClusters = clusters.filter(c => c.isStructural);
-    const directoryClusters = clusters.filter(c => !c.isStructural);
 
     return {
       nodes: Array.from(this.nodes.values()),
       edges: this.edges,
       clusters,
       structuralClusters,
-      directoryClusters,
       rankings,
       cycles,
       statistics,
@@ -271,6 +273,14 @@ export class DependencyGraphBuilder {
     const fileSet = new Set(files.map(f => f.absolutePath));
     const filePaths = Array.from(fileSet);
 
+    // Skip HTTP edge detection entirely when there cannot be any cross-language
+    // edges: we need at least one JS/TS caller file AND one Python handler file.
+    const jsExts = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs']);
+    const pyExts = new Set(['.py', '.pyw']);
+    const hasJs = filePaths.some(fp => jsExts.has(fp.slice(fp.lastIndexOf('.')).toLowerCase()));
+    const hasPy = filePaths.some(fp => pyExts.has(fp.slice(fp.lastIndexOf('.')).toLowerCase()));
+    if (!hasJs || !hasPy) return;
+
     const { edges: httpEdges } = await extractAllHttpEdges(filePaths);
 
     for (const httpEdge of httpEdges) {
@@ -294,6 +304,7 @@ export class DependencyGraphBuilder {
       };
 
       this.edges.push(edge);
+      this.httpEdgeCount++;
       this.adjacencyList.get(httpEdge.callerFile)?.add(httpEdge.handlerFile);
       this.reverseAdjacencyList.get(httpEdge.handlerFile)?.add(httpEdge.callerFile);
     }
@@ -764,6 +775,8 @@ export class DependencyGraphBuilder {
     return {
       nodeCount,
       edgeCount,
+      importEdgeCount: edgeCount - this.httpEdgeCount,
+      httpEdgeCount: this.httpEdgeCount,
       avgDegree,
       density,
       clusterCount: clusters.length,

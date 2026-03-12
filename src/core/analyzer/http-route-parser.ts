@@ -165,11 +165,13 @@ export async function extractHttpCalls(filePath: string): Promise<HttpCall[]> {
 
   // Strip comments to avoid false matches.
   // The line-comment regex must NOT match `://` inside URLs — we only strip
-  // `//` that is preceded by whitespace, a comma, a semicolon, or the start
+  // `//` that is preceded by whitespace, punctuation, brackets, or the start
   // of the line (i.e. genuine JS/TS comments, not protocol separators).
+  // The character class intentionally includes ) and ] so that patterns like
+  // `fetch('/api/items') // comment` are correctly stripped.
   const clean = content
     .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[\s,;({])\/\/.*$/gm, '$1');
+    .replace(/(^|[\s,;()[\]{}])\/\/.*$/gm, '$1');
 
   const lines = content.split('\n'); // keep original for line numbers
 
@@ -380,6 +382,13 @@ export async function extractRouteDefinitions(filePath: string): Promise<RouteDe
   // ── Django urls.py ─────────────────────────────────────────────────────────
   // path('api/items/', views.ItemListView.as_view(), name='item-list'),
   // re_path(r'^api/items/(?P<pk>[0-9]+)/$', views.ItemDetailView.as_view()),
+  //
+  // NOTE: Django views handle HTTP method dispatch internally (via class-based
+  // views or decorators), so no method is declared in urls.py. All Django
+  // routes are stored with method='UNKNOWN', which means any frontend call
+  // matched against a Django route will receive confidence='path' at best —
+  // never 'exact'. This may produce false-positive edges when multiple HTTP
+  // methods share the same URL pattern. Filter by confidence if this matters.
   const djangoPathRegex =
     /\bpath\s*\(\s*r?(['"])(.*?)\1\s*,\s*([\w.]+)/gm;
   while ((m = djangoPathRegex.exec(clean)) !== null) {
@@ -547,10 +556,14 @@ function getLine(lines: string[], charOffset: number): number {
 /**
  * Given the line of a decorator, scan forward to find the next `def` name.
  * Handles multi-line decorators with up to 10 lines of lookahead.
+ *
+ * `decoratorLine` is 1-based (from getLine()), so we convert to a 0-based
+ * index before indexing into the `lines` array.
  */
 function extractNextDefName(lines: string[], decoratorLine: number): string {
-  const maxLook = Math.min(lines.length, decoratorLine + 10);
-  for (let i = decoratorLine; i < maxLook; i++) {
+  const start = decoratorLine - 1; // convert 1-based → 0-based
+  const maxLook = Math.min(lines.length, start + 10);
+  for (let i = start; i < maxLook; i++) {
     const defMatch = lines[i]?.match(/^\s*(?:async\s+)?def\s+(\w+)/);
     if (defMatch) return defMatch[1];
   }

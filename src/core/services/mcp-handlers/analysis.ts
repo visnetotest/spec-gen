@@ -92,6 +92,8 @@ export async function handleAnalyzeCodebase(
       analyzedFiles: repoMap.summary.analyzedFiles,
       depNodes: depGraph.statistics.nodeCount,
       depEdges: depGraph.statistics.edgeCount,
+      importEdges: depGraph.statistics.importEdgeCount,
+      httpCrossEdges: depGraph.statistics.httpEdgeCount,
       cycles: depGraph.statistics.cycleCount,
     },
     callGraph: cg

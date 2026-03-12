@@ -733,6 +733,13 @@ export class AnalysisArtifactGenerator {
       }
     }
 
+    // HTTP cross-language edges
+    if (depGraph.statistics.httpEdgeCount > 0) {
+      lines.push('');
+      lines.push(`**HTTP Cross-Language Edges**: ${depGraph.statistics.httpEdgeCount} edge(s) detected between JS/TS callers and Python route handlers`);
+      lines.push(`  (${depGraph.statistics.importEdgeCount} static import edges + ${depGraph.statistics.httpEdgeCount} HTTP edges = ${depGraph.statistics.edgeCount} total)`);
+    }
+
     // Orphans
     if (depGraph.rankings.orphanNodes.length > 0) {
       lines.push('');

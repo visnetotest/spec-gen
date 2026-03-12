@@ -703,8 +703,9 @@ export async function resolveImport(
 
   // For Python absolute imports resolve from rootDir, not fromDir,
   // because Python's module system uses sys.path (typically the project root).
+  // Fall back to fromDir if baseDir is empty to avoid resolving against cwd.
   const resolveBase = (isPython && !importSource.startsWith('.'))
-    ? options.baseDir
+    ? (options.baseDir || fromDir)
     : fromDir;
 
   const basePath = resolve(resolveBase, normalizedSource);

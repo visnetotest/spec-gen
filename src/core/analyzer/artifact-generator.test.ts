@@ -158,7 +158,6 @@ function createMockDepGraph(overrides: Partial<DependencyGraphResult> = {}): Dep
     edges,
     clusters,
     structuralClusters: overrides.structuralClusters ?? [],
-    directoryClusters: overrides.directoryClusters ?? clusters,
     rankings: overrides.rankings ?? {
       byImportance: ['/test/src/models/user.ts', '/test/src/services/user-service.ts', '/test/src/index.ts'],
       byConnectivity: ['/test/src/services/user-service.ts', '/test/src/models/user.ts', '/test/src/index.ts'],
@@ -171,6 +170,8 @@ function createMockDepGraph(overrides: Partial<DependencyGraphResult> = {}): Dep
     statistics: overrides.statistics ?? {
       nodeCount: 3,
       edgeCount: 2,
+      importEdgeCount: 2,
+      httpEdgeCount: 0,
       avgDegree: 2,
       density: 0.33,
       clusterCount: 1,
@@ -438,7 +439,7 @@ describe('AnalysisArtifactGenerator', () => {
       const repoMap = createMockRepoMap();
       const depGraph = createMockDepGraph({
         cycles: [['/test/a.ts', '/test/b.ts', '/test/a.ts']],
-        statistics: { nodeCount: 3, edgeCount: 2, avgDegree: 2, density: 0.33, clusterCount: 1, structuralClusterCount: 0, cycleCount: 1 },
+        statistics: { nodeCount: 3, edgeCount: 2, importEdgeCount: 2, httpEdgeCount: 0, avgDegree: 2, density: 0.33, clusterCount: 1, structuralClusterCount: 0, cycleCount: 1 },
       });
 
       const artifacts = await generateArtifacts(repoMap, depGraph, {
@@ -668,6 +669,8 @@ describe('AnalysisArtifactGenerator', () => {
         statistics: {
           nodeCount: 0,
           edgeCount: 0,
+          importEdgeCount: 0,
+          httpEdgeCount: 0,
           avgDegree: 0,
           density: 0,
           clusterCount: 0,

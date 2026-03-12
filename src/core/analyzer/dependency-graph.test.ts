@@ -848,4 +848,159 @@ def helper():
       expect(result.nodes.find(n => n.file.name === 'models.py')?.metrics.inDegree).toBe(2);
     });
   });
+
+  // ============================================================================
+  // HTTP CROSS-LANGUAGE EDGES
+  // ============================================================================
+
+  describe('HTTP cross-language edges', () => {
+    it('should skip HTTP edge detection when no Python files are present', async () => {
+      const fileA = await createFile(tempDir, 'client.ts', `
+fetch('/api/items');
+`);
+      const fileB = await createFile(tempDir, 'utils.ts', `
+export function noop() {}
+`);
+      const files = [
+        createScoredFile({ absolutePath: fileA, name: 'client.ts', extension: '.ts' }),
+        createScoredFile({ absolutePath: fileB, name: 'utils.ts', extension: '.ts' }),
+      ];
+
+      const result = await buildDependencyGraph(files, { rootDir: tempDir });
+
+      // No Python files → HTTP scanning skipped → no HTTP edges
+      expect(result.statistics.httpEdgeCount).toBe(0);
+      expect(result.statistics.importEdgeCount).toBe(result.statistics.edgeCount);
+    });
+
+    it('should skip HTTP edge detection when no JS/TS files are present', async () => {
+      const fileA = await createFile(tempDir, 'routes.py', `
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get('/items')
+def list_items():
+    return []
+`);
+      const files = [
+        createScoredFile({ absolutePath: fileA, name: 'routes.py', extension: '.py' }),
+      ];
+
+      const result = await buildDependencyGraph(files, { rootDir: tempDir });
+
+      expect(result.statistics.httpEdgeCount).toBe(0);
+    });
+
+    it('should detect HTTP cross-language edge between fetch call and FastAPI route', async () => {
+      const jsFile = await createFile(tempDir, 'client.ts', `
+fetch('/items');
+`);
+      const pyFile = await createFile(tempDir, 'routes.py', `
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get('/items')
+def list_items():
+    return []
+`);
+      const files = [
+        createScoredFile({ absolutePath: jsFile, name: 'client.ts', extension: '.ts' }),
+        createScoredFile({ absolutePath: pyFile, name: 'routes.py', extension: '.py' }),
+      ];
+
+      const result = await buildDependencyGraph(files, { rootDir: tempDir });
+
+      expect(result.statistics.httpEdgeCount).toBeGreaterThan(0);
+      expect(result.statistics.importEdgeCount).toBe(result.statistics.edgeCount - result.statistics.httpEdgeCount);
+
+      const httpEdge = result.edges.find(e => e.httpEdge !== undefined);
+      expect(httpEdge).toBeDefined();
+      expect(httpEdge?.source).toBe(jsFile);
+      expect(httpEdge?.target).toBe(pyFile);
+    });
+
+    it('importEdgeCount + httpEdgeCount should equal edgeCount', async () => {
+      const jsFile = await createFile(tempDir, 'app.ts', `
+import { helper } from './utils.js';
+fetch('/api/search');
+`);
+      const utilFile = await createFile(tempDir, 'utils.ts', `
+export function helper() {}
+`);
+      const pyFile = await createFile(tempDir, 'api.py', `
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get('/api/search')
+def search():
+    return []
+`);
+      const files = [
+        createScoredFile({ absolutePath: jsFile, name: 'app.ts', extension: '.ts' }),
+        createScoredFile({ absolutePath: utilFile, name: 'utils.ts', extension: '.ts' }),
+        createScoredFile({ absolutePath: pyFile, name: 'api.py', extension: '.py' }),
+      ];
+
+      const result = await buildDependencyGraph(files, { rootDir: tempDir });
+
+      expect(result.statistics.importEdgeCount + result.statistics.httpEdgeCount)
+        .toBe(result.statistics.edgeCount);
+    });
+  });
+
+  // ============================================================================
+  // STRUCTURAL CLUSTERS
+  // ============================================================================
+
+  describe('structuralClusters', () => {
+    it('structuralClusters should be a subset of clusters containing only those with internalEdges > 0', async () => {
+      // Two files in same directory that import each other → structural cluster
+      const fileA = await createFile(tempDir, 'services/a.ts', `
+import { b } from './b.js';
+export function a() { return b(); }
+`);
+      const fileB = await createFile(tempDir, 'services/b.ts', `
+export function b() { return 42; }
+`);
+      // Isolated file in its own directory → directory-only cluster (no internal edges)
+      const fileC = await createFile(tempDir, 'standalone/c.ts', `
+export function c() {}
+`);
+      const fileD = await createFile(tempDir, 'standalone/d.ts', `
+export function d() {}
+`);
+      const files = [
+        createScoredFile({ absolutePath: fileA, name: 'a.ts', extension: '.ts', directory: 'services' }),
+        createScoredFile({ absolutePath: fileB, name: 'b.ts', extension: '.ts', directory: 'services' }),
+        createScoredFile({ absolutePath: fileC, name: 'c.ts', extension: '.ts', directory: 'standalone' }),
+        createScoredFile({ absolutePath: fileD, name: 'd.ts', extension: '.ts', directory: 'standalone' }),
+      ];
+
+      const result = await buildDependencyGraph(files, { rootDir: tempDir });
+
+      // structuralClusters is a subset of clusters
+      expect(result.structuralClusters.length).toBeLessThanOrEqual(result.clusters.length);
+      // every structuralCluster has internalEdges > 0
+      for (const c of result.structuralClusters) {
+        expect(c.isStructural).toBe(true);
+        expect(c.internalEdges).toBeGreaterThan(0);
+      }
+      // structuralClusterCount matches
+      expect(result.statistics.structuralClusterCount).toBe(result.structuralClusters.length);
+    });
+
+    it('structuralClusters should be empty when no files share a directory with internal edges', async () => {
+      const fileA = await createFile(tempDir, 'alone/a.ts', `export function a() {}`);
+      const fileB = await createFile(tempDir, 'also-alone/b.ts', `export function b() {}`);
+      const files = [
+        createScoredFile({ absolutePath: fileA, name: 'a.ts', extension: '.ts', directory: 'alone' }),
+        createScoredFile({ absolutePath: fileB, name: 'b.ts', extension: '.ts', directory: 'also-alone' }),
+      ];
+
+      const result = await buildDependencyGraph(files, { rootDir: tempDir });
+
+      expect(result.structuralClusters).toHaveLength(0);
+      expect(result.statistics.structuralClusterCount).toBe(0);
+    });
+  });
 });
