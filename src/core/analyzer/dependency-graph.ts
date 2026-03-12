@@ -7,10 +7,31 @@
  */
 
 import { ImportExportParser, resolveImport, type ExportInfo, type FileAnalysis } from './import-parser.js';
+import { extractAllHttpEdges, type HttpEdge } from './http-route-parser.js';
 import type { ScoredFile } from '../../types/index.js';
 
 // ============================================================================
-// TYPES
+// CONSTANTS
+// ============================================================================
+
+const CLUSTER_PALETTE = [
+  '#7c6af7',
+  '#3ecfcf',
+  '#f77c6a',
+  '#6af7a0',
+  '#f7c76a',
+  '#f76ac8',
+  '#6aaff7',
+  '#c8f76a',
+  '#f7a06a',
+  '#a0a0ff',
+  '#ff6b9d',
+  '#00d4aa',
+  '#ffb347',
+];
+
+// ============================================================================
+// INTERFACES
 // ============================================================================
 
 /**
@@ -26,6 +47,11 @@ export interface DependencyNode {
     betweenness: number;
     pageRank: number;
   };
+  cluster?: {
+    id: string;
+    name: string;
+    color: string;
+  };
 }
 
 /**
@@ -37,6 +63,8 @@ export interface DependencyEdge {
   importedNames: string[];
   isTypeOnly: boolean;
   weight: number;
+  /** Present when this edge was derived from an HTTP call rather than a static import */
+  httpEdge?: HttpEdge;
 }
 
 /**
@@ -51,6 +79,13 @@ export interface FileCluster {
   cohesion: number;
   coupling: number;
   suggestedDomain: string;
+  color: string;
+  /**
+   * True when the cluster has at least one internal edge (files actually
+   * import each other). False clusters are pure directory groups with no
+   * connectivity — useful for rendering at a lower visual prominence.
+   */
+  isStructural: boolean;
 }
 
 /**
@@ -59,7 +94,12 @@ export interface FileCluster {
 export interface DependencyGraphResult {
   nodes: DependencyNode[];
   edges: DependencyEdge[];
+  /** All clusters (structural + directory groups) */
   clusters: FileCluster[];
+  /** Only clusters with internalEdges > 0 — worth highlighting visually */
+  structuralClusters: FileCluster[];
+  /** Clusters with no internal edges — pure directory groupings */
+  directoryClusters: FileCluster[];
   rankings: {
     byImportance: string[];
     byConnectivity: string[];
@@ -74,7 +114,10 @@ export interface DependencyGraphResult {
     edgeCount: number;
     avgDegree: number;
     density: number;
+    /** Total clusters including directory-only groups */
     clusterCount: number;
+    /** Clusters with at least one internal edge */
+    structuralClusterCount: number;
     cycleCount: number;
   };
 }
@@ -155,6 +198,9 @@ export class DependencyGraphBuilder {
     // Create edges from imports
     await this.buildEdges(files, analyses);
 
+    // Create cross-language edges from HTTP calls (fetch/axios → FastAPI routes)
+    await this.buildHttpCrossEdges(files);
+
     // Calculate metrics
     this.calculateDegrees();
     this.calculateBetweenness();
@@ -162,6 +208,17 @@ export class DependencyGraphBuilder {
 
     // Detect clusters
     const clusters = this.detectClusters();
+
+    // Assign clusters to nodes
+    const clusterByNode: Record<string, { id: string; name: string; color: string }> = {};
+    clusters.forEach((cl) => {
+      cl.files.forEach((fid) => {
+        clusterByNode[fid] = { id: cl.id, name: cl.name, color: cl.color };
+      });
+    });
+    for (const [id, node] of this.nodes) {
+      node.cluster = clusterByNode[id];
+    }
 
     // Detect cycles
     const cycles = this.detectCycles();
@@ -172,10 +229,15 @@ export class DependencyGraphBuilder {
     // Calculate statistics
     const statistics = this.calculateStatistics(clusters, cycles);
 
+    const structuralClusters = clusters.filter(c => c.isStructural);
+    const directoryClusters = clusters.filter(c => !c.isStructural);
+
     return {
       nodes: Array.from(this.nodes.values()),
       edges: this.edges,
       clusters,
+      structuralClusters,
+      directoryClusters,
       rankings,
       cycles,
       statistics,
@@ -201,6 +263,43 @@ export class DependencyGraphBuilder {
   }
 
   /**
+   * Build cross-language edges by matching HTTP calls in JS/TS files to
+   * FastAPI/Flask/Django route definitions in Python files.
+   * Only creates edges between files that are already nodes in the graph.
+   */
+  private async buildHttpCrossEdges(files: ScoredFile[]): Promise<void> {
+    const fileSet = new Set(files.map(f => f.absolutePath));
+    const filePaths = Array.from(fileSet);
+
+    const { edges: httpEdges } = await extractAllHttpEdges(filePaths);
+
+    for (const httpEdge of httpEdges) {
+      // Both ends must be known nodes
+      if (!fileSet.has(httpEdge.callerFile) || !fileSet.has(httpEdge.handlerFile)) continue;
+      // Skip self-loops
+      if (httpEdge.callerFile === httpEdge.handlerFile) continue;
+
+      // Weight by confidence: exact=1.0, path=0.75, fuzzy=0.5
+      const weight =
+        httpEdge.confidence === 'exact' ? 1.0 :
+        httpEdge.confidence === 'path'  ? 0.75 : 0.5;
+
+      const edge: DependencyEdge = {
+        source: httpEdge.callerFile,
+        target: httpEdge.handlerFile,
+        importedNames: [httpEdge.route.handlerName],
+        isTypeOnly: false,
+        weight,
+        httpEdge,
+      };
+
+      this.edges.push(edge);
+      this.adjacencyList.get(httpEdge.callerFile)?.add(httpEdge.handlerFile);
+      this.reverseAdjacencyList.get(httpEdge.handlerFile)?.add(httpEdge.callerFile);
+    }
+  }
+
+  /**
    * Build edges from import relationships
    */
   private async buildEdges(
@@ -213,9 +312,16 @@ export class DependencyGraphBuilder {
       const analysis = analyses.get(file.absolutePath);
       if (!analysis) continue;
 
+      const isPythonFile = file.absolutePath.endsWith('.py') || file.absolutePath.endsWith('.pyw');
+
       for (const imp of analysis.imports) {
-        // Skip non-relative imports (packages, builtins)
-        if (!imp.isRelative) continue;
+        // Skip non-relative imports for JS/TS (those are always npm packages).
+        // For Python files we must NOT skip: `from services.retriever import X`
+        // is flagged isRelative=false but may resolve to a local module.
+        if (!imp.isRelative && !isPythonFile) continue;
+        // Even for Python, skip known builtins and third-party packages that
+        // will never resolve to a file inside the project.
+        if (!imp.isRelative && isPythonFile && imp.isBuiltin) continue;
 
         // Resolve the import to an absolute path
         const resolvedPath = await resolveImport(imp.source, file.absolutePath, {
@@ -438,6 +544,8 @@ export class DependencyGraphBuilder {
         cohesion,
         coupling,
         suggestedDomain,
+        color: CLUSTER_PALETTE[clusterId % CLUSTER_PALETTE.length],
+        isStructural: internalEdges > 0,
       });
     }
 
@@ -659,6 +767,7 @@ export class DependencyGraphBuilder {
       avgDegree,
       density,
       clusterCount: clusters.length,
+      structuralClusterCount: clusters.filter(c => c.isStructural).length,
       cycleCount: cycles.length,
     };
   }
@@ -690,9 +799,10 @@ export function toD3Format(result: DependencyGraphResult): {
   nodes: Array<{ id: string; group: number; score: number }>;
   links: Array<{ source: string; target: string; value: number }>;
 } {
-  // Create cluster index map
+  // Use only structural clusters for group colouring — directory-only
+  // clusters (cohesion=0) would produce too many indistinct colour groups.
   const clusterIndex = new Map<string, number>();
-  result.clusters.forEach((cluster, idx) => {
+  result.structuralClusters.forEach((cluster, idx) => {
     for (const file of cluster.files) {
       clusterIndex.set(file, idx);
     }

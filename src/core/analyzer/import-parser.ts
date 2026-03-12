@@ -662,14 +662,17 @@ export async function resolveImport(
   fromFile: string,
   options: ResolveOptions
 ): Promise<string | null> {
-  // External package - return null
-  if (!isRelativeImport(importSource)) {
+  const fromExt = extname(fromFile).toLowerCase();
+  const isPython = fromExt === '.py' || fromExt === '.pyw';
+
+  // For non-Python files, external packages can never resolve to a local file.
+  // For Python files we must NOT bail out here: `from services.retriever import X`
+  // looks like a package import but may well be a local module under rootDir.
+  if (!isRelativeImport(importSource) && !isPython) {
     return null;
   }
 
   const fromDir = dirname(fromFile);
-  const fromExt = extname(fromFile).toLowerCase();
-  const isPython = fromExt === '.py' || fromExt === '.pyw';
 
   // Default extensions depend on the source file type
   const extensions = options.extensions ?? (
@@ -691,9 +694,20 @@ export async function resolveImport(
     // dots=1 → './', dots=2 → '../', dots=3 → '../../', etc.
     const prefix = dots === 1 ? './' : '../'.repeat(dots - 1);
     normalizedSource = rest ? prefix + rest : prefix.replace(/\/$/, '') || '.';
+  } else if (isPython && !importSource.startsWith('.')) {
+    // Absolute-style intra-project import: "services.retriever" or "services.retriever.utils"
+    // Convert dotted module path to a filesystem path relative to rootDir.
+    // e.g. "services.retriever" → "<rootDir>/services/retriever.py"
+    normalizedSource = './' + importSource.replace(/\./g, '/');
   }
 
-  const basePath = resolve(fromDir, normalizedSource);
+  // For Python absolute imports resolve from rootDir, not fromDir,
+  // because Python's module system uses sys.path (typically the project root).
+  const resolveBase = (isPython && !importSource.startsWith('.'))
+    ? options.baseDir
+    : fromDir;
+
+  const basePath = resolve(resolveBase, normalizedSource);
 
   // Strip any existing extension from the import source.
   // This handles the TypeScript NodeNext convention where imports are written

@@ -1185,6 +1185,107 @@ export function test() {}
 
       expect(result).toBe(modelsPath);
     });
+
+    // ── Python absolute (intra-project) import resolution ──────────────────
+    // These are the imports that were silently dropped before the fix.
+    // e.g. `from services.retriever import retrieve_docs` in a FastAPI project
+    // where the file lives at <rootDir>/services/retriever.py.
+    // The old code returned null for every non-dot-prefixed Python import
+    // because isRelativeImport() returned false. The fix resolves them from
+    // rootDir instead of fromDir.
+
+    it('should resolve Python absolute import to a sibling module', async () => {
+      // from utils import helper   →   <rootDir>/utils.py
+      const utilsPath = await createFile(tempDir, 'utils.py', 'def helper(): pass');
+
+      const result = await resolveImport('utils', join(tempDir, 'app.py'), {
+        baseDir: tempDir,
+      });
+
+      expect(result).toBe(utilsPath);
+    });
+
+    it('should resolve Python absolute dotted import (package.module)', async () => {
+      // from services.retriever import retrieve_docs   →   <rootDir>/services/retriever.py
+      await mkdir(join(tempDir, 'services'), { recursive: true });
+      const retrieverPath = await createFile(tempDir, 'services/retriever.py', 'def retrieve_docs(): pass');
+
+      const result = await resolveImport('services.retriever', join(tempDir, 'app.py'), {
+        baseDir: tempDir,
+      });
+
+      expect(result).toBe(retrieverPath);
+    });
+
+    it('should resolve Python absolute dotted import regardless of caller location', async () => {
+      // A file deep in a subdirectory should still resolve from rootDir, not fromDir.
+      // from models.embedding import EmbeddingModel  →  <rootDir>/models/embedding.py
+      await mkdir(join(tempDir, 'routers'), { recursive: true });
+      await mkdir(join(tempDir, 'models'), { recursive: true });
+      const embeddingPath = await createFile(tempDir, 'models/embedding.py', 'class EmbeddingModel: pass');
+
+      const result = await resolveImport('models.embedding', join(tempDir, 'routers', 'search.py'), {
+        baseDir: tempDir,
+      });
+
+      expect(result).toBe(embeddingPath);
+    });
+
+    it('should resolve Python absolute import to a package __init__.py', async () => {
+      // from db import session   →   <rootDir>/db/__init__.py
+      await mkdir(join(tempDir, 'db'), { recursive: true });
+      const initPath = await createFile(tempDir, 'db/__init__.py', 'from .session import Session');
+
+      const result = await resolveImport('db', join(tempDir, 'app.py'), {
+        baseDir: tempDir,
+      });
+
+      expect(result).toBe(initPath);
+    });
+
+    it('should resolve deeply nested Python absolute import', async () => {
+      // from api.v1.routes.items import router   →   <rootDir>/api/v1/routes/items.py
+      await mkdir(join(tempDir, 'api/v1/routes'), { recursive: true });
+      const itemsPath = await createFile(tempDir, 'api/v1/routes/items.py', 'router = None');
+
+      const result = await resolveImport('api.v1.routes.items', join(tempDir, 'main.py'), {
+        baseDir: tempDir,
+      });
+
+      expect(result).toBe(itemsPath);
+    });
+
+    it('should still return null for a genuine third-party Python package', async () => {
+      // 'fastapi' is not a file in the project — should return null
+      const result = await resolveImport('fastapi', join(tempDir, 'app.py'), {
+        baseDir: tempDir,
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it('should still return null for a Python stdlib module', async () => {
+      // 'os' is a builtin, not a project file
+      const result = await resolveImport('os', join(tempDir, 'app.py'), {
+        baseDir: tempDir,
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it('should prefer an exact file match over __init__.py for absolute imports', async () => {
+      // Both <rootDir>/config.py and <rootDir>/config/__init__.py exist —
+      // the plain module file should be preferred.
+      const configFilePath = await createFile(tempDir, 'config.py', 'DEBUG = True');
+      await mkdir(join(tempDir, 'config'), { recursive: true });
+      await createFile(tempDir, 'config/__init__.py', '');
+
+      const result = await resolveImport('config', join(tempDir, 'app.py'), {
+        baseDir: tempDir,
+      });
+
+      expect(result).toBe(configFilePath);
+    });
   });
 
   // ==========================================================================

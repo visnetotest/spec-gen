@@ -3,15 +3,7 @@
  */
 
 // Project detection types
-export type ProjectType =
-  | 'nodejs'
-  | 'python'
-  | 'rust'
-  | 'go'
-  | 'java'
-  | 'ruby'
-  | 'php'
-  | 'unknown';
+export type ProjectType = 'nodejs' | 'python' | 'rust' | 'go' | 'java' | 'ruby' | 'php' | 'unknown';
 
 // Configuration types
 export interface SpecGenConfig {
@@ -224,12 +216,12 @@ export interface EntityProperty {
 export type DriftSeverity = 'error' | 'warning' | 'info';
 
 export type DriftIssueKind =
-  | 'gap'            // Code changed, spec doesn't cover it
-  | 'stale'          // Spec describes behavior that code no longer implements
-  | 'uncovered'      // New file/function with no matching spec at all
-  | 'orphaned-spec'  // Spec references files that no longer exist
-  | 'adr-gap'        // Code changed in domain referenced by an ADR
-  | 'adr-orphaned';  // ADR references domains that no longer exist in specs
+  | 'gap' // Code changed, spec doesn't cover it
+  | 'stale' // Spec describes behavior that code no longer implements
+  | 'uncovered' // New file/function with no matching spec at all
+  | 'orphaned-spec' // Spec references files that no longer exist
+  | 'adr-gap' // Code changed in domain referenced by an ADR
+  | 'adr-orphaned'; // ADR references domains that no longer exist in specs
 
 export interface DriftOptions extends GlobalOptions {
   base: string;
