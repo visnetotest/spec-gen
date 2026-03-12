@@ -90,6 +90,8 @@ export function parseGraph(raw) {
     nodes,
     edges,
     clusters,
+    structuralClusters: raw.structuralClusters || [],
+    directoryClusters: raw.directoryClusters || [],
     statistics: raw.statistics || {},
     rankings: raw.rankings || {},
   };
