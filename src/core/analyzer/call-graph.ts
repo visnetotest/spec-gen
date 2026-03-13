@@ -112,6 +112,13 @@ const IGNORED_CALLEES = new Set([
   'extend', 'attr_accessor', 'attr_reader', 'attr_writer',
   // Java common
   'toString', 'equals', 'hashCode', 'getClass', 'println', 'printf',
+  // C++ stdlib / builtins
+  'cout', 'cin', 'cerr', 'endl', 'malloc', 'free', 'memcpy', 'memset', 'memcmp',
+  'strlen', 'strcpy', 'strcat', 'strcmp', 'sprintf', 'snprintf', 'fprintf',
+  'push_back', 'pop_back', 'emplace_back', 'begin', 'end', 'size', 'empty',
+  'find', 'insert', 'erase', 'at', 'front', 'back', 'clear', 'reserve', 'resize',
+  'make_shared', 'make_unique', 'move', 'forward', 'swap',
+  'static_cast', 'dynamic_cast', 'reinterpret_cast', 'const_cast',
 ]);
 
 // ============================================================================
@@ -124,12 +131,14 @@ let _goParser: Parser | undefined;
 let _rustParser: Parser | undefined;
 let _rubyParser: Parser | undefined;
 let _javaParser: Parser | undefined;
+let _cppParser: Parser | undefined;
 let _TsLanguage: object | undefined;
 let _PyLanguage: object | undefined;
 let _GoLanguage: object | undefined;
 let _RustLanguage: object | undefined;
 let _RubyLanguage: object | undefined;
 let _JavaLanguage: object | undefined;
+let _CppLanguage: object | undefined;
 
 async function getTSParser(): Promise<{ parser: Parser; lang: object }> {
   if (!_tsParser) {
@@ -189,6 +198,16 @@ async function getJavaParser(): Promise<{ parser: Parser; lang: object }> {
     (_javaParser as Parser).setLanguage(_JavaLanguage as unknown as Parser.Language);
   }
   return { parser: _javaParser!, lang: _JavaLanguage! };
+}
+
+async function getCppParser(): Promise<{ parser: Parser; lang: object }> {
+  if (!_cppParser) {
+    const cppModule = await import('tree-sitter-cpp');
+    _CppLanguage = cppModule.default;
+    _cppParser = new Parser();
+    (_cppParser as Parser).setLanguage(_CppLanguage as unknown as Parser.Language);
+  }
+  return { parser: _cppParser!, lang: _CppLanguage! };
 }
 
 // ============================================================================
@@ -825,6 +844,135 @@ async function extractJavaGraph(
 }
 
 // ============================================================================
+// C++ EXTRACTOR
+// ============================================================================
+
+/**
+ * Safely run a tree-sitter query, returning [] if the S-expression is invalid
+ * for the grammar. C++ grammar has many edge cases (templates, operators,
+ * pointer declarators) that can make certain queries fail.
+ */
+function safeQuery(
+  lang: object,
+  queryStr: string,
+  root: Parser.SyntaxNode
+): Parser.QueryMatch[] {
+  try {
+    const q = new Parser.Query(lang as unknown as Parser.Language, queryStr);
+    return q.matches(root);
+  } catch {
+    return [];
+  }
+}
+
+/** Free functions and inline class methods with a simple identifier name */
+const CPP_FN_BASIC_QUERY = `
+  (function_definition
+    declarator: (function_declarator
+      declarator: (identifier) @fn.name)) @fn.node
+
+  (function_definition
+    declarator: (function_declarator
+      declarator: (field_identifier) @fn.name)) @fn.node
+`;
+
+/** Out-of-class definitions: void Foo::bar() {} */
+const CPP_FN_QUALIFIED_QUERY = `
+  (function_definition
+    declarator: (function_declarator
+      declarator: (qualified_identifier
+        name: (identifier) @fn.name))) @fn.node
+`;
+
+/** Function calls: foo() and obj.method() / ptr->method() */
+const CPP_CALL_QUERY = `
+  (call_expression
+    function: (identifier) @call.name) @call.node
+
+  (call_expression
+    function: (field_expression
+      field: (field_identifier) @call.name)) @call.node
+`;
+
+async function extractCppGraph(
+  filePath: string,
+  content: string
+): Promise<{ nodes: FunctionNode[]; rawEdges: Array<{ callerId: string; calleeName: string; line: number }> }> {
+  const { parser, lang } = await getCppParser();
+  const tree = (parser as Parser).parse(content);
+
+  const nodes: FunctionNode[] = [];
+  const seen = new Set<number>(); // deduplicate by name-node start position
+
+  for (const queryStr of [CPP_FN_BASIC_QUERY, CPP_FN_QUALIFIED_QUERY]) {
+    for (const match of safeQuery(lang, queryStr, tree.rootNode)) {
+      const nameCapture = match.captures.find(c => c.name === 'fn.name');
+      const nodeCapture = match.captures.find(c => c.name === 'fn.node');
+      if (!nameCapture || !nodeCapture) continue;
+
+      if (seen.has(nameCapture.node.startIndex)) continue;
+      seen.add(nameCapture.node.startIndex);
+
+      const name = nameCapture.node.text;
+      const fnNode = nodeCapture.node;
+
+      // Find enclosing class (inline method defined inside class body)
+      let className: string | undefined;
+      let cursor = fnNode.parent;
+      while (cursor) {
+        if (cursor.type === 'class_specifier' || cursor.type === 'struct_specifier') {
+          const nameNode = cursor.children.find(c => c.type === 'type_identifier');
+          if (nameNode) className = nameNode.text;
+          break;
+        }
+        cursor = cursor.parent;
+      }
+
+      // For out-of-class: void Foo::bar() — extract class from qualified_identifier scope
+      if (!className) {
+        const fnDeclarator = fnNode.children.find(c => c.type === 'function_declarator');
+        if (fnDeclarator) {
+          const qualNode = fnDeclarator.children.find(c => c.type === 'qualified_identifier');
+          if (qualNode) {
+            const scopeNode = qualNode.children.find(
+              c => c.type === 'namespace_identifier' || c.type === 'type_identifier'
+            );
+            if (scopeNode) className = scopeNode.text;
+          }
+        }
+      }
+
+      const id = className ? `${filePath}::${className}.${name}` : `${filePath}::${name}`;
+      nodes.push({
+        id, name, filePath, className,
+        isAsync: false, // C++ has no async keyword at language level
+        language: 'C++',
+        startIndex: fnNode.startIndex,
+        endIndex: fnNode.endIndex,
+        fanIn: 0, fanOut: 0,
+      });
+    }
+  }
+
+  const rawEdges: Array<{ callerId: string; calleeName: string; line: number }> = [];
+  for (const match of safeQuery(lang, CPP_CALL_QUERY, tree.rootNode)) {
+    const nameCapture = match.captures.find(c => c.name === 'call.name');
+    const nodeCapture = match.captures.find(c => c.name === 'call.node');
+    if (!nameCapture || !nodeCapture) continue;
+
+    const calleeName = nameCapture.node.text;
+    if (IGNORED_CALLEES.has(calleeName)) continue;
+
+    const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
+    if (!caller) continue;
+
+    rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1 });
+  }
+
+  return { nodes, rawEdges };
+}
+
+// ============================================================================
 // CALL GRAPH BUILDER
 // ============================================================================
 
@@ -860,6 +1008,8 @@ export class CallGraphBuilder {
           result = await extractRubyGraph(file.path, file.content);
         } else if (file.language === 'Java') {
           result = await extractJavaGraph(file.path, file.content);
+        } else if (file.language === 'C++') {
+          result = await extractCppGraph(file.path, file.content);
         } else {
           continue;
         }

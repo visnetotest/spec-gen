@@ -988,6 +988,7 @@ The index is stored in `.spec-gen/analysis/vector-index/` and is automatically u
 | Rust | Full | Full |
 | Ruby | Full | Full |
 | Java | Full | Full |
+| C++ | Full | Full |
 
 TypeScript projects get the best results due to richer type information.
 

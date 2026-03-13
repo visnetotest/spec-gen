@@ -49,7 +49,7 @@ export function detectLanguage(filePath: string): string {
     case 'kt':           return 'Kotlin';
     case 'php':          return 'PHP';
     case 'cs':           return 'C#';
-    case 'cpp': case 'cc': case 'cxx': return 'C++';
+    case 'cpp': case 'cc': case 'cxx': case 'hpp': return 'C++';
     case 'c':            return 'C';
     default:             return 'unknown';
   }
@@ -359,6 +359,55 @@ function extractRuby(content: string): ExtractedSignature[] {
 }
 
 // ============================================================================
+// C++ EXTRACTOR
+// ============================================================================
+
+/** Keywords that look like function names but are control-flow or declarations */
+const CPP_SKIP_NAMES = new Set([
+  'if', 'for', 'while', 'switch', 'catch', 'namespace', 'class', 'struct',
+  'return', 'delete', 'do', 'else', 'new', 'sizeof', 'static_assert', 'assert',
+  'typedef', 'template', 'decltype', 'alignof', 'typeid',
+]);
+
+function extractCpp(content: string): ExtractedSignature[] {
+  const entries: ExtractedSignature[] = [];
+  const lines = content.split('\n');
+
+  for (let i = 0; i < lines.length && entries.length < MAX_SIGS_PER_FILE; i++) {
+    const line = lines[i];
+    const trimmed = line.trimStart();
+
+    // Skip preprocessor directives, comments, empty lines
+    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue;
+
+    // class / struct declaration (not a forward declaration ending in ;)
+    const classMatch = trimmed.match(/^(?:class|struct)\s+(\w+)\b/);
+    if (classMatch && !trimmed.endsWith(';')) {
+      const keyword = trimmed.startsWith('struct') ? 'struct' : 'class';
+      const name = classMatch[1];
+      const comment = lines[i - 1]?.trim().startsWith('//') ? lines[i - 1].trim().slice(2).trim() : undefined;
+      entries.push({ kind: 'class', name, signature: `${keyword} ${name}`, docstring: comment });
+      continue;
+    }
+
+    // Function / method: look for Name(params) followed by qualifiers then { or :
+    // This regex finds the last word before a ( that has content after closing )
+    const fnMatch = trimmed.match(/\b(\w+)\s*\(([^)]*)\)\s*(?:const\s*)?(?:noexcept[^{;]*)?\s*(?:override\s*)?(?:final\s*)?(?:->\s*[\w:*&<>, ]+\s*)?[{:]/);
+    if (fnMatch) {
+      const name = fnMatch[1];
+      if (!CPP_SKIP_NAMES.has(name) && /^[a-zA-Z_]/.test(name)) {
+        const params = compactParams(fnMatch[2]);
+        const comment = lines[i - 1]?.trim().startsWith('//') ? lines[i - 1].trim().slice(2).trim() : undefined;
+        const kind: ExtractedSignature['kind'] = line.startsWith('  ') || line.startsWith('\t') ? 'method' : 'function';
+        entries.push({ kind, name, signature: `${name}(${params})`, docstring: comment });
+      }
+    }
+  }
+
+  return entries;
+}
+
+// ============================================================================
 // GENERIC FALLBACK EXTRACTOR
 // ============================================================================
 
@@ -402,6 +451,9 @@ export function extractSignatures(filePath: string, content: string): FileSignat
       break;
     case 'Ruby':
       entries = extractRuby(content);
+      break;
+    case 'C++':
+      entries = extractCpp(content);
       break;
     default:
       entries = extractGeneric(content);

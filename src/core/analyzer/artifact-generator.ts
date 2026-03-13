@@ -917,7 +917,7 @@ export class AnalysisArtifactGenerator {
     const { detectDuplicates } = await import('./duplicate-detector.js');
     const { analyzeForRefactoring } = await import('./refactor-analyzer.js');
 
-    const CALL_GRAPH_LANGS = new Set(['Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Java']);
+    const CALL_GRAPH_LANGS = new Set(['Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Java', 'C++']);
     const signatures: import('./signature-extractor.js').FileSignatureMap[] = [];
     const callGraphFiles: Array<{ path: string; content: string; language: string }> = [];
 

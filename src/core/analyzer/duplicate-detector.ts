@@ -105,6 +105,10 @@ const KEYWORDS = new Set([
   'end', 'then', 'do', 'defined',
   // Java extras
   'throws', 'instanceof',
+  // C++ extras
+  'nullptr', 'constexpr', 'consteval', 'constinit', 'inline', 'extern',
+  'friend', 'mutable', 'explicit', 'noexcept', 'typename', 'operator',
+  'virtual', 'template', 'namespace', 'typedef', 'decltype', 'alignof',
   // Common builtins (high frequency, preserve to avoid false matches)
   'len', 'make', 'append', 'cap', 'copy', 'map', 'range',
 ]);
