@@ -235,7 +235,15 @@ export class VectorIndex {
     // Build candidate records (without vectors)
     const nodeIds = new Set(nodes.map(n => n.id));
     const candidates: Omit<FunctionRecord, 'vector'>[] = nodes.map(node => {
-      const { signature, docstring } = findSignatureEntry(node, sigIndex);
+      const cgDoc = node.docstring ?? '';
+      const cgSig = node.signature ?? '';
+      // Always check regex index as fallback — CG may miss docstrings when
+      // startIndex points inside an export_statement (past the `export` keyword),
+      // causing extractDocstringBefore to scan into the export keyword instead of
+      // reaching the JSDoc block above it.
+      const { signature: regexSig, docstring: regexDoc } = findSignatureEntry(node, sigIndex);
+      const signature = cgSig || regexSig;
+      const docstring = cgDoc || regexDoc;
       return {
         id: node.id,
         name: node.name,
