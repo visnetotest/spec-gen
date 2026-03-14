@@ -4,6 +4,10 @@ import { useState, useRef, useEffect } from 'react';
 // SIMPLE MARKDOWN RENDERER
 // ============================================================================
 
+function escapeHtml(text) {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 function renderInline(text) {
   // Escape HTML first to prevent XSS, then apply markdown formatting
   return escapeHtml(text)
