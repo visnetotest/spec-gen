@@ -225,6 +225,8 @@ export interface CompletionRequest {
   maxTokens?: number;
   stopSequences?: string[];
   responseFormat?: 'text' | 'json';
+  /** JSON Schema for structured output (used by OpenAI-compatible providers). */
+  jsonSchema?: object;
 }
 
 /**
@@ -651,7 +653,17 @@ export class OpenAIProvider implements LLMProvider {
       stop: request.stopSequences,
     };
 
-    if (request.responseFormat === 'json') {
+    if (request.responseFormat === 'json' && request.jsonSchema) {
+      // Use OpenAI structured outputs when a JSON schema is provided.
+      // This forces the model to conform to the schema (e.g. start an array). (#26)
+      body.response_format = {
+        type: 'json_schema',
+        json_schema: {
+          name: 'response',
+          schema: request.jsonSchema,
+        },
+      };
+    } else if (request.responseFormat === 'json') {
       body.response_format = { type: 'json_object' };
     }
 
@@ -743,7 +755,15 @@ export class OpenAICompatibleProvider implements LLMProvider {
       ...(request.stopSequences && { stop: request.stopSequences }),
     };
 
-    if (request.responseFormat === 'json') {
+    if (request.responseFormat === 'json' && request.jsonSchema) {
+      body.response_format = {
+        type: 'json_schema',
+        json_schema: {
+          name: 'response',
+          schema: request.jsonSchema,
+        },
+      };
+    } else if (request.responseFormat === 'json') {
       body.response_format = { type: 'json_object' };
     }
 
@@ -915,6 +935,7 @@ export class GeminiProvider implements LLMProvider {
         temperature: request.temperature ?? 0.3,
         maxOutputTokens: request.maxTokens ?? this.maxOutputTokens,
         ...(request.responseFormat === 'json' && { responseMimeType: 'application/json' }),
+        ...(request.responseFormat === 'json' && request.jsonSchema && { responseSchema: request.jsonSchema }),
         ...(request.stopSequences && { stopSequences: request.stopSequences }),
       },
     };
@@ -1199,7 +1220,7 @@ export class LLMService {
    * Generate a completion expecting JSON response
    */
   async completeJSON<T>(request: CompletionRequest, schema?: object): Promise<T> {
-    const jsonRequest = { ...request, responseFormat: 'json' as const };
+    const jsonRequest = { ...request, responseFormat: 'json' as const, jsonSchema: schema };
 
     // Add JSON instruction to prompt if not already present
     if (!jsonRequest.systemPrompt.toLowerCase().includes('json')) {
