@@ -5,10 +5,11 @@
  */
 
 import logger from '../../../utils/logger.js';
-import { STAGE2_MAX_TOKENS, STAGE_CHUNK_MAX_CHARS } from '../../../constants.js';
+import { STAGE2_MAX_TOKENS } from '../../../constants.js';
 import { PROMPTS } from '../prompts.js';
 import type { ExtractedEntity, StageResult, PipelineContext, ProjectSurveyResult } from '../../../types/pipeline.js';
 import { astChunkContent } from '../../analyzer/ast-chunker.js';
+import { STAGE2_ENTITY_SCHEMA } from '../schemas.js';
 
 export async function runStage2(
   pipeline: PipelineContext,
@@ -44,7 +45,7 @@ export async function runStage2(
           userPrompt,
           temperature: 0.3,
           maxTokens: STAGE2_MAX_TOKENS,
-        });
+        }, STAGE2_ENTITY_SCHEMA);
         // Normalize: LLM may return a single object instead of an array
         const entities = Array.isArray(result) ? result : [result];
         for (const entity of entities) {

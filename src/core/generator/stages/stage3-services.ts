@@ -5,10 +5,11 @@
  */
 
 import logger from '../../../utils/logger.js';
-import { STAGE3_MAX_TOKENS, STAGE_CHUNK_MAX_CHARS } from '../../../constants.js';
+import { STAGE3_MAX_TOKENS } from '../../../constants.js';
 import { PROMPTS } from '../prompts.js';
 import type { ExtractedEntity, ExtractedService, StageResult, PipelineContext, ProjectSurveyResult } from '../../../types/pipeline.js';
 import { astChunkContent } from '../../analyzer/ast-chunker.js';
+import { STAGE3_SERVICE_SCHEMA } from '../schemas.js';
 
 export async function runStage3(
   pipeline: PipelineContext,
@@ -44,7 +45,7 @@ export async function runStage3(
           userPrompt,
           temperature: 0.3,
           maxTokens: STAGE3_MAX_TOKENS,
-        });
+        }, STAGE3_SERVICE_SCHEMA);
         // Normalize: LLM may return a single object instead of an array
         const services = Array.isArray(result) ? result : [result];
         for (const service of services) {
