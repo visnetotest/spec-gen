@@ -47,7 +47,6 @@ import { execFile as execFileMock } from 'node:child_process';
 
 /** Make execFileMock succeed (used for git --version, claude --version, df) */
 function mockExecSuccess(stdout = 'ok'): void {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   vi.mocked(execFileMock).mockImplementation((...args: any[]) => {
     const cb = args[args.length - 1];
     if (typeof cb === 'function') cb(null, { stdout, stderr: '' });
@@ -57,7 +56,6 @@ function mockExecSuccess(stdout = 'ok'): void {
 
 /** Make execFileMock fail */
 function mockExecFail(): void {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   vi.mocked(execFileMock).mockImplementation((...args: any[]) => {
     const cb = args[args.length - 1];
     if (typeof cb === 'function') cb(new Error('command not found'));

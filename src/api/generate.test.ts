@@ -356,8 +356,8 @@ describe('specGenGenerate', () => {
 
       await specGenGenerate({ rootPath: ROOT });
 
-      const call = mockCreateLLMService.mock.calls[0][0];
-      expect(call.model).toMatch(/claude/i);
+      const call = mockCreateLLMService.mock.calls[0]?.[0];
+      expect(call?.model).toMatch(/claude/i);
     });
 
     it('uses a gemini model as default for gemini provider', async () => {
@@ -366,8 +366,8 @@ describe('specGenGenerate', () => {
 
       await specGenGenerate({ rootPath: ROOT });
 
-      const call = mockCreateLLMService.mock.calls[0][0];
-      expect(call.model).toMatch(/gemini/i);
+      const call = mockCreateLLMService.mock.calls[0]?.[0];
+      expect(call?.model).toMatch(/gemini/i);
     });
 
     it('explicit model option overrides the default model', async () => {

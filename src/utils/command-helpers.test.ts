@@ -7,8 +7,8 @@
  *   - readJsonFile
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { formatDuration, formatAge, parseList } from './command-helpers.js';

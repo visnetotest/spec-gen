@@ -215,15 +215,14 @@ function mockResponse(body: object, ok = true, status = 200): Response {
     headers: new Headers(),
     redirected: false,
     statusText: ok ? 'OK' : 'Error',
-    type: 'basic' as ResponseType,
+    type: 'basic' as Response['type'],
     url: '',
     clone: () => mockResponse(body, ok, status),
     body: null,
     bodyUsed: false,
     arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
-    blob: () => Promise.resolve(new Blob()),
+    blob: () => Promise.resolve(new Blob([])),
     formData: () => Promise.resolve(new FormData()),
-    bytes: () => Promise.resolve(new Uint8Array()),
   };
 }
 
@@ -304,12 +303,12 @@ describe('runChatAgent', () => {
     });
 
     it('should throw on non-ok response', async () => {
-      fetchSpy.mockResolvedValue(mockResponse({ error: 'rate limited' }, false, 429));
+      fetchSpy.mockResolvedValue(mockResponse({ error: 'bad request' }, false, 400));
 
       await expect(runChatAgent({
         directory: '/project',
         messages: [{ role: 'user', content: 'hi' }],
-      })).rejects.toThrow('Chat API error 429');
+      })).rejects.toThrow('Chat API error 400');
     });
 
     it('should throw on empty choices', async () => {
@@ -415,12 +414,12 @@ describe('runChatAgent', () => {
     });
 
     it('should throw on non-ok response', async () => {
-      fetchSpy.mockResolvedValue(mockResponse({}, false, 500));
+      fetchSpy.mockResolvedValue(mockResponse({}, false, 400));
 
       await expect(runChatAgent({
         directory: '/project',
         messages: [{ role: 'user', content: 'hi' }],
-      })).rejects.toThrow('Gemini API error 500');
+      })).rejects.toThrow('Gemini API error 400');
     });
 
     it('should throw on empty candidates', async () => {

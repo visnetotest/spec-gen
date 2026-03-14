@@ -6,7 +6,7 @@
  */
 
 import { join } from 'node:path';
-import { fileExists, readJsonFile } from '../utils/command-helpers.js';
+import { readJsonFile } from '../utils/command-helpers.js';
 import {
   readSpecGenConfig,
   readOpenSpecConfig,
