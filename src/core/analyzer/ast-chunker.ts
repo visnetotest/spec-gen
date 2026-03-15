@@ -23,7 +23,7 @@ let _javaParser: Parser | undefined;
 
 async function getParserForLanguage(lang: string): Promise<Parser | null> {
   try {
-    switch (lang) {
+    switch (lang.toLowerCase()) {
       case 'typescript':
       case 'javascript': {
         if (!_tsParser) {

@@ -1,16 +1,37 @@
 /**
  * Tests for graph.ts pure utility functions:
  * buildAdjacency, bfs, computeRiskScore, recommendStrategy, nodeToSummary
+ * Plus error-path tests for the async handlers.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// Static mocks for handler tests
+vi.mock('./utils.js', () => ({
+  validateDirectory: vi.fn(async (dir: string) => dir),
+  readCachedContext: vi.fn(async () => null),
+  loadMappingIndex: vi.fn(async () => null),
+  specsForFile: vi.fn(() => []),
+  functionsForDomain: vi.fn(() => []),
+  isCacheFresh: vi.fn(async () => false),
+}));
+
 import {
   buildAdjacency,
   bfs,
   computeRiskScore,
   recommendStrategy,
   nodeToSummary,
+  handleGetCallGraph,
+  handleGetSubgraph,
+  handleAnalyzeImpact,
+  handleGetLowRiskRefactorCandidates,
+  handleGetLeafFunctions,
+  handleGetCriticalHubs,
+  handleGetGodFunctions,
+  handleGetFileDependencies,
 } from './graph.js';
+import { readCachedContext } from './utils.js';
 import type { FunctionNode, SerializedCallGraph, CallEdge } from '../../analyzer/call-graph.js';
 
 // ============================================================================
@@ -307,5 +328,59 @@ describe('nodeToSummary', () => {
     expect(summary.file).toBe('');
     expect(summary.className).toBeNull();
     expect(summary.depth).toBe(0);
+  });
+});
+
+// ============================================================================
+// Handler error paths (readCachedContext returns null → error object)
+// ============================================================================
+
+describe('handler error paths — no cached context', () => {
+  it('handleGetCallGraph returns error when no context', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue(null);
+    const result = await handleGetCallGraph('/tmp/proj') as { error: string };
+    expect(result.error).toContain('No analysis found');
+  });
+
+  it('handleGetSubgraph returns error when no context', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue(null);
+    const result = await handleGetSubgraph('/tmp/proj', 'doFoo') as { error: string };
+    expect(result.error).toContain('No analysis found');
+  });
+
+  it('handleAnalyzeImpact returns error when no context', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue(null);
+    const result = await handleAnalyzeImpact('/tmp/proj', 'doFoo') as { error: string };
+    expect(result.error).toContain('No analysis found');
+  });
+
+  it('handleGetLowRiskRefactorCandidates returns error when no context', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue(null);
+    const result = await handleGetLowRiskRefactorCandidates('/tmp/proj') as { error: string };
+    expect(result.error).toContain('No analysis found');
+  });
+
+  it('handleGetLeafFunctions returns error when no context', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue(null);
+    const result = await handleGetLeafFunctions('/tmp/proj') as { error: string };
+    expect(result.error).toContain('No analysis found');
+  });
+
+  it('handleGetCriticalHubs returns error when no context', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue(null);
+    const result = await handleGetCriticalHubs('/tmp/proj') as { error: string };
+    expect(result.error).toContain('No analysis found');
+  });
+
+  it('handleGetGodFunctions returns error when no context', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue(null);
+    const result = await handleGetGodFunctions('/tmp/proj') as { error: string };
+    expect(result.error).toContain('No analysis found');
+  });
+
+  it('handleGetFileDependencies returns error when no dependency graph file', async () => {
+    // readCachedContext not involved here; it reads a JSON file directly
+    const result = await handleGetFileDependencies('/tmp/proj', 'src/foo.ts') as { error: string };
+    expect(result.error).toContain('No dependency graph found');
   });
 });
