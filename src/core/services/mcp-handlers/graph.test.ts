@@ -4,7 +4,13 @@
  * Plus error-path tests for the async handlers.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+
+// Mock node:fs/promises so handleGetFileDependencies can be tested without disk I/O.
+// Default: readFile throws (simulates missing dep-graph file).
+vi.mock('node:fs/promises', () => ({
+  readFile: vi.fn(async () => { throw new Error('ENOENT'); }),
+}));
 
 // Static mocks for handler tests
 vi.mock('./utils.js', () => ({
@@ -495,5 +501,68 @@ describe('handleTraceExecutionPath', () => {
 
     const result = await handleTraceExecutionPath('/tmp/proj', 'A', 'D', 2) as { pathsFound: number };
     expect(result.pathsFound).toBe(0);
+  });
+});
+
+// ============================================================================
+// handleGetFileDependencies — direction branches
+// ============================================================================
+
+const DEP_GRAPH_FIXTURE = JSON.stringify({
+  nodes: [
+    { id: 'n1', file: { path: 'src/a.ts', absolutePath: '/proj/src/a.ts' } },
+    { id: 'n2', file: { path: 'src/b.ts', absolutePath: '/proj/src/b.ts' } },
+    { id: 'n3', file: { path: 'src/c.ts', absolutePath: '/proj/src/c.ts' } },
+  ],
+  edges: [
+    { source: 'n1', target: 'n2', importedNames: ['foo'], isTypeOnly: false, weight: 1 },
+    { source: 'n3', target: 'n1', importedNames: ['bar'], isTypeOnly: true,  weight: 1 },
+  ],
+});
+
+describe('handleGetFileDependencies — direction branches', () => {
+  afterEach(async () => {
+    const fs = await import('node:fs/promises');
+    vi.mocked(fs.readFile).mockRejectedValue(new Error('ENOENT'));
+  });
+
+  async function mockDepGraph() {
+    const fs = await import('node:fs/promises');
+    vi.mocked(fs.readFile).mockResolvedValue(DEP_GRAPH_FIXTURE as never);
+  }
+
+  it('returns imports only when direction is "imports"', async () => {
+    await mockDepGraph();
+    const result = await handleGetFileDependencies('/proj', 'src/a.ts', 'imports') as {
+      imports: unknown[]; importedBy: unknown; importsCount: number;
+    };
+    expect(result.imports).toHaveLength(1);
+    expect(result.importedBy).toBeUndefined();
+    expect(result.importsCount).toBe(1);
+  });
+
+  it('returns importedBy only when direction is "importedBy"', async () => {
+    await mockDepGraph();
+    const result = await handleGetFileDependencies('/proj', 'src/a.ts', 'importedBy') as {
+      imports: unknown; importedBy: unknown[]; importedByCount: number;
+    };
+    expect(result.importedBy).toHaveLength(1);
+    expect(result.imports).toBeUndefined();
+    expect(result.importedByCount).toBe(1);
+  });
+
+  it('returns both imports and importedBy when direction is "both"', async () => {
+    await mockDepGraph();
+    const result = await handleGetFileDependencies('/proj', 'src/a.ts', 'both') as {
+      imports: unknown[]; importedBy: unknown[];
+    };
+    expect(result.imports).toHaveLength(1);
+    expect(result.importedBy).toHaveLength(1);
+  });
+
+  it('returns error when file not found in dependency graph', async () => {
+    await mockDepGraph();
+    const result = await handleGetFileDependencies('/proj', 'src/nonexistent.ts') as { error: string };
+    expect(result.error).toContain('File not found in dependency graph');
   });
 });
