@@ -8,13 +8,14 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import logger from '../../utils/logger.js';
-import { SKELETON_EXCERPT_MAX_CHARS } from '../../constants.js';
+import { SKELETON_EXCERPT_MAX_CHARS, SKELETON_STANDALONE_MAX_CHARS, STAGE_CHUNK_MAX_CHARS } from '../../constants.js';
 import type { ProgressIndicator } from '../../utils/progress.js';
 import type { LLMService } from '../services/llm-service.js';
 import type { RepoStructure, LLMContext } from '../analyzer/artifact-generator.js';
 import { buildGraphPromptSection, getFileGodFunctions, extractSubgraph } from '../analyzer/subgraph-extractor.js';
 import { getSkeletonContent, detectLanguage, isSkeletonWorthIncluding } from '../analyzer/code-shaper.js';
 import type { DependencyGraphResult } from '../analyzer/dependency-graph.js';
+import type { RefactorReport } from '../analyzer/refactor-analyzer.js';
 import { isTestFile } from '../analyzer/artifact-generator.js';
 import { runStage1 } from './stages/stage1-survey.js';
 import { runStage2 } from './stages/stage2-entities.js';
@@ -98,7 +99,8 @@ export class SpecGenerationPipeline implements PipelineContext {
   async run(
     repoStructure: RepoStructure,
     llmContext: LLMContext,
-    depGraph?: DependencyGraphResult
+    depGraph?: DependencyGraphResult,
+    refactorReport?: RefactorReport
   ): Promise<PipelineResult> {
     this.currentLLMContext = llmContext;
     const startTime = Date.now();
@@ -229,7 +231,7 @@ export class SpecGenerationPipeline implements PipelineContext {
        const architecture = await executeStage(
          'architecture',
          'Architecture Synthesis',
-         async () => runStage5(this, survey, entities, services, endpoints, depGraph, llmContext.callGraph),
+         async () => runStage5(this, survey, entities, services, endpoints, depGraph, llmContext.callGraph, refactorReport),
          () => this.getDefaultArchitecture(survey),
          data => ({
            ...data,
@@ -339,33 +341,52 @@ export class SpecGenerationPipeline implements PipelineContext {
 
   /**
    * For a large file, try to build a graph-based prompt section.
-   * Returns null when no call graph data is available or the file has no god functions
-   * (caller should fall back to raw source chunking).
+   * Returns null when the file is small enough for raw chunking and has no graph data.
    *
-   * When file content is provided, appends a stripped skeleton when it achieves
-   * a meaningful size reduction (≥ 20%), giving the LLM both topology and
-   * internal control-flow structure.
+   * Priority:
+   *  1. Graph section (god functions) + optional skeleton supplement  — richest representation
+   *  2. Standalone skeleton for large files without god functions     — avoids [PARTIAL SPEC]
+   *  3. null → caller falls back to raw AST chunking
+   *
+   * The skeleton fallback fires when content would be split (> STAGE_CHUNK_MAX_CHARS) and
+   * the skeleton achieves ≥ 20% size reduction AND fits within SKELETON_STANDALONE_MAX_CHARS.
    */
   graphPromptFor(filePath: string, content?: string): string | null {
     const ctx = this.currentLLMContext;
-    if (!ctx?.callGraph) return null;
 
-    const graphSection = buildGraphPromptSection(ctx.callGraph, ctx.signatures, filePath);
-    if (!graphSection) return null;
-    if (!content) return graphSection;
+    // ── Path 1: graph section exists (file has god functions) ──────────────
+    if (ctx?.callGraph) {
+      const graphSection = buildGraphPromptSection(ctx.callGraph, ctx.signatures, filePath);
+      if (graphSection) {
+        if (!content) return graphSection;
 
-    const language = detectLanguage(filePath);
-    const skeleton = getSkeletonContent(content, language);
+        const language = detectLanguage(filePath);
+        const skeleton = getSkeletonContent(content, language);
 
-    if (isSkeletonWorthIncluding(content, skeleton)) {
-      // Cap skeleton to avoid overwhelming the prompt
-      const skeletonExcerpt = skeleton.length > SKELETON_EXCERPT_MAX_CHARS
-        ? skeleton.slice(0, SKELETON_EXCERPT_MAX_CHARS) + '\n... [skeleton truncated]'
-        : skeleton;
-      return `${graphSection}\n\nFunction skeleton (logs/comments stripped):\n${skeletonExcerpt}`;
+        if (isSkeletonWorthIncluding(content, skeleton)) {
+          // Cap skeleton to avoid overwhelming the prompt
+          const skeletonExcerpt = skeleton.length > SKELETON_EXCERPT_MAX_CHARS
+            ? skeleton.slice(0, SKELETON_EXCERPT_MAX_CHARS) + '\n... [skeleton truncated]'
+            : skeleton;
+          return `${graphSection}\n\nFunction skeleton (logs/comments stripped):\n${skeletonExcerpt}`;
+        }
+
+        return graphSection;
+      }
     }
 
-    return graphSection;
+    // ── Path 2: skeleton fallback for large files without god functions ─────
+    // Avoids splitting files into multiple chunks (and the resulting [PARTIAL SPEC] marker)
+    // when the skeleton alone is a complete, noise-free representation.
+    if (content && content.length > STAGE_CHUNK_MAX_CHARS) {
+      const language = detectLanguage(filePath);
+      const skeleton = getSkeletonContent(content, language);
+      if (isSkeletonWorthIncluding(content, skeleton) && skeleton.length <= SKELETON_STANDALONE_MAX_CHARS) {
+        return `Function skeleton (logs/comments stripped):\n${skeleton}`;
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -749,8 +770,9 @@ export async function runSpecGenerationPipeline(
   repoStructure: RepoStructure,
   llmContext: LLMContext,
   options: PipelineOptions,
-  depGraph?: DependencyGraphResult
+  depGraph?: DependencyGraphResult,
+  refactorReport?: RefactorReport
 ): Promise<PipelineResult> {
   const pipeline = new SpecGenerationPipeline(llm, options);
-  return pipeline.run(repoStructure, llmContext, depGraph);
+  return pipeline.run(repoStructure, llmContext, depGraph, refactorReport);
 }

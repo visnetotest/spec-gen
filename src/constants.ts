@@ -232,6 +232,9 @@ export const STAGE_CHUNK_MAX_CHARS = 8_000;
 /** Max characters of skeleton excerpt appended to graph prompt */
 export const SKELETON_EXCERPT_MAX_CHARS = 4_000;
 
+/** Max characters for a standalone skeleton used as fallback for large files without god functions */
+export const SKELETON_STANDALONE_MAX_CHARS = 10_000;
+
 /** Verification engine: max tokens for file-purpose prediction */
 export const VERIFICATION_PREDICTION_MAX_TOKENS = 1_000;
 
@@ -372,6 +375,12 @@ export const STAGE5_ENTRY_POINTS_LIMIT = 8;
 
 /** Max layer violations included in Stage 5 architecture prompt */
 export const STAGE5_VIOLATIONS_LIMIT = 5;
+
+/** Max refactor priority entries (god functions, cycles, SRP violations) shown to Stage 5 */
+export const STAGE5_REFACTOR_PRIORITIES_LIMIT = 8;
+
+/** Max dependency cycles shown to Stage 5 */
+export const STAGE5_CYCLES_LIMIT = 3;
 
 // ============================================================================
 // ARTIFACT GENERATOR
