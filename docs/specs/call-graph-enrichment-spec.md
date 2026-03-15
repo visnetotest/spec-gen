@@ -175,7 +175,7 @@ const candidates = trie.findBySimpleName(raw.calleeName);
 
 C'est la modification centrale qui débloque les Phases 3 et 4.
 
-### 2.1 — Étendre le type `RawEdge` dans `call-graph.ts`
+### 2.1 — Étendre `RawEdge` et ajouter `EdgeConfidence` dans `call-graph.ts`
 
 Ajouter avant la classe `CallGraphBuilder` :
 ```typescript
@@ -184,6 +184,25 @@ interface RawEdge {
   calleeName: string;
   line: number;
   calleeObject?: string;  // "svc" dans svc.process(), "self" dans self.run()
+}
+
+/** Niveau de confiance d'un edge résolu — ordre décroissant de certitude. */
+export type EdgeConfidence =
+  | 'self_cls'        // self.foo() / cls.foo() — intra-classe, sans ambiguïté
+  | 'type_inference'  // svc.foo() + svc: MyClass inféré dans le même corps de fonction
+  | 'import'          // nom importé explicitement, fichier source connu
+  | 'same_file'       // seul candidat dans le même fichier
+  | 'name_only';      // nom unique dans tout le projet, sans autre contexte
+```
+
+Étendre `CallEdge` pour inclure la confiance :
+```typescript
+interface CallEdge {
+  callerId: string;
+  calleeId: string;
+  calleeName: string;
+  line: number;
+  confidence: EdgeConfidence;
 }
 ```
 
@@ -426,6 +445,33 @@ const callGraph = await callGraphBuilder.build(files, layers, importMap);
 ## Phase 4 — `TypeInferenceEngine` *(par langage)*
 
 Créer `src/core/analyzer/type-inference-engine.ts`.
+
+### Granularité : corps de fonction, pas fichier entier
+
+**Problème (ChatGPT) :** Si on passe le fichier entier à `inferTypesFromSource`, une variable locale `svc` d'une fonction peut polluer la résolution dans une autre fonction du même fichier qui a aussi un `svc` d'un autre type.
+
+**Solution :** indexer les types inférés par `functionId` (= `callerId` dans `RawEdge`), en passant uniquement le corps de la fonction via `node.startIndex` / `node.endIndex`.
+
+Dans Phase 6, `inferredTypesByFile` devient `inferredTypesByFunction` :
+```typescript
+// AVANT
+const inferredTypesByFile = new Map<string, InferredTypes>();
+for (const file of files) {
+  inferredTypesByFile.set(file.path, inferTypesFromSource(file.content, file.language));
+}
+// usage : inferredTypesByFile.get(callerNode.filePath)
+
+// APRÈS
+const fileContents = new Map(files.map(f => [f.path, f.content]));
+const inferredTypesByFunction = new Map<string, InferredTypes>();
+for (const [nodeId, node] of allNodes) {
+  const body = (fileContents.get(node.filePath) ?? '').slice(node.startIndex, node.endIndex);
+  inferredTypesByFunction.set(nodeId, inferTypesFromSource(body, node.language));
+}
+// usage : inferredTypesByFunction.get(raw.callerId)
+```
+
+L'API de `inferTypesFromSource` ne change pas — seul le texte passé est plus court.
 
 ### Interface commune
 
@@ -734,9 +780,12 @@ import { type ImportMap } from './import-resolver-bridge.js';
 import { buildCppImportMap } from './cpp-header-resolver.js';
 
 // Dans build(), après Pass 1 :
-const inferredTypesByFile = new Map<string, ReturnType<typeof inferTypesFromSource>>();
-for (const file of files) {
-  inferredTypesByFile.set(file.path, inferTypesFromSource(file.content, file.language));
+// ── Inférence de types par corps de fonction (scope correct, pas fichier entier)
+const fileContents = new Map(files.map(f => [f.path, f.content]));
+const inferredTypesByFunction = new Map<string, InferredTypes>();
+for (const [nodeId, node] of allNodes) {
+  const body = (fileContents.get(node.filePath) ?? '').slice(node.startIndex, node.endIndex);
+  inferredTypesByFunction.set(nodeId, inferTypesFromSource(body, node.language));
 }
 
 const cppImportMap = buildCppImportMap(
@@ -746,33 +795,33 @@ const cppImportMap = buildCppImportMap(
 
 // Boucle de résolution (remplace le contenu existant) :
 for (const raw of allRawEdges) {
-  // Stratégie 1 : self / cls Python → intra-classe directe
+  // Stratégie 1 : self / cls Python → intra-classe directe  [confidence: self_cls]
   if (raw.calleeObject === 'self' || raw.calleeObject === 'cls') {
     const callerNode = allNodes.get(raw.callerId);
     if (callerNode?.className) {
       const candidates = trie.findByQualifiedName(callerNode.className, raw.calleeName);
       if (candidates.length > 0) {
         edges.push({ callerId: raw.callerId, calleeId: candidates[0].id,
-                     calleeName: raw.calleeName, line: raw.line });
+                     calleeName: raw.calleeName, line: raw.line,
+                     confidence: 'self_cls' });
         continue;
       }
     }
   }
 
-  // Stratégie 2 : inférence de type sur le receiver
+  // Stratégie 2 : inférence de type sur le receiver  [confidence: type_inference]
   if (raw.calleeObject && raw.calleeObject !== 'self' && raw.calleeObject !== 'cls') {
-    const callerNode = allNodes.get(raw.callerId);
-    if (callerNode) {
-      const inferredTypes = inferredTypesByFile.get(callerNode.filePath);
-      if (inferredTypes) {
-        const resolved = resolveViaTypeInference(
-          raw.calleeObject, raw.calleeName, inferredTypes, trie
-        );
-        if (resolved) {
-          edges.push({ callerId: raw.callerId, calleeId: resolved.id,
-                       calleeName: raw.calleeName, line: raw.line });
-          continue;
-        }
+    // Types inférés à partir du corps de la fonction appelante uniquement
+    const inferredTypes = inferredTypesByFunction.get(raw.callerId);
+    if (inferredTypes) {
+      const resolved = resolveViaTypeInference(
+        raw.calleeObject, raw.calleeName, inferredTypes, trie
+      );
+      if (resolved) {
+        edges.push({ callerId: raw.callerId, calleeId: resolved.id,
+                     calleeName: raw.calleeName, line: raw.line,
+                     confidence: 'type_inference' });
+        continue;
       }
     }
     // Receiver non résolu et non self/cls → ignorer (évite les faux positifs)
@@ -784,12 +833,15 @@ for (const raw of allRawEdges) {
   if (candidates.length === 0) continue;
 
   let calleeNode: FunctionNode;
+  let confidence: EdgeConfidence;
+
   if (candidates.length === 1) {
     calleeNode = candidates[0];
+    confidence = 'name_only';
   } else {
     const callerNode = allNodes.get(raw.callerId);
 
-    // Stratégie import (TS, JS, Python, Go, Rust, Ruby, Java)
+    // Stratégie import (TS, JS, Python, Go, Rust, Ruby, Java)  [confidence: import]
     let fromImport: FunctionNode | undefined;
     if (importMap && callerNode) {
       const sourceFile = importMap.get(callerNode.filePath)?.get(raw.calleeName);
@@ -800,7 +852,7 @@ for (const raw of allRawEdges) {
       }
     }
 
-    // Stratégie C++ headers
+    // Stratégie C++ headers  [confidence: import]
     let fromHeader: FunctionNode | undefined;
     if (!fromImport && callerNode?.language === 'C++') {
       const accessibleImpls = cppImportMap.get(callerNode.filePath);
@@ -810,7 +862,17 @@ for (const raw of allRawEdges) {
     }
 
     const sameFile = candidates.find(c => c.filePath === callerNode?.filePath);
-    calleeNode = fromImport ?? fromHeader ?? sameFile ?? candidates[0];
+
+    if (fromImport ?? fromHeader) {
+      calleeNode = (fromImport ?? fromHeader)!;
+      confidence = 'import';
+    } else if (sameFile) {
+      calleeNode = sameFile;
+      confidence = 'same_file';
+    } else {
+      calleeNode = candidates[0];
+      confidence = 'name_only';
+    }
   }
 
   edges.push({
@@ -818,6 +880,7 @@ for (const raw of allRawEdges) {
     calleeId: calleeNode.id,
     calleeName: raw.calleeName,
     line: raw.line,
+    confidence,
   });
 }
 ```
@@ -909,3 +972,5 @@ void start() {
 | `imp.source` dans import-parser.ts est un chemin relatif brut | Utiliser `resolve(dir, imp.source)` — déjà fait dans le bridge |
 | Les tests d'intégration existants (`regression.integration.test.ts`) | Les exécuter après chaque phase, pas seulement à la fin |
 | `CallEdge.calleeId` est `''` pour les appels non résolus | Contrat conservé : ne jamais remplacer la chaîne vide par autre chose |
+| Scope des types inférés : fichier entier → pollution inter-fonctions | Passer `content.slice(node.startIndex, node.endIndex)` — indexer par `functionId`, pas `filePath` |
+| `confidence` ajouté à `CallEdge` — champ nouveau | Vérifier que les consommateurs de `CallGraphResult` (artifact-generator, tests) ne cassent pas si le champ est inconnu ; `name_only` est la valeur par défaut la plus permissive |
