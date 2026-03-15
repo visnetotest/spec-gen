@@ -640,6 +640,27 @@ curl -sL https://raw.githubusercontent.com/clay-good/spec-gen/main/skills/opensp
 - List domains with `list_spec_domains`
 - Navigate requirements and scenarios
 
+### Agent Setup
+
+After running `spec-gen analyze`, the analysis generates `.spec-gen/CODEBASE.md` -- a compact architecture digest that agents read passively without any tool call. Add it to your `CLAUDE.md` (or `.clinerules` for Cline / Roo Code):
+
+```markdown
+## Codebase analysis (spec-gen)
+
+Read `.spec-gen/CODEBASE.md` before starting any task.
+It contains entry points, critical hubs, spec domains, and high-coupling files.
+
+When you need to:
+- Find where a concept is implemented → `search_code` (MCP)
+- Understand call topology around a function → `get_subgraph` (MCP)
+- Find where to add a new feature → `orient` (MCP) — START HERE for new tasks
+- Check if code matches the spec → `check_spec_drift` (MCP)
+```
+
+`orient` is the recommended entry point for new tasks on an unfamiliar codebase -- it combines semantic search, graph traversal, and spec lookup in a single call.
+
+`search_code` falls back to keyword matching automatically when the embedding server is unavailable, so it always returns results.
+
 ### Tools
 
 All tools run on **pure static analysis** -- no LLM quota consumed.
