@@ -29,7 +29,7 @@
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:openspec-compat": "vitest run --grep 'openspec' || echo 'No OpenSpec compat tests yet'",
-    "test:e2e": "vitest run --grep 'e2e' || echo 'No E2E tests yet'",
+    "test:e2e": "vitest run --config vitest.integration.config.ts --reporter=verbose",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "build:watch": "tsc --watch",
     "clean": "rm -rf dist coverage",
