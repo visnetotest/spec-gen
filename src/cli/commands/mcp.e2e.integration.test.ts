@@ -254,9 +254,9 @@ describe('RIG-19 — MCP e2e integration on real spec-gen codebase', () => {
     // Entry points present
     expect(data.entryPoints.length).toBeGreaterThan(0);
 
-    // Known hub: 'push' in chat-tools.ts is the highest fan-in function in spec-gen
-    const push = data.hubFunctions.find(h => h.name === 'push');
-    expect(push, '"push" (highest fan-in hub) not found in hub list').toBeDefined();
+    // Known hub: 'validateDirectory' is the highest fan-in function in spec-gen (called by all MCP handlers)
+    const validateDir = data.hubFunctions.find(h => h.name === 'validateDirectory');
+    expect(validateDir, '"validateDirectory" (highest fan-in hub) not found in hub list').toBeDefined();
   });
 
   // --------------------------------------------------------------------------
