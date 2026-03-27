@@ -1,4 +1,7 @@
-# BMAD + spec-gen Integration Guide
+# BMAD Integration
+
+> One implementation of the [generic spec-gen agentic workflow pattern](./README.md).
+> Assets: [`examples/bmad/`](../../examples/bmad/)
 
 This guide explains how to connect [BMAD Method](https://docs.bmad-method.org) with spec-gen
 to enable safe, spec-driven development on brownfield codebases.
