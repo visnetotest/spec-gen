@@ -12,8 +12,8 @@ Detects conflicts, blocked stories, and ordering constraints using structural an
 
 ## Prerequisites
 
-- Brownfield onboarding completed (`bmad/tasks/brownfield-onboarding.md`)
-- All sprint candidate stories have a `risk_context` section (see `bmad/templates/story-brownfield.md`)
+- Brownfield onboarding completed (`bmad/tasks/onboarding.md`)
+- All sprint candidate stories have a `risk_context` section (see `bmad/templates/story.md`)
 - If `risk_context` is missing on any story, run the Architect brownfield agent on it first
 
 ---

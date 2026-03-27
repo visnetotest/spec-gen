@@ -18,10 +18,10 @@ BMAD workflow.
 ```
 ── ARCHITECTURE PHASE ──────────────────────────────────────────────────────────
 
-  Brownfield Onboarding          ← bmad/tasks/brownfield-onboarding.md (run once)
+  Brownfield Onboarding          ← bmad/tasks/onboarding.md (run once)
        │  spec-gen analyze + generate
        ▼
-  Architect Agent                ← bmad/agents/architect-brownfield.md
+  Architect Agent                ← bmad/agents/architect.md
        │  get_architecture_overview
        │  get_refactor_report          → no-touch zones
        │  get_critical_hubs            → hub risk landscape
@@ -34,13 +34,13 @@ BMAD workflow.
 
 ── PLANNING PHASE ──────────────────────────────────────────────────────────────
 
-  PM Agent                       ← uses story-brownfield template
+  PM Agent                       ← uses bmad/templates/story.md
        │  risk_context pre-filled from architect output
        ▼
   Sprint Candidate               ← stories with risk_context embedded
        │
        ▼
-  Sprint Planning                ← bmad/tasks/sprint-planning-brownfield.md
+  Sprint Planning                ← bmad/tasks/sprint-planning.md
        │  generate_change_proposal    → per story
        │  get_critical_hubs           → conflict detection
        │  check_spec_drift            → coverage gaps
@@ -49,7 +49,7 @@ BMAD workflow.
 
 ── IMPLEMENTATION PHASE ────────────────────────────────────────────────────────
 
-  Dev Agent                      ← bmad/agents/dev-brownfield.md
+  Dev Agent                      ← bmad/tasks/implement-story.md
        │  reads risk_context from story (already known)
        │  orient + analyze_impact    → confirm + verify, not discover
        ▼
@@ -118,12 +118,12 @@ cp -r /path/to/spec-gen/bmad/ ./bmad/
 
 **Step 4a — Brownfield onboarding** (prerequisite for architecture, not for dev):
 
-Open `bmad/tasks/brownfield-onboarding.md` with your Architect Agent and follow the steps.
+Open `bmad/tasks/onboarding.md` with your Architect Agent and follow the steps.
 This builds the structural baseline the architect needs to write a grounded architecture doc.
 
 **Step 4b — Architect brownfield analysis**:
 
-Load `bmad/agents/architect-brownfield.md` into your Architect Agent.
+Load `bmad/agents/architect.md` into your Architect Agent.
 It will run structural analysis, identify no-touch zones, assess epics, and produce:
 - `docs/architecture.md` with a "Structural Reality" section
 - Technical debt stories for the backlog
@@ -131,7 +131,7 @@ It will run structural analysis, identify no-touch zones, assess epics, and prod
 
 ### 5. Sprint planning
 
-Before each sprint, load `bmad/tasks/sprint-planning-brownfield.md` with your SM/Architect Agent.
+Before each sprint, load `bmad/tasks/sprint-planning.md` with your SM/Architect Agent.
 It validates the sprint candidate, detects conflicts, and recommends story ordering.
 
 ### 6. Load agent extensions
@@ -139,9 +139,12 @@ It validates the sprint candidate, detects conflicts, and recommends story order
 In your project's `CLAUDE.md` (or BMAD agent configuration):
 
 ```markdown
-@bmad/agents/architect-brownfield.md   ← for Architect Agent sessions
-@bmad/agents/dev-brownfield.md         ← for Dev Agent sessions
+@bmad/agents/architect.md   ← for Architect Agent sessions
 ```
+
+`bmad/agents/dev-brownfield.md` is a fallback override — load it only when
+planning was skipped and stories have no `risk_context`. Remove it once
+the architect agent has populated the stories.
 
 ---
 
@@ -151,23 +154,23 @@ In your project's `CLAUDE.md` (or BMAD agent configuration):
 
 | File | Phase | Purpose |
 |---|---|---|
-| `bmad/agents/architect-brownfield.md` | Architecture | Structural reality check before design; epic risk assessment |
-| `bmad/agents/dev-brownfield.md` | Implementation | Pre-implementation gate; scope enforcement |
+| `bmad/agents/architect.md` | Architecture | Structural reality check before design; epic risk assessment |
+| `bmad/agents/dev-brownfield.md` | Implementation *(optional)* | Fallback gate when stories have no `risk_context` |
 
 ### Tasks
 
 | File | Phase | Who | Purpose |
 |---|---|---|---|
-| `bmad/tasks/brownfield-onboarding.md` | **Architecture** | Architect | One-time structural baseline — run before first sprint |
-| `bmad/tasks/sprint-planning-brownfield.md` | **Planning** | SM / Architect | Per-sprint risk matrix, conflict detection, story ordering |
-| `bmad/tasks/implement-story-brownfield.md` | Implementation | Dev | Story implementation with pre-filled risk context |
-| `bmad/tasks/brownfield-refactor.md` | Implementation | Dev | Safe refactor when risk ≥ 70 blocks a story |
+| `bmad/tasks/onboarding.md` | **Architecture** | Architect | One-time structural baseline — run before first sprint |
+| `bmad/tasks/sprint-planning.md` | **Planning** | SM / Architect | Per-sprint risk matrix, conflict detection, story ordering |
+| `bmad/tasks/implement-story.md` | Implementation | Dev | Story implementation with pre-filled risk context |
+| `bmad/tasks/refactor.md` | Implementation | Dev | Safe refactor when risk ≥ 70 blocks a story |
 
 ### Templates
 
 | File | Purpose |
 |---|---|
-| `bmad/templates/story-brownfield.md` | Story template with `risk_context` section (pre-filled by Architect) |
+| `bmad/templates/story.md` | Story template with `risk_context` section (pre-filled by Architect) |
 
 ---
 

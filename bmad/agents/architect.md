@@ -4,7 +4,7 @@
 > It adds a structural reality check via spec-gen BEFORE writing any architecture document.
 >
 > Requires: spec-gen MCP server connected and brownfield onboarding completed
-> (see `bmad/tasks/brownfield-onboarding.md`).
+> (see `bmad/tasks/onboarding.md`).
 
 ---
 
@@ -167,7 +167,7 @@ Design the future state here — new domains, desired boundaries, patterns to in
 
 For every no-touch zone, create a **refactor story** in the BMAD backlog:
 
-Use the template `bmad/templates/story-brownfield.md` with:
+Use the template `bmad/templates/story.md` with:
 - Story type: `technical-debt`
 - Title: `Refactor {function}: {issue}`
 - Blocking: list stories that cannot proceed until this is done
