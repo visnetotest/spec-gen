@@ -1,10 +1,25 @@
-# Agent: Architect
+# Agent: Architect — spec-gen extension
 
-> **Load this file alongside your standard BMAD `architect` agent persona.**
-> It adds a structural reality check via spec-gen before writing any architecture document.
+> **This file is a sidecar for the BMAD `architect` agent.**
+>
+> **Setup (one-time):**
+> ```bash
+> # 1. Copy this file into your BMAD project
+> cp examples/bmad/agents/architect.md _bmad/_memory/architect-sidecar/spec-gen.md
+>
+> # 2. Install the customization that tells BMAD to load it
+> cp examples/bmad/setup/architect.customize.yaml \
+>    _bmad/_config/customizations/architect.customize.yaml
+>
+> # 3. Recompile BMAD agents
+> npx bmad-method install
+> ```
+>
+> After that, the Architect agent loads this file automatically at session start.
+> No manual step needed in the conversation.
 >
 > Requires: spec-gen MCP server connected and onboarding completed
-> (see `bmad/tasks/onboarding.md`).
+> (see `tasks/onboarding.md`).
 
 ---
 

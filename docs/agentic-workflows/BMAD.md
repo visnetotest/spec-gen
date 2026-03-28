@@ -88,66 +88,100 @@ Codebase (brownfield) + openspec/ (specs)
 
 ## Setup
 
-### 1. Install spec-gen
+### Prerequisites
+
+- Node.js 20+
+- BMAD installed: `npx bmad-method install` (version 6+)
+- spec-gen MCP server built and running
+
+### 1. Install spec-gen MCP server
 
 ```bash
 npm install -g spec-gen
-# or from this repo:
-npm install && npm run build
 ```
 
-### 2. Connect spec-gen as an MCP server
-
-In your Claude Code / Cline / Cursor MCP configuration:
+Connect it in your IDE's MCP config (Claude Code, Cursor, Windsurf…):
 
 ```json
 {
   "mcpServers": {
     "spec-gen": {
-      "command": "node",
-      "args": ["/path/to/spec-gen/dist/cli/index.js", "mcp", "--watch-auto"]
+      "command": "spec-gen",
+      "args": ["mcp", "--watch-auto"]
     }
   }
 }
 ```
 
-### 3. Copy BMAD integration files into your project
+### 2. Install BMAD in your project (if not already done)
 
 ```bash
-cp -r /path/to/spec-gen/bmad/ ./bmad/
+npx bmad-method install
 ```
 
-### 4. Architecture phase setup (run once, before first sprint)
+This creates the `_bmad/` directory with agents, tasks, and config.
 
-**Step 4a — Brownfield onboarding** (prerequisite for architecture, not for dev):
+### 3. Copy spec-gen BMAD assets into your project
 
-Open `bmad/tasks/onboarding.md` with your Architect Agent and follow the steps.
-This builds the structural baseline the architect needs to write a grounded architecture doc.
+```bash
+# Tasks and templates
+cp -r /path/to/spec-gen/examples/bmad/tasks/    _bmad/spec-gen/tasks/
+cp -r /path/to/spec-gen/examples/bmad/templates/ _bmad/spec-gen/templates/
 
-**Step 4b — Architect brownfield analysis**:
-
-Load `bmad/agents/architect.md` into your Architect Agent.
-It will run structural analysis, identify no-touch zones, assess epics, and produce:
-- `docs/architecture.md` with a "Structural Reality" section
-- Technical debt stories for the backlog
-- `risk_context` annotations on feature stories
-
-### 5. Sprint planning
-
-Before each sprint, load `bmad/tasks/sprint-planning.md` with your SM/Architect Agent.
-It validates the sprint candidate, detects conflicts, and recommends story ordering.
-
-### 6. Load agent extensions
-
-In your project's `CLAUDE.md` (or BMAD agent configuration):
-
-```markdown
-@bmad/agents/architect.md   ← for Architect Agent sessions
+# Architect sidecar (loaded automatically by the Architect agent)
+mkdir -p _bmad/_memory/architect-sidecar
+cp /path/to/spec-gen/examples/bmad/agents/architect.md \
+   _bmad/_memory/architect-sidecar/spec-gen.md
 ```
 
-`bmad/agents/dev-brownfield.md` is a fallback override — load it only when
-planning was skipped and stories have no `risk_context`. Remove it once
-the architect agent has populated the stories.
+### 4. Install the Architect agent customization
+
+```bash
+cp /path/to/spec-gen/examples/bmad/setup/architect.customize.yaml \
+   _bmad/_config/customizations/architect.customize.yaml
+```
+
+This customization does two things:
+- Sets `hasSidecar: true` on the Architect agent
+- Adds a `Load COMPLETE file` directive pointing to `spec-gen.md`
+
+### 5. Recompile BMAD agents
+
+```bash
+npx bmad-method install
+```
+
+The compiled Architect agent now automatically loads the spec-gen instructions
+at session start. **No manual step needed in the conversation.**
+
+### 6. Index your codebase (run once, then after major changes)
+
+```bash
+spec-gen analyze   # builds call graph + risk index (~2–5 min)
+spec-gen generate  # generates OpenSpec specs from the analysis
+```
+
+### 7. Start your first architecture session
+
+Open the BMAD Architect agent in your IDE. It will automatically:
+1. Load the spec-gen sidecar instructions
+2. Begin with Phase 0 — Structural Reality (MCP calls)
+3. Produce `docs/architecture.md` with a "Structural Reality" section
+
+---
+
+**Optional: dev-brownfield fallback**
+
+`agents/dev-brownfield.md` is a fallback for when the architecture phase was skipped
+and stories have no `risk_context`. Install it the same way:
+
+```bash
+mkdir -p _bmad/_memory/dev-sidecar
+cp /path/to/spec-gen/examples/bmad/agents/dev-brownfield.md \
+   _bmad/_memory/dev-sidecar/spec-gen-fallback.md
+```
+
+Remove it once the Architect has annotated all stories.
 
 ---
 
