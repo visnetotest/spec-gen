@@ -12,6 +12,34 @@ Mistral Vibe implementation of the [spec-gen agentic workflow pattern](../../doc
 | `skills/spec-gen-execute-refactor/` | Apply a refactor plan produced by spec-gen-plan-refactor |
 | `skills/spec-gen-implement-story/` | Implement a story with structural pre-flight check, test gate, and drift verification |
 
+## Workflow
+
+```mermaid
+flowchart TD
+    subgraph ANALYSIS ["📊 Analysis (one-time)"]
+        A["/spec-gen-analyze-codebase"] --> B["/spec-gen-generate"]
+    end
+
+    subgraph REFACTOR ["🔧 Refactor cycle (optional)"]
+        C["/spec-gen-plan-refactor\n→ .spec-gen/refactor-plan.md"] --> D["/spec-gen-execute-refactor\nchange by change, test gate"]
+    end
+
+    subgraph FEATURE ["⚙️ Feature / Story"]
+        E["/spec-gen-implement-story"] --> F["orient + analyze_impact\nrisk gate ≥ 70 → blocks"]
+        F --> G["search_specs\nread requirements"]
+        G --> H["implement"]
+        H --> I["tests green ✅"]
+        I --> J["check_spec_drift"]
+    end
+
+    B --> C
+    B --> E
+    D --> E
+
+    style F fill:#fff3cd,stroke:#ffc107
+    style I fill:#d4edda,stroke:#28a745
+```
+
 ## Usage
 
 Copy the skills into your Mistral Vibe project skills directory and invoke them with their slash commands:

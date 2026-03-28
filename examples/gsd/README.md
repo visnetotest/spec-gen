@@ -33,6 +33,43 @@ cp -r examples/gsd/commands/gsd/ ~/.claude/commands/gsd/
 
 ## Workflow
 
+```mermaid
+flowchart TD
+    MAP["/gsd:map-codebase\nnarrative docs\n(STACK, ARCHITECTURE…)"] --> ORIENT
+
+    subgraph SG_PRE ["spec-gen — pre-phase (brownfield)"]
+        ORIENT["/gsd:spec-gen-orient\norient + analyze_impact"]
+        ORIENT --> GATE{risk ≥ 70?}
+        GATE -- yes --> INSERT["🔴 /gsd:insert-phase\nadd refactor phase"]
+        GATE -- no --> RISK_CTX[".planning/codebase/\nRISK-CONTEXT.md"]
+    end
+
+    INSERT --> ORIENT
+    RISK_CTX --> PLAN["/gsd:plan-phase N"]
+    PLAN --> EXEC["/gsd:execute-phase N"]
+    EXEC --> VERIFY["/gsd:verify-work N"]
+    VERIFY --> TESTS{tests pass?}
+    TESTS -- no --> GAP["/gsd:execute-phase --gaps-only"]
+    GAP --> VERIFY
+    TESTS -- yes --> DRIFT
+
+    subgraph SG_POST ["spec-gen — post-phase"]
+        DRIFT["/gsd:spec-gen-drift N\ncheck_spec_drift"]
+        DRIFT --> RESULT{drift?}
+        RESULT -- stale --> FIX["fix ref now"]
+        RESULT -- gap --> NOTE["note → post-milestone\nspec-gen generate"]
+        RESULT -- none --> CLEAN["✅ clean"]
+    end
+
+    CLEAN --> COMPLETE["/gsd:complete-milestone"]
+    NOTE --> COMPLETE
+    FIX --> COMPLETE
+
+    style INSERT fill:#fdd,stroke:#c00
+    style TESTS fill:#fff3cd,stroke:#ffc107
+    style CLEAN fill:#d4edda,stroke:#28a745
+```
+
 ```
 /gsd:new-project or /gsd:map-codebase   ← existing GSD commands
 
