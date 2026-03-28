@@ -94,6 +94,20 @@ flowchart TD
 | 40–69 | 🟡 medium | Proceed — protect callers listed in RISK-CONTEXT.md |
 | ≥ 70 | 🔴 high / critical | Stop — use `/gsd:insert-phase` to add a refactor phase first |
 
+## OpenSpec spec baseline
+
+`/gsd:spec-gen-orient` uses `search_specs` to surface relevant requirements, and
+`/gsd:spec-gen-drift` uses `check_spec_drift` to verify alignment. Both require
+OpenSpec specs to exist — without them, results are empty or everything shows as uncovered.
+
+| State | What to do |
+|---|---|
+| No specs yet | Run `spec-gen generate $PROJECT_ROOT` before the first phase — or let `/gsd:spec-gen-drift` offer to do it |
+| Specs exist | Both commands work as expected |
+| New code not yet spec'd | `drift` flags it as `uncovered` — run `spec-gen generate` post-milestone |
+
+Both commands detect missing specs automatically and prompt you to generate them.
+
 ## Relation to `/gsd:map-codebase`
 
 `/gsd:map-codebase` uses parallel mapper agents to produce narrative documents

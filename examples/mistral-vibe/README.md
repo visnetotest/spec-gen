@@ -56,3 +56,17 @@ Each skill follows the generic pre-flight pattern:
 - `orient` + `analyze_impact` before any code change
 - test gate before `check_spec_drift`
 - `check_spec_drift` after tests are green
+
+## OpenSpec spec baseline
+
+`search_specs` and `check_spec_drift` require specs to exist. Run `/spec-gen-generate`
+once before using `/spec-gen-implement-story` for the first time — this creates the
+baseline that makes spec alignment meaningful.
+
+| State | What to do |
+|---|---|
+| No specs yet | `/spec-gen-analyze-codebase` then `/spec-gen-generate` |
+| Specs exist | All skills work as expected |
+| Post-sprint spec refresh | `/spec-gen-generate` again to update specs after new code |
+
+`/spec-gen-implement-story` detects missing specs automatically and tells you what to do.

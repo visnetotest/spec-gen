@@ -81,6 +81,20 @@ flowchart TD
 /speckit.spec-gen.drift    → drift check → note any spec updates needed
 ```
 
+## OpenSpec spec baseline
+
+`speckit.spec-gen.orient` uses `search_specs` to surface relevant requirements, and
+`speckit.spec-gen.drift` uses `check_spec_drift` to verify alignment. Both require
+OpenSpec specs to exist — without them, results are empty or everything shows as uncovered.
+
+| State | What to do |
+|---|---|
+| No specs yet | Run `spec-gen generate $PROJECT_ROOT` once before the first sprint |
+| Specs exist | Both commands work as expected |
+| New code not yet spec'd | `drift` will flag it as `uncovered` — run `spec-gen generate` to update |
+
+Both commands detect missing specs automatically and offer to run `spec-gen generate`.
+
 ## Risk gate
 
 | Score | Level | Action |

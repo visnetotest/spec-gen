@@ -4,6 +4,20 @@ BMAD Method implementation of the [spec-gen agentic workflow pattern](../../docs
 
 See [docs/agentic-workflows/BMAD.md](../../docs/agentic-workflows/BMAD.md) for the full integration guide.
 
+## OpenSpec spec baseline
+
+`search_specs` and `check_spec_drift` are only useful if specs exist. The Architect agent
+runs `spec-gen generate` during onboarding — that creates the baseline. Without it,
+`search_specs` returns empty and `check_spec_drift` flags everything as uncovered.
+
+| State | What to do |
+|---|---|
+| First time on this codebase | Run `spec-gen analyze && spec-gen generate` during onboarding (covered in `tasks/onboarding.md`) |
+| Specs exist | `search_specs` and `check_spec_drift` work as expected |
+| Specs missing mid-project | Run `spec-gen generate $PROJECT_ROOT` — takes a few minutes, only needed once |
+
+The `implement-story.md` task detects this automatically and tells you what to do.
+
 ## Workflow
 
 ```mermaid
