@@ -210,7 +210,57 @@ Only if the fix changes a documented behaviour:
 | `gap` on modified function | The spec described expected behaviour that changed — update the spec |
 | `stale` | Fix the stale reference |
 | `uncovered` | Not caused by this fix — note it, propose `spec-gen generate` |
-| No drift | Done |
+| No drift | Proceed to Step 9 |
+
+---
+
+## Step 9 — Spec invariant feedback
+
+Every real bug reveals an invariant that was not documented. Capture it so future
+agents benefit from this discovery via `search_specs`.
+
+**9a — Identify the invariant**
+
+State the invariant that was violated, in one sentence:
+
+> "`$FUNCTION` must always `$CONDITION` when `$TRIGGER` — violating this causes
+> `$OBSERVED_SYMPTOM`."
+
+If the bug was caused by a missing guard, a wrong assumption about caller order,
+or an undocumented state constraint — that is the invariant.
+
+**9b — Locate the spec**
+
+```xml
+<use_mcp_tool>
+  <server_name>spec-gen</server_name>
+  <tool_name>get_spec</tool_name>
+  <arguments>{
+    "directory": "$PROJECT_ROOT",
+    "domain": "$DOMAIN_AFFECTED"
+  }</arguments>
+</use_mcp_tool>
+```
+
+**9c — Add the invariant**
+
+Append to the relevant domain spec under a `### Known Invariants` section
+(create it if absent):
+
+```markdown
+### Known Invariants
+
+- `$FUNCTION`: $INVARIANT_STATEMENT
+  — discovered via bug fix on $DATE, root cause: $ROOT_CAUSE_SUMMARY
+```
+
+If the domain spec does not exist yet (`uncovered` from Step 8), note the
+invariant in the story/issue instead and flag it for the next `spec-gen generate` run.
+
+**9d — Inform the user**
+
+> "Invariant added to `openspec/specs/$DOMAIN/spec.md`. Future agents using
+> `search_specs` on this domain will see this constraint."
 
 ---
 
@@ -222,3 +272,5 @@ Only if the fix changes a documented behaviour:
 - Do not touch functions outside the confirmed scope without re-running the gate
 - Do not run `check_spec_drift` before tests are green
 - Each edit ≤ 50 lines on small models
+- Do not skip Step 9 — every bug fix must produce a documented invariant or an
+  explicit note explaining why no invariant applies
