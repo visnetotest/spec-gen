@@ -11,17 +11,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Static mocks (hoisted) ────────────────────────────────────────────────────
 
-vi.mock('./utils.js', () => ({
-  validateDirectory: vi.fn(async (dir: string) => dir),
-  safeJoin: vi.fn((absDir: string, filePath: string) => {
-    const { resolve, sep } = require('node:path');
-    const resolved = resolve(absDir, filePath);
-    if (!resolved.startsWith(absDir + sep) && resolved !== absDir) {
-      throw new Error(`Path traversal blocked: "${filePath}" resolves outside project directory`);
-    }
-    return resolved;
-  }),
-}));
+vi.mock('./utils.js', async () => {
+  const { resolve, sep } = await import('node:path');
+  return {
+    validateDirectory: vi.fn(async (dir: string) => dir),
+    safeJoin: vi.fn((absDir: string, filePath: string) => {
+      const resolved = resolve(absDir, filePath);
+      if (!resolved.startsWith(absDir + sep) && resolved !== absDir) {
+        throw new Error(`Path traversal blocked: "${filePath}" resolves outside project directory`);
+      }
+      return resolved;
+    }),
+  };
+});
 
 vi.mock('./orient.js', () => ({
   handleOrient: vi.fn(async () => ({
@@ -40,7 +42,6 @@ vi.mock('./graph.js', () => ({
   handleAnalyzeImpact: vi.fn(async () => ({ error: 'no cache' })),
 }));
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyFn = (...args: any[]) => any;
 const mockFs = {
   mkdir: vi.fn() as ReturnType<typeof vi.fn<AnyFn>>,
@@ -49,11 +50,8 @@ const mockFs = {
 };
 
 vi.mock('node:fs/promises', () => ({
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   mkdir: (...args: any[]) => mockFs.mkdir(...args),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   writeFile: (...args: any[]) => mockFs.writeFile(...args),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   readFile: (...args: any[]) => mockFs.readFile(...args),
 }));
 
