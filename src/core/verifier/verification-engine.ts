@@ -497,10 +497,14 @@ Respond in JSON:
     const lines = content.split('\n');
     const purposeLines: string[] = [];
 
-    // Look for JSDoc/TSDoc comment at top of file
+    // Scan the full file for the first JSDoc/TSDoc block (/** ... */).
+    // Files commonly place their module-level docblock after a long import
+    // section, so a 30-line cap was causing false "no purpose" results.
+    // Single-line // comments are still only collected from the top 30 lines
+    // to avoid picking up inline implementation notes deep in the file.
     let inBlockComment = false;
-    for (const line of lines) {
-      const trimmed = line.trim();
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
 
       if (trimmed.startsWith('/**')) {
         inBlockComment = true;
@@ -516,8 +520,8 @@ Respond in JSON:
           purposeLines.push(comment);
         }
       }
-      // Single line comments at top
-      if (trimmed.startsWith('//') && !inBlockComment && purposeLines.length < 3) {
+      // Single-line comments: top of file only
+      if (trimmed.startsWith('//') && !inBlockComment && purposeLines.length < 3 && i < 30) {
         purposeLines.push(trimmed.replace(/^\/\/\s*/, ''));
       }
     }

@@ -390,6 +390,44 @@ export function login() {}`;
 
       expect(purpose).toContain('user login');
     });
+
+    // Fix 2: JSDoc blocks that start after line 30 must still be found.
+    it('should extract purpose from JSDoc that starts after line 30', () => {
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+      });
+
+      // 35 import lines, then the JSDoc block
+      const imports = Array.from({ length: 35 }, (_, i) => `import { m${i} } from './mod${i}.js';`).join('\n');
+      const content = `${imports}
+
+/**
+ * Payment Service
+ *
+ * Processes payment transactions and manages billing.
+ */
+export class PaymentService {}`;
+
+      const purpose = (engine as any).extractPurpose(content);
+
+      expect(purpose).toContain('Payment Service');
+      expect(purpose).toContain('payment');
+    });
+
+    it('should return empty string when there are no comments', () => {
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+      });
+
+      const content = `export class Foo {}\nexport function bar() {}`;
+      const purpose = (engine as any).extractPurpose(content);
+
+      expect(purpose).toBe('');
+    });
   });
 
   describe('calculateSetMatch', () => {
@@ -454,10 +492,10 @@ export function login() {}`;
       });
 
       const score = (engine as any).calculateOverallScore(
-        { similarity: 1.0 },           // 25%
-        { f1Score: 1.0 },              // 30%
-        { f1Score: 1.0 },              // 30%
-        { coverage: 1.0 }              // 15%
+        { similarity: 1.0 },
+        { f1Score: 1.0 },
+        { f1Score: 1.0 },
+        { coverage: 1.0 }
       );
 
       expect(score).toBe(1.0);
@@ -470,6 +508,97 @@ export function login() {}`;
       );
 
       expect(zeroScore).toBe(0);
+    });
+
+    // Fix 1: verify the actual weights are 40/15/15/30, not the old 25/30/30/15.
+    // Each sub-score is isolated to confirm its exact contribution.
+    it('should apply purpose weight of 40%', () => {
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+      });
+
+      const score = (engine as any).calculateOverallScore(
+        { similarity: 1.0 },
+        { f1Score: 0 },
+        { f1Score: 0 },
+        { coverage: 0 }
+      );
+
+      expect(score).toBeCloseTo(0.40, 5);
+    });
+
+    it('should apply requirements weight of 30%', () => {
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+      });
+
+      const score = (engine as any).calculateOverallScore(
+        { similarity: 0 },
+        { f1Score: 0 },
+        { f1Score: 0 },
+        { coverage: 1.0 }
+      );
+
+      expect(score).toBeCloseTo(0.30, 5);
+    });
+
+    it('should apply import weight of 15%', () => {
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+      });
+
+      const score = (engine as any).calculateOverallScore(
+        { similarity: 0 },
+        { f1Score: 1.0 },
+        { f1Score: 0 },
+        { coverage: 0 }
+      );
+
+      expect(score).toBeCloseTo(0.15, 5);
+    });
+
+    it('should apply export weight of 15%', () => {
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+      });
+
+      const score = (engine as any).calculateOverallScore(
+        { similarity: 0 },
+        { f1Score: 0 },
+        { f1Score: 1.0 },
+        { coverage: 0 }
+      );
+
+      expect(score).toBeCloseTo(0.15, 5);
+    });
+
+    it('should allow passing with zero import/export F1 when purpose and requirements are strong', () => {
+      // With old weights (25/30/30/15), max without imports/exports was 0.40 — below 0.50 threshold.
+      // With new weights (40/15/15/30), max without imports/exports is 0.70 — above threshold.
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+        passThreshold: 0.5,
+      });
+
+      const score = (engine as any).calculateOverallScore(
+        { similarity: 1.0 },
+        { f1Score: 0 },
+        { f1Score: 0 },
+        { coverage: 1.0 }
+      );
+
+      expect(score).toBeCloseTo(0.70, 5);
+      expect(score).toBeGreaterThan(0.5); // should pass
     });
   });
 
@@ -572,6 +701,164 @@ export function login() {}`;
       expect(markdown).toContain('## Domain Breakdown');
       expect(markdown).toContain('needs-review');
       expect(markdown).toContain('65');
+    });
+  });
+
+  // Fix 3: LLM failure must cause the file to be skipped, not recorded as 0%.
+  describe('verifyFile — LLM failure handling', () => {
+    it('should throw when LLM prediction fails so verify() skips the file', async () => {
+      mockProvider.setDefaultResponse('INVALID JSON {{{');
+
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+      });
+
+      await (engine as any).loadSpecs();
+
+      const candidate: VerificationCandidate = {
+        path: 'src/user-service.ts',
+        absolutePath: join(srcDir, 'user-service.ts'),
+        domain: 'user',
+        usedInGeneration: false,
+        complexity: 100,
+        lines: 30,
+        imports: 2,
+        exports: 3,
+      };
+
+      await expect((engine as any).verifyFile(candidate)).rejects.toThrow();
+    });
+
+    it('should skip all failed files and report sampledFiles as 0', async () => {
+      // Malformed JSON causes a non-retryable parse error in completeJSON
+      mockProvider.setDefaultResponse('NOT VALID JSON {{{');
+
+      const depGraph = createMockDepGraph([
+        { path: 'src/user-service.ts', lines: 100 },
+      ]);
+
+      const report = await verifySpecs(
+        llmService,
+        depGraph,
+        { rootPath: testDir, openspecPath: openspecDir, outputDir, minComplexity: 10, maxComplexity: 200 },
+        '1.0.0'
+      );
+
+      // File was skipped entirely — not recorded as a 0% result
+      expect(report.sampledFiles).toBe(0);
+      expect(report.results).toHaveLength(0);
+    });
+  });
+
+  // Fix 4: selectCandidates should prefer high-connectivity (core) files over leaf nodes.
+  describe('selectCandidates — sort order', () => {
+    it('should prefer high-connectivity files over leaf nodes', () => {
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+        minComplexity: 50,
+        maxComplexity: 500,
+        filesPerDomain: 1,
+      });
+
+      const depGraph = createMockDepGraph([
+        { path: 'src/services/leaf.ts', lines: 100 },
+        { path: 'src/services/core.ts', lines: 100 },
+      ]);
+
+      // leaf: connectivity 1, core: connectivity 10
+      depGraph.nodes[0].metrics.inDegree = 0;
+      depGraph.nodes[0].metrics.outDegree = 1;
+      depGraph.nodes[1].metrics.inDegree = 6;
+      depGraph.nodes[1].metrics.outDegree = 4;
+
+      const candidates = engine.selectCandidates(depGraph);
+
+      expect(candidates.length).toBe(1);
+      expect(candidates[0].path).toBe('src/services/core.ts');
+    });
+  });
+
+  // Fix 5: buildSpecsContext must truncate when total content exceeds maxChars.
+  describe('buildSpecsContext', () => {
+    it('should include all specs when content fits within budget', () => {
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+      });
+
+      // Inject two small specs directly
+      (engine as any).specs = [
+        { domain: 'alpha', path: 'openspec/specs/alpha/spec.md', content: 'Alpha content' },
+        { domain: 'beta',  path: 'openspec/specs/beta/spec.md',  content: 'Beta content' },
+      ];
+
+      const result = (engine as any).buildSpecsContext(10_000);
+
+      expect(result).toContain('=== alpha');
+      expect(result).toContain('Alpha content');
+      expect(result).toContain('=== beta');
+      expect(result).toContain('Beta content');
+    });
+
+    it('should truncate specs that exceed the char budget', () => {
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+      });
+
+      const bigContent = 'x'.repeat(500);
+      (engine as any).specs = [
+        { domain: 'alpha', path: 'openspec/specs/alpha/spec.md', content: bigContent },
+        { domain: 'beta',  path: 'openspec/specs/beta/spec.md',  content: bigContent },
+      ];
+
+      // Budget only large enough for the first spec header + a slice of its content
+      const result = (engine as any).buildSpecsContext(200);
+
+      expect(result).toContain('=== alpha');
+      expect(result).toContain('[truncated]');
+      // Beta should be dropped entirely
+      expect(result).not.toContain('=== beta');
+    });
+
+    it('should stop adding specs once the budget is exhausted', () => {
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+      });
+
+      (engine as any).specs = [
+        { domain: 'a', path: 'openspec/specs/a/spec.md', content: 'x'.repeat(100) },
+        { domain: 'b', path: 'openspec/specs/b/spec.md', content: 'y'.repeat(100) },
+        { domain: 'c', path: 'openspec/specs/c/spec.md', content: 'z'.repeat(100) },
+      ];
+
+      // Only enough room for the first spec
+      const result = (engine as any).buildSpecsContext(60);
+
+      expect(result).toContain('=== a');
+      expect(result).not.toContain('=== b');
+      expect(result).not.toContain('=== c');
+    });
+
+    it('should return empty string when specs list is empty', () => {
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+      });
+
+      (engine as any).specs = [];
+      const result = (engine as any).buildSpecsContext(24_000);
+
+      expect(result).toBe('');
     });
   });
 
