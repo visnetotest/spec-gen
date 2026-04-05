@@ -376,6 +376,7 @@ A score >= threshold indicates specs are production-ready.
       try {
         llm = createLLMService({
           provider: resolved.provider,
+          model: specGenConfig.generation?.model,
           openaiCompatBaseUrl: resolved.openaiCompatBaseUrl,
           apiBase: globalOpts.apiBase ?? specGenConfig.llm?.apiBase,
           sslVerify: globalOpts.insecure != null ? !globalOpts.insecure : specGenConfig.llm?.sslVerify ?? true,
