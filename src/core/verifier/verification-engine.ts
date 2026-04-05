@@ -889,7 +889,7 @@ Respond in JSON:
     }
 
     return {
-      timestamp: new Date().toISOString(),
+      timestamp: new Date().toLocaleString(),
       specVersion,
       sampledFiles: results.length,
       passedFiles,
