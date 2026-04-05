@@ -334,12 +334,18 @@ export class SpecVerificationEngine {
       // Skip generated files
       if (node.file.isGenerated) continue;
 
+      // Skip non-source files (config, manifests, markup, data)
+      const ext = node.file.path.split('.').pop()?.toLowerCase() ?? '';
+      const sourceExts = new Set(['ts', 'tsx', 'js', 'jsx', 'py', 'go', 'rs', 'rb', 'java', 'cpp', 'c', 'cs', 'swift', 'kt']);
+      if (!sourceExts.has(ext)) continue;
+
       // Skip files outside complexity range
       if (node.file.lines < this.options.minComplexity) continue;
       if (node.file.lines > this.options.maxComplexity) continue;
 
-      // Determine domain from path
+      // Determine domain from path — skip files with no matching spec
       const domain = this.inferDomain(node.file.path);
+      if (domain === 'misc') continue;
 
       if (!filesByDomain.has(domain)) {
         filesByDomain.set(domain, []);
@@ -400,21 +406,23 @@ export class SpecVerificationEngine {
       i === rawParts.length - 1 ? p.replace(/\.[^.]+$/, '').toLowerCase() : p.toLowerCase()
     );
 
-    // Exact match against known domains (non-structural first)
-    for (const seg of segments) {
+    // Exact match against known domains — iterate deepest-first (reverse) so that
+    // src/core/services/mcp-handlers/x.ts matches "mcp-handlers" not "services".
+    const reversed = [...segments].reverse();
+    for (const seg of reversed) {
       if (!structural.has(seg) && knownDomains.includes(seg)) return seg;
     }
-    for (const seg of segments) {
+    for (const seg of reversed) {
       if (structural.has(seg) && knownDomains.includes(seg)) return seg;
     }
 
-    // Shared-prefix match (≥4 chars) — e.g. "utils"→"utilities" share "util"
+    // Shared-prefix match (≥4 chars) — deepest-first, e.g. "utils"→"utilities"
     const commonPrefixLen = (a: string, b: string): number => {
       let i = 0;
       while (i < a.length && i < b.length && a[i] === b[i]) i++;
       return i;
     };
-    for (const seg of segments) {
+    for (const seg of reversed) {
       if (seg.length < 4) continue;
       const hit = knownDomains.find(d => commonPrefixLen(seg, d) >= 4);
       if (hit) return hit;

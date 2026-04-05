@@ -201,7 +201,7 @@ export function createUserService(): UserService {
   });
 
   describe('selectCandidates', () => {
-    it('should select files within complexity range', () => {
+    it('should select files within complexity range', async () => {
       const engine = new SpecVerificationEngine(llmService, {
         rootPath: testDir,
         openspecPath: openspecDir,
@@ -209,41 +209,43 @@ export function createUserService(): UserService {
         minComplexity: 50,
         maxComplexity: 200,
       });
+      await (engine as any).loadSpecs();
 
       const depGraph = createMockDepGraph([
-        { path: 'src/small.ts', lines: 20 },  // Too small
-        { path: 'src/medium.ts', lines: 100 }, // Good
-        { path: 'src/large.ts', lines: 500 },  // Too large
-        { path: 'src/good.ts', lines: 150 },   // Good
+        { path: 'src/user/small.ts', lines: 20 },  // Too small
+        { path: 'src/user/medium.ts', lines: 100 }, // Good
+        { path: 'src/user/large.ts', lines: 500 },  // Too large
+        { path: 'src/user/good.ts', lines: 150 },   // Good
       ]);
 
       const candidates = engine.selectCandidates(depGraph);
 
       // Should only include medium and good files
       expect(candidates.length).toBe(2);
-      expect(candidates.map(c => c.path)).toContain('src/medium.ts');
-      expect(candidates.map(c => c.path)).toContain('src/good.ts');
+      expect(candidates.map(c => c.path)).toContain('src/user/medium.ts');
+      expect(candidates.map(c => c.path)).toContain('src/user/good.ts');
     });
 
-    it('should exclude files used in generation', () => {
+    it('should exclude files used in generation', async () => {
       const engine = new SpecVerificationEngine(llmService, {
         rootPath: testDir,
         openspecPath: openspecDir,
         outputDir,
         minComplexity: 50,
         maxComplexity: 200,
-        generationContext: ['src/used.ts'],
+        generationContext: ['src/user/used.ts'],
       });
+      await (engine as any).loadSpecs();
 
       const depGraph = createMockDepGraph([
-        { path: 'src/used.ts', lines: 100 },
-        { path: 'src/unused.ts', lines: 100 },
+        { path: 'src/user/used.ts', lines: 100 },
+        { path: 'src/user/unused.ts', lines: 100 },
       ]);
 
       const candidates = engine.selectCandidates(depGraph);
 
       expect(candidates.length).toBe(1);
-      expect(candidates[0].path).toBe('src/unused.ts');
+      expect(candidates[0].path).toBe('src/user/unused.ts');
     });
 
     it('should exclude test files', () => {
@@ -829,7 +831,7 @@ export class PaymentService {}`;
 
   // Fix 4: selectCandidates should prefer high-connectivity (core) files over leaf nodes.
   describe('selectCandidates — sort order', () => {
-    it('should prefer high-connectivity files over leaf nodes', () => {
+    it('should prefer high-connectivity files over leaf nodes', async () => {
       const engine = new SpecVerificationEngine(llmService, {
         rootPath: testDir,
         openspecPath: openspecDir,
@@ -838,10 +840,11 @@ export class PaymentService {}`;
         maxComplexity: 500,
         filesPerDomain: 1,
       });
+      await (engine as any).loadSpecs();
 
       const depGraph = createMockDepGraph([
-        { path: 'src/services/leaf.ts', lines: 100 },
-        { path: 'src/services/core.ts', lines: 100 },
+        { path: 'src/user/leaf.ts', lines: 100 },
+        { path: 'src/user/core.ts', lines: 100 },
       ]);
 
       // leaf: connectivity 1, core: connectivity 10
@@ -853,7 +856,7 @@ export class PaymentService {}`;
       const candidates = engine.selectCandidates(depGraph);
 
       expect(candidates.length).toBe(1);
-      expect(candidates[0].path).toBe('src/services/core.ts');
+      expect(candidates[0].path).toBe('src/user/core.ts');
     });
   });
 
@@ -985,6 +988,24 @@ export class PaymentService {}`;
       // 'user' is a known spec domain — should match exactly
       expect((engine as any).inferDomain('src/user/service.ts')).toBe('user');
       expect((engine as any).inferDomain('src/core/user/model.ts')).toBe('user');
+    });
+
+    it('should prefer the deepest matching segment (most specific domain)', async () => {
+      // Create a second spec so both 'user' and 'services' are known domains
+      const servicesSpecDir = join(openspecDir, 'specs', 'services');
+      await mkdir(servicesSpecDir, { recursive: true });
+      await writeFile(join(servicesSpecDir, 'spec.md'), '# Services Spec\n');
+
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+      });
+      await (engine as any).loadSpecs();
+
+      // src/core/services/user/model.ts — both 'services' and 'user' are known domains
+      // deepest match (rightmost directory) wins → 'user'
+      expect((engine as any).inferDomain('src/core/services/user/model.ts')).toBe('user');
     });
 
     it('should return misc for paths that match no known spec domain', async () => {
