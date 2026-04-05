@@ -494,14 +494,22 @@ export class SpecVerificationEngine {
    * Get prediction from LLM
    */
   private async getPrediction(candidate: VerificationCandidate): Promise<FilePrediction> {
-    // Build specs context, capped to avoid silent token overflow (~6 000 tokens at 4 chars/token)
-    const specsContent = this.buildSpecsContext(24_000);
+    // Prefer the candidate's own domain spec; fall back to full context if not found.
+    // Feeding only the relevant spec reduces noise when a domain covers many files.
+    const domainSpec = this.specs.find(s => s.domain === candidate.domain);
+    const specsContent = domainSpec
+      ? `=== ${domainSpec.domain} (${domainSpec.path}) ===\n${domainSpec.content}`
+      : this.buildSpecsContext(24_000);
 
     const userPrompt = `Here are the specifications:
 
 ${specsContent}
 
 Predict the contents of: ${candidate.path}
+
+IMPORTANT: The specs may contain entries attributed to specific files using \`> \`path\`\` markers.
+Focus ONLY on entries attributed to \`${candidate.path}\`. Ignore entries attributed to other files.
+If no entries are attributed to this file, use only the general domain purpose.
 
 Respond in JSON:
 {
