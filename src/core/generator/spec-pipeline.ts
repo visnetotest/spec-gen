@@ -5,7 +5,7 @@
  * in OpenSpec format from code analysis.
  */
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import logger from '../../utils/logger.js';
 import { SKELETON_EXCERPT_MAX_CHARS, SKELETON_STANDALONE_MAX_CHARS, STAGE_CHUNK_MAX_CHARS } from '../../constants.js';
@@ -787,6 +787,23 @@ export class SpecGenerationPipeline implements PipelineContext {
   async loadStageResult<T>(stage: string): Promise<StageResult<T> | null> {
     try {
       const filepath = join(this.options.outputDir, `${this.stageFileName(stage)}.json`);
+
+      // Invalidate cache if analysis (llm-context.json) is newer than the stage file.
+      // This ensures that running `spec-gen analyze` followed by `spec-gen generate`
+      // always re-runs the pipeline rather than serving stale LLM results.
+      if (this.options.rootPath) {
+        const analysisFile = join(this.options.rootPath, '.spec-gen', 'analysis', 'llm-context.json');
+        try {
+          const [stageStat, analysisStat] = await Promise.all([stat(filepath), stat(analysisFile)]);
+          if (analysisStat.mtimeMs > stageStat.mtimeMs) {
+            logger.analysis(`Auto-resume: ${stage} cache is older than analysis — will re-run`);
+            return null;
+          }
+        } catch {
+          // Either file missing — fall through to normal load/null
+        }
+      }
+
       const content = await readFile(filepath, 'utf-8');
       return JSON.parse(content) as StageResult<T>;
     } catch {
