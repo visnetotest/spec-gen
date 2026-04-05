@@ -186,6 +186,7 @@ export class SpecVerificationEngine {
   private llm: LLMService;
   private options: Required<VerificationEngineOptions>;
   private specs: LoadedSpec[] = [];
+  private fileDomainMap: Map<string, string> = new Map();
   private parser: ImportExportParser;
 
   constructor(llm: LLMService, options: VerificationEngineOptions) {
@@ -212,8 +213,9 @@ export class SpecVerificationEngine {
   ): Promise<VerificationReport> {
     const startTime = Date.now();
 
-    // Load all specs
+    // Load all specs and the file→domain mapping
     await this.loadSpecs();
+    await this.loadFileDomainMap();
 
     if (this.specs.length === 0) {
       throw new Error('No specs found to verify against');
@@ -288,6 +290,31 @@ export class SpecVerificationEngine {
   }
 
   /**
+   * Load file→domain mapping from .spec-gen/analysis/mapping.json.
+   * Falls back silently if the file doesn't exist (e.g. before first analysis run).
+   */
+  private async loadFileDomainMap(): Promise<void> {
+    this.fileDomainMap = new Map();
+    const mappingPath = join(this.options.rootPath, '.spec-gen', 'analysis', 'mapping.json');
+    try {
+      const raw = await readFile(mappingPath, 'utf-8');
+      const data = JSON.parse(raw) as {
+        mappings?: Array<{ domain: string; functions?: Array<{ file: string }> }>;
+      };
+      for (const entry of data.mappings ?? []) {
+        for (const fn of entry.functions ?? []) {
+          if (fn.file && entry.domain && !this.fileDomainMap.has(fn.file)) {
+            this.fileDomainMap.set(fn.file, entry.domain);
+          }
+        }
+      }
+      logger.analysis(`Loaded file→domain mapping for ${this.fileDomainMap.size} file(s)`);
+    } catch {
+      // mapping.json not available — inferDomain falls back to path heuristics
+    }
+  }
+
+  /**
    * Select verification candidate files
    */
   selectCandidates(depGraph: DependencyGraphResult): VerificationCandidate[] {
@@ -352,22 +379,45 @@ export class SpecVerificationEngine {
   }
 
   /**
-   * Infer domain from file path
+   * Resolve the spec domain for a file.
+   *
+   * Priority:
+   * 1. mapping.json lookup — deterministic, built from the analysis run.
+   * 2. Path heuristic — walk segments, match against known spec domain names
+   *    (exact, then prefix ≥4 chars to handle utils→utilities etc.).
+   * 3. Fallback — first meaningful non-structural segment.
    */
   private inferDomain(filePath: string): string {
-    const parts = filePath.split('/');
+    // 1. Deterministic lookup from mapping.json
+    const mapped = this.fileDomainMap.get(filePath);
+    if (mapped) return mapped;
 
-    // Look for known domain indicators
-    for (const part of parts) {
-      const lower = part.toLowerCase();
-      // Skip common non-domain directories
-      if (['src', 'lib', 'app', 'core', 'utils', 'helpers', 'common', 'shared'].includes(lower)) {
-        continue;
-      }
-      // Return first meaningful directory
-      if (part.length > 1 && !part.startsWith('.')) {
-        return lower;
-      }
+    // 2. Path-based matching against known spec domains
+    const knownDomains = this.specs.map(s => s.domain);
+    const structural = new Set(['src', 'lib', 'app', 'core', 'utils', 'helpers', 'common', 'shared']);
+    const rawParts = filePath.split('/');
+    const segments = rawParts.map((p, i) =>
+      i === rawParts.length - 1 ? p.replace(/\.[^.]+$/, '').toLowerCase() : p.toLowerCase()
+    );
+
+    // Exact match against known domains (non-structural first)
+    for (const seg of segments) {
+      if (!structural.has(seg) && knownDomains.includes(seg)) return seg;
+    }
+    for (const seg of segments) {
+      if (structural.has(seg) && knownDomains.includes(seg)) return seg;
+    }
+
+    // Prefix match (≥4 chars) — e.g. "utils"→"utilities", "service"→"services"
+    for (const seg of segments) {
+      if (seg.length < 4) continue;
+      const hit = knownDomains.find(d => d.startsWith(seg) || seg.startsWith(d));
+      if (hit) return hit;
+    }
+
+    // 3. Fallback: first non-structural segment regardless of spec existence
+    for (const seg of segments) {
+      if (!structural.has(seg) && seg.length > 1 && !seg.startsWith('.')) return seg;
     }
 
     return 'misc';
