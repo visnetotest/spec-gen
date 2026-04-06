@@ -42,6 +42,27 @@ If analysis data is missing (`{ "error": "..." }`), run `analyze_codebase` first
 
 Then retry `get_architecture_overview`.
 
+## Step 2.5: Stack inventory (conditional)
+
+Based on the feature description and architecture overview results, call the relevant inventory tool(s) before reading any source file. Skip if the feature clearly involves none of these areas.
+
+| Feature involves | Tool |
+|---|---|
+| Data models / ORM / database / tables | `get_schema_inventory` |
+| HTTP routes / API / endpoints | `get_route_inventory` |
+| Config / env vars / secrets | `get_env_vars` |
+| UI components | `get_ui_components` |
+
+<use_mcp_tool>
+  <server_name>spec-gen</server_name>
+  <tool_name>get_schema_inventory</tool_name>
+  <arguments>{"directory": "$DIRECTORY"}</arguments>
+</use_mcp_tool>
+
+Use results to ground the implementation plan in existing schemas/routes — don't re-create what already exists.
+
+---
+
 ## Step 3: Search the OpenSpec specifications (if available)
 
 Discover which spec domains exist, then search for requirements relevant to the feature.

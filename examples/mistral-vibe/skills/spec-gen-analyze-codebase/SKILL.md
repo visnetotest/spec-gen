@@ -56,6 +56,14 @@ Present a concise summary:
 - Top 5 refactoring issues (function name, file, issue type, priority score)
 - Detected domains
 
+Also report stack inventory (read directly from `.spec-gen/analysis/` — no extra MCP call needed):
+- **HTTP routes**: N routes across M files — if `route-inventory.json` exists
+- **ORM tables**: N tables — if `schema-inventory.json` exists
+- **Env vars**: N total, X required without default — if `env-inventory.json` exists
+- **UI components**: N components — if `ui-inventory.json` exists
+
+If none of these files exist, skip this section and suggest running `spec-gen analyze --force`.
+
 ---
 
 ## Step 4 — Show the call graph
