@@ -217,25 +217,20 @@ export async function generateCodebaseDigest(
       } catch { /* non-fatal */ }
     }
 
-    // ── MCP tool hints ────────────────────────────────────────────────────────
-    lines.push('## When to use spec-gen MCP tools');
+    // ── MCP workflow ─────────────────────────────────────────────────────────────────────────────
+    lines.push('## spec-gen MCP workflow');
     lines.push('');
-    lines.push('| Situation | Tool |');
-    lines.push('|-----------|------|');
-    lines.push('| Starting any new task | `orient` — returns functions, files, specs, call paths, and insertion points in one call |');
-    lines.push('| Don\'t know which file/function handles a concept | `search_code` |');
-    lines.push('| Need call topology across many files | `get_subgraph` / `analyze_impact` |');
-    lines.push('| Planning where to add a feature | `suggest_insertion_points` |');
-    lines.push('| Reading a spec before writing code | `get_spec` |');
-    lines.push('| Checking if code still matches spec | `check_spec_drift` |');
-    lines.push('| Finding spec requirements by meaning | `search_specs` |');
-    lines.push('| Listing all API routes | `get_route_inventory` |');
-    lines.push('| Listing DB schema tables and fields | `get_schema_inventory` |');
-    lines.push('| Listing UI components and props | `get_ui_components` |');
-    lines.push('| Listing env vars (required vs default) | `get_env_vars` |');
-    lines.push('| Listing middleware chain | `get_middleware_inventory` |');
+    lines.push('**Follow this sequence for every task:**');
     lines.push('');
-    lines.push('For all other cases (reading a file, grepping, listing files) use your native tools directly.');
+    lines.push('1. **`orient "<task description>"`** — always start here. Returns relevant functions, files, spec domains, call paths, and insertion points in one call.');
+    lines.push('2. **If the task involves data models, APIs, or config** — call the relevant inventory tool:');
+    lines.push('   `get_schema_inventory` · `get_route_inventory` · `get_env_vars` · `get_ui_components` · `get_middleware_inventory`');
+    lines.push('3. **If debugging a call flow** ("how does X reach Y?") — `trace_execution_path`');
+    lines.push('4. **Before modifying a function** — `get_subgraph` to understand blast radius');
+    lines.push('5. **Before opening a PR** — `check_spec_drift`');
+    lines.push('');
+    lines.push("**On-demand** (when orient's results aren't enough):");
+    lines.push('`search_code` · `suggest_insertion_points` · `get_spec <domain>` · `search_specs` · `analyze_impact` · `get_function_body` · `get_function_skeleton`');
 
     const digest = lines.join('\n') + '\n';
     await writeFile(join(outputDir, 'CODEBASE.md'), digest, 'utf-8');

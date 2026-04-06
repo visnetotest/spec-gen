@@ -570,24 +570,19 @@ After running `spec-gen analyze`, wire the generated digest into your agent's co
 @.spec-gen/analysis/CODEBASE.md
 @openspec/specs/overview/spec.md
 
-## spec-gen MCP tools — when to use them
+## spec-gen MCP workflow
 
-| Situation | Tool |
-|-----------|------|
-| Starting any new task | `orient` — returns functions, files, specs, call paths, and insertion points in one call |
-| Don't know which file/function handles a concept | `search_code` |
-| Need call topology across many files | `get_subgraph` / `analyze_impact` |
-| Planning where to add a feature | `suggest_insertion_points` |
-| Reading a spec before writing code | `get_spec` |
-| Checking if code still matches spec | `check_spec_drift` |
-| Finding spec requirements by meaning | `search_specs` |
-| Listing all API routes | `get_route_inventory` |
-| Listing DB schema tables and fields | `get_schema_inventory` |
-| Listing UI components and props | `get_ui_components` |
-| Listing env vars (required vs default) | `get_env_vars` |
-| Listing middleware chain | `get_middleware_inventory` |
+**Follow this sequence for every task:**
 
-For all other cases (reading a file, grepping, listing files) use native tools directly.
+1. **`orient "<task description>"`** — always start here. Returns relevant functions, files, spec domains, call paths, and insertion points in one call.
+2. **If the task involves data models, APIs, or config** — call the relevant inventory tool:
+   `get_schema_inventory` · `get_route_inventory` · `get_env_vars` · `get_ui_components` · `get_middleware_inventory`
+3. **If debugging a call flow** ("how does X reach Y?") — `trace_execution_path`
+4. **Before modifying a function** — `get_subgraph` to understand blast radius
+5. **Before opening a PR** — `check_spec_drift`
+
+**On-demand** (when orient's results aren't enough):
+`search_code` · `suggest_insertion_points` · `get_spec <domain>` · `search_specs` · `analyze_impact` · `get_function_body` · `get_function_skeleton`
 ```
 
 **Cline / Roo Code / Kilocode** — create `.clinerules/spec-gen.md`:
@@ -605,24 +600,22 @@ Always use these before writing or modifying code.
 - Read `openspec/specs/overview/spec.md` — functional domain map: what the system does,
   which domains exist, data-flow requirements.
 
-## MCP tools — use these instead of grep/read when exploring
+## spec-gen MCP workflow
 
-- **Orient first**: call `orient` at the start of every task — it returns relevant functions,
-  files, specs, call paths, and insertion points in one shot.
-- **Finding code**: use `search_code` when you don't know which file or function handles a concept.
-- **Call topology**: use `get_subgraph` or `analyze_impact` when you need to understand
-  how calls flow across multiple files (not just a single file).
-- **Adding a feature**: call `suggest_insertion_points` before deciding where to add code —
-  it accounts for the dependency graph, not just filenames.
-- **Reading specs**: call `get_spec <domain>` before writing code in that domain;
-  use `search_specs` to find requirements by meaning when you don't know the domain name.
-- **Checking drift**: call `check_spec_drift` after modifying a file to verify it still
-  matches its spec — do not skip this step before opening a PR.
+**Follow this sequence for every task:**
 
-Use native tools (Read, Grep, Glob) only for cases not covered above.
+1. **`orient "<task description>"`** — always start here. Returns relevant functions, files, spec domains, call paths, and insertion points in one call.
+2. **If the task involves data models, APIs, or config** — call the relevant inventory tool:
+   `get_schema_inventory` · `get_route_inventory` · `get_env_vars` · `get_ui_components` · `get_middleware_inventory`
+3. **If debugging a call flow** ("how does X reach Y?") — `trace_execution_path`
+4. **Before modifying a function** — `get_subgraph` to understand blast radius
+5. **Before opening a PR** — `check_spec_drift`
+
+**On-demand** (when orient's results aren't enough):
+`search_code` · `suggest_insertion_points` · `get_spec <domain>` · `search_specs` · `analyze_impact` · `get_function_body` · `get_function_skeleton`
 ```
 
-`CODEBASE.md` gives the agent passive architectural context. `overview/spec.md` gives the functional domain map. The table tells it when the passive context isn't enough and an active MCP tool call is warranted.
+`CODEBASE.md` gives the agent passive architectural context. `overview/spec.md` gives the functional domain map. The workflow tells it exactly what to call and when, without requiring the agent to choose from a menu.
 
 > **Tip:** `spec-gen analyze` prints these snippets after every run as a reminder.
 

@@ -119,7 +119,7 @@ describe('generateAiConfigs', () => {
     expect(content).toContain('awesome-app');
   });
 
-  it('content contains MCP tools table', async () => {
+  it('content contains MCP workflow', async () => {
     await generateAiConfigs({
       rootDir: tmpDir,
       analysisDir: '.spec-gen/analysis',
@@ -128,7 +128,7 @@ describe('generateAiConfigs', () => {
     });
 
     const content = await readFile(join(tmpDir, '.cursorrules'), 'utf-8');
-    expect(content).toContain('spec-gen MCP tools');
+    expect(content).toContain('spec-gen MCP workflow');
     expect(content).toContain('orient');
     expect(content).toContain('search_code');
   });
