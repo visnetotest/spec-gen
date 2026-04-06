@@ -376,6 +376,38 @@ After analysis, run 'spec-gen generate' to create OpenSpec files.
               await runEmbedStep(rootPath, outputPath, specGenConfig, opts.force ?? false, null);
             }
 
+            // If --ai-configs is requested, generate them even from cached analysis
+            if (opts.aiConfigs) {
+              let selectedTools: AiTool[] | undefined;
+              if (process.stdin.isTTY) {
+                const { checkbox } = await import('@inquirer/prompts');
+                const chosen = await checkbox<AiTool>({
+                  message: 'Generate config files for which AI assistants?',
+                  choices: AI_TOOL_TARGETS.map(t => ({
+                    name: t.label,
+                    value: t.tool,
+                    checked: true,
+                  })),
+                });
+                selectedTools = chosen.length > 0 ? chosen : undefined;
+              }
+              if (selectedTools === undefined || selectedTools.length > 0) {
+                const aiResults = await generateAiConfigs({
+                  rootDir: rootPath,
+                  analysisDir: opts.output.replace(/\/$/, ''),
+                  projectName: repoStructure.projectName ?? 'project',
+                  tools: selectedTools,
+                });
+                logger.blank();
+                console.log('  Agent config files:');
+                for (const { rel, created } of aiResults) {
+                  const tag = created ? '(created)' : '(already exists)';
+                  console.log(`    ├─ ${rel}  ${tag}`);
+                }
+                logger.blank();
+              }
+            }
+
             logger.info('Next step', "Run 'spec-gen generate' to create OpenSpec files");
             return;
           } catch (readErr) {
