@@ -83,6 +83,7 @@ describe('generate command', () => {
         schemas: [],
         routeInventory: { total: 0, byMethod: {}, byFramework: {}, routes: [] },
         middleware: [],
+        envVars: [],
         statistics: {
           totalFiles: 100,
           analyzedFiles: 50,

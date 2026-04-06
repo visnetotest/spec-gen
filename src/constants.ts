@@ -96,6 +96,9 @@ export const ARTIFACT_MIDDLEWARE_INVENTORY = 'middleware-inventory.json';
 /** Filename for the UI component inventory artifact */
 export const ARTIFACT_UI_INVENTORY = 'ui-inventory.json';
 
+/** Filename for the environment variable inventory artifact */
+export const ARTIFACT_ENV_INVENTORY = 'env-inventory.json';
+
 // ============================================================================
 // LLM / PROVIDER LIMITS
 // ============================================================================

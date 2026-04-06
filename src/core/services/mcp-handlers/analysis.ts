@@ -23,6 +23,7 @@ import {
   ARTIFACT_MIDDLEWARE_INVENTORY,
   ARTIFACT_SCHEMA_INVENTORY,
   ARTIFACT_UI_INVENTORY,
+  ARTIFACT_ENV_INVENTORY,
 } from '../../../constants.js';
 import { runAnalysis } from '../../../cli/commands/analyze.js';
 import { analyzeForRefactoring } from '../../analyzer/refactor-analyzer.js';
@@ -701,4 +702,44 @@ export async function handleGetUIComponents(
 
   const components = await extractUIComponents(filePaths, absDir);
   return { cached: false, total: components.length, components };
+}
+
+// ============================================================================
+// ENV VARS HANDLER
+// ============================================================================
+
+/**
+ * Return the pre-computed environment variable inventory from the last analysis run.
+ * Falls back to re-computing from source files if the artifact is missing.
+ */
+export async function handleGetEnvVars(
+  directory: string
+): Promise<Record<string, unknown>> {
+  const absDir = await validateDirectory(directory);
+  const artifactPath = join(absDir, SPEC_GEN_DIR, SPEC_GEN_ANALYSIS_SUBDIR, ARTIFACT_ENV_INVENTORY);
+
+  try {
+    const raw = await readFile(artifactPath, 'utf-8');
+    const envVars = JSON.parse(raw) as unknown[];
+    return { cached: true, total: envVars.length, envVars };
+  } catch {
+    // Artifact not present — run live extraction
+  }
+
+  const { extractEnvVars } = await import('../../analyzer/env-extractor.js');
+  const { RepositoryMapper } = await import('../../analyzer/repository-mapper.js');
+  const { readSpecGenConfig } = await import('../config-manager.js');
+
+  const specGenConfig = await readSpecGenConfig(absDir);
+  const configExclude = specGenConfig?.analysis.excludePatterns ?? [];
+
+  const mapper = new RepositoryMapper(absDir, {
+    maxFiles: DEFAULT_MAX_FILES,
+    excludePatterns: configExclude.length > 0 ? configExclude : undefined,
+  });
+  const repoMap = await mapper.map();
+  const filePaths = repoMap.allFiles.map(f => f.path);
+
+  const envVars = await extractEnvVars(filePaths, absDir);
+  return { cached: false, total: envVars.length, envVars };
 }

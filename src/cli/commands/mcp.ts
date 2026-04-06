@@ -61,6 +61,7 @@ import {
   handleGetMiddlewareInventory,
   handleGetSchemaInventory,
   handleGetUIComponents,
+  handleGetEnvVars,
 } from '../../core/services/mcp-handlers/analysis.js';
 
 // Re-export utilities for tests
@@ -92,6 +93,7 @@ export {
   handleGetMiddlewareInventory,
   handleGetSchemaInventory,
   handleGetUIComponents,
+  handleGetEnvVars,
 };
 
 // ============================================================================
@@ -812,6 +814,24 @@ export const TOOL_DEFINITIONS = [
       required: ['directory'],
     },
   },
+  {
+    name: 'get_env_vars',
+    description:
+      'Return all environment variables referenced in the project: names, which files use them, ' +
+      'whether they have a known default (from .env.example), and whether they are required ' +
+      '(used without a fallback in source code). ' +
+      'Reads the pre-computed env-inventory.json artifact when available, ' +
+      'otherwise scans source files live. ' +
+      'Supports JS/TS (process.env), Python (os.environ/os.getenv), Go (os.Getenv), Ruby (ENV[]). ' +
+      'Run analyze_codebase first for the fastest results.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: 'Absolute path to the project directory' },
+      },
+      required: ['directory'],
+    },
+  },
 ];
 
 // ============================================================================
@@ -960,6 +980,9 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       } else if (name === 'get_ui_components') {
         const { directory } = args as { directory: string };
         result = await handleGetUIComponents(directory);
+      } else if (name === 'get_env_vars') {
+        const { directory } = args as { directory: string };
+        result = await handleGetEnvVars(directory);
       } else {
         return {
           content: [{ type: 'text', text: `Unknown tool: ${name}` }],

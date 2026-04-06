@@ -28,6 +28,7 @@ import type { UIComponent } from './ui-component-extractor.js';
 import type { SchemaTable } from './schema-extractor.js';
 import type { RouteInventory } from './http-route-parser.js';
 import type { MiddlewareEntry } from './middleware-extractor.js';
+import type { EnvVar } from './env-extractor.js';
 
 /**
  * Heuristic to detect test/spec files across languages.
@@ -132,6 +133,8 @@ export interface RepoStructure {
   routeInventory: RouteInventory;
   /** Detected middleware entries */
   middleware: MiddlewareEntry[];
+  /** Detected environment variables */
+  envVars: EnvVar[];
   statistics: {
     totalFiles: number;
     analyzedFiles: number;
@@ -189,6 +192,7 @@ export interface EnrichmentData {
   schemas?: SchemaTable[];
   routeInventory?: RouteInventory;
   middleware?: MiddlewareEntry[];
+  envVars?: EnvVar[];
 }
 
 /**
@@ -353,6 +357,14 @@ export class AnalysisArtifactGenerator {
       ));
     }
 
+    if (enrichment?.envVars) {
+      const { ARTIFACT_ENV_INVENTORY } = await import('../../constants.js');
+      saves.push(writeFile(
+        join(this.options.outputDir, ARTIFACT_ENV_INVENTORY),
+        JSON.stringify(enrichment.envVars, null, 2)
+      ));
+    }
+
     await Promise.all(saves);
 
     return artifacts;
@@ -405,6 +417,7 @@ export class AnalysisArtifactGenerator {
       schemas: enrichment?.schemas ?? [],
       routeInventory: enrichment?.routeInventory ?? { total: 0, byMethod: {}, byFramework: {}, routes: [] },
       middleware: enrichment?.middleware ?? [],
+      envVars: enrichment?.envVars ?? [],
       statistics: {
         totalFiles: repoMap.summary.totalFiles,
         analyzedFiles: repoMap.summary.analyzedFiles,
@@ -943,6 +956,17 @@ export class AnalysisArtifactGenerator {
         .map(([f, n]) => `${f}: ${n}`)
         .join(', ');
       if (frameworkSummary) lines.push(`- By framework: ${frameworkSummary}`);
+      lines.push('');
+    }
+
+    // ── Environment Variables ─────────────────────────────────────────────────
+    if (repoStructure.envVars.length > 0) {
+      lines.push('## Environment Variables');
+      lines.push(`**Total**: ${repoStructure.envVars.length} variable(s)`);
+      const required = repoStructure.envVars.filter(v => v.required);
+      if (required.length > 0) {
+        lines.push(`- Required (no default): ${required.map(v => v.name).join(', ')}`);
+      }
       lines.push('');
     }
 

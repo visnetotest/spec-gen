@@ -62,6 +62,7 @@ vi.mock('../../core/analyzer/artifact-generator.js', () => ({
           schemas: [],
           routeInventory: { total: 0, byMethod: {}, byFramework: {}, routes: [] },
           middleware: [],
+          envVars: [],
         },
         llmContext: { callGraph: null },
       }),
@@ -85,6 +86,10 @@ vi.mock('../../core/analyzer/http-route-parser.js', () => ({
 
 vi.mock('../../core/analyzer/middleware-extractor.js', () => ({
   extractMiddleware: vi.fn().mockResolvedValue([]),
+}));
+
+vi.mock('../../core/analyzer/env-extractor.js', () => ({
+  extractEnvVars: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock('../../core/analyzer/ai-config-generator.js', () => ({

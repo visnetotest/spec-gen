@@ -59,6 +59,7 @@ const MOCK_REPO_STRUCTURE: RepoStructure = {
   schemas: [],
   routeInventory: { total: 0, byMethod: {}, byFramework: {}, routes: [] },
   middleware: [],
+  envVars: [],
   statistics: {
     totalFiles: 50,
     analyzedFiles: 40,

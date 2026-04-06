@@ -46,6 +46,7 @@ import { extractUIComponents } from '../../core/analyzer/ui-component-extractor.
 import { extractSchemas } from '../../core/analyzer/schema-extractor.js';
 import { buildRouteInventory } from '../../core/analyzer/http-route-parser.js';
 import { extractMiddleware } from '../../core/analyzer/middleware-extractor.js';
+import { extractEnvVars } from '../../core/analyzer/env-extractor.js';
 import { generateAiConfigs, AI_TOOL_TARGETS, type AiTool } from '../../core/analyzer/ai-config-generator.js';
 
 // ============================================================================
@@ -153,15 +154,16 @@ export async function runAnalysis(
   logger.blank();
 
   // Phase 3: Run new enrichment extractors in parallel
-  logger.analysis('Extracting UI components, schemas, and routes...');
+  logger.analysis('Extracting UI components, schemas, routes, and env vars...');
 
   const allFilePaths = repoMap.allFiles.map(f => f.path);
 
-  const [uiComponents, schemas, routeInventory, middleware] = await Promise.all([
+  const [uiComponents, schemas, routeInventory, middleware, envVars] = await Promise.all([
     extractUIComponents(allFilePaths, rootPath),
     extractSchemas(allFilePaths, rootPath),
     buildRouteInventory(allFilePaths, rootPath),
     extractMiddleware(allFilePaths, rootPath),
+    extractEnvVars(allFilePaths, rootPath),
   ]);
 
   // Phase 4: Generate Artifacts
@@ -179,6 +181,7 @@ export async function runAnalysis(
     schemas,
     routeInventory,
     middleware,
+    envVars,
   });
 
   // Also save the raw dependency graph
@@ -635,7 +638,10 @@ After analysis, run 'spec-gen generate' to create OpenSpec files.
         console.log(`    ├─ ${opts.output}middleware-inventory.json  (${artifacts.repoStructure.middleware.length} middleware entry(ies))`);
       }
       if (artifacts.repoStructure.uiComponents.length > 0) {
-        console.log(`    ├─ ${opts.output}repo-structure.json  (${artifacts.repoStructure.uiComponents.length} UI component(s) in uiComponents field)`);
+        console.log(`    ├─ ${opts.output}ui-inventory.json  (${artifacts.repoStructure.uiComponents.length} UI component(s))`);
+      }
+      if (artifacts.repoStructure.envVars.length > 0) {
+        console.log(`    ├─ ${opts.output}env-inventory.json  (${artifacts.repoStructure.envVars.length} env var(s))`);
       }
       if (architectureMdWritten) {
         console.log(`    ├─ ${opts.output}SUMMARY.md`);
@@ -661,12 +667,15 @@ After analysis, run 'spec-gen generate' to create OpenSpec files.
         console.log('    | Checking if code still matches spec             | check_spec_drift                  |');
         console.log('    | Finding spec requirements by meaning            | search_specs                      |');
       }
+      console.log('');
       if (aiConfigsCreated.length > 0) {
-        console.log('');
-        console.log('  AI config files created:');
+        console.log('  Agent config files created:');
         for (const f of aiConfigsCreated) {
           console.log(`    ├─ ${f}`);
         }
+      } else {
+        console.log('  Agent config files: not generated');
+        console.log('    Tip: Re-run with --ai-configs to generate CLAUDE.md, .cursorrules, AGENTS.md, etc.');
       }
       console.log('');
 

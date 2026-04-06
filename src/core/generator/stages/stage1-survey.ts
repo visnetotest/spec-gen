@@ -46,6 +46,14 @@ function buildStructuredHints(repoStructure: RepoStructure): string {
     parts.push(`Detected UI components: ${summary}`);
   }
 
+  const envVars = repoStructure.envVars ?? [];
+  if (envVars.length > 0) {
+    const required = envVars.filter(v => v.required).map(v => v.name);
+    const all = envVars.map(v => v.name).join(', ');
+    const requiredNote = required.length > 0 ? ` (required without default: ${required.join(', ')})` : '';
+    parts.push(`Detected env vars: ${all}${requiredNote}`);
+  }
+
   return parts.length > 0 ? `\nPre-extracted structural intelligence:\n${parts.join('\n\n')}\n` : '';
 }
 
