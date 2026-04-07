@@ -29,6 +29,15 @@ To apply the plan, use the `spec-gen-execute-refactor` skill.
 
 ---
 
+## User-specified target — shortcut path
+
+If the user has already named a specific file or function to refactor:
+- **Skip** Steps 2, 3, and 3b (discovery is not needed).
+- **Do not skip** Steps 3c, 4, 5, 6, and 6b — coverage check and impact analysis are mandatory regardless of how the target was chosen.
+- Jump directly to Step 3c using the user-provided target.
+
+---
+
 ## Step 1 — Confirm the project directory
 
 Ask the user which project to analyze, or confirm the current workspace root.
@@ -83,7 +92,7 @@ If a top candidate appears in a clone group, prepend a **deduplication note** to
 
 ## Step 3c — Check test coverage
 
-Detect the coverage tool from the project and run it on the candidate files:
+Before presenting a choice to the user, check test coverage for the files containing the candidates. Detect the coverage tool from the project:
 
 | Ecosystem | Command |
 |---|---|
@@ -154,9 +163,30 @@ Cross-reference with the subgraph from Step 5: a good first extraction candidate
 
 ---
 
+## Step 6b — Find insertion points for extracted helpers
+
+Before designing the change sequence, identify where extracted functions should land.
+This avoids creating helpers in the wrong file or layer.
+
+```xml
+<use_mcp_tool>
+  <server_name>spec-gen</server_name>
+  <tool_name>suggest_insertion_points</tool_name>
+  <arguments>{"directory": "$DIRECTORY", "query": "extract helper from $FUNCTION_NAME", "limit": 5}</arguments>
+</use_mcp_tool>
+```
+
+For each candidate, note its role and strategy. Prefer candidates that already call into — or are called by — the target function (visible in the Step 5 subgraph).
+
+---
+
 ## Step 7 — Design the change sequence
 
-Design an ordered sequence of atomic changes based on the strategy from Step 4. Each change must specify:
+Design an ordered sequence of atomic changes based on the strategy from Step 4.
+
+**Each change is a complete unit: edit → verify diff → run tests → mark done. Tests are not a final gate; they are a mandatory sub-step after every single change. Write the plan to reflect this explicitly.**
+
+Each change must specify:
 
 - **What**: the exact block to move (line range or description)
 - **New name**: the function or method name to give it
