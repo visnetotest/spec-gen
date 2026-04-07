@@ -25,7 +25,7 @@ For human workflows: specs stay in sync via continuous drift detection, and `spe
 | Let agents navigate with graph-based tools | `spec-gen mcp` | No | — |
 | Inspect the dependency graph visually | `spec-gen view` | No | — |
 
-**Languages supported**: TypeScript · JavaScript · Python · Go · Rust · Ruby · Java · C++
+**Languages supported**: TypeScript · JavaScript · Python · Go · Rust · Ruby · Java · C++ · Swift
 
 ## Quick Start
 
