@@ -1488,6 +1488,7 @@ console.log(`Analyzed ${analysis.repoMap.summary.analyzedFiles} files`);
 | `specGenVerify(options?)` | Verify spec accuracy | Yes |
 | `specGenDrift(options?)` | Detect spec-to-code drift | No* |
 | `specGenRun(options?)` | Full pipeline: init + analyze + generate | Yes |
+| `specGenAudit(options?)` | Parity audit: uncovered functions, hub gaps, orphan requirements, stale domains | No |
 | `specGenGetSpecRequirements(options?)` | Read requirement blocks from generated specs | No |
 
 \* `specGenDrift` requires an API key only when `llmEnhanced: true`.
@@ -1544,11 +1545,11 @@ for (const [key, req] of Object.entries(requirements)) {
 npm install          # Install dependencies
 npm run dev          # Development mode (watch)
 npm run build        # Build
-npm run test:run     # Run tests (2200+ unit tests)
+npm run test:run     # Run tests (2300+ unit tests)
 npm run typecheck    # Type check
 ```
 
-2200+ unit tests covering static analysis, call graph (including Swift), refactor analysis, spec mapping, drift detection, LLM enhancement, ADR generation, MCP handlers, change proposals, cross-file edge synthesis, and the full CLI.
+2300+ unit tests covering static analysis, call graph (including Swift), refactor analysis, spec mapping, drift detection, LLM enhancement, ADR generation, MCP handlers, change proposals, cross-file edge synthesis, and the full CLI.
 
 ## Links
 

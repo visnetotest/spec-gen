@@ -1,6 +1,6 @@
 {
   "name": "spec-gen-cli",
-  "version": "1.2.7",
+  "version": "1.2.8",
   "description": "Reverse-engineer OpenSpec specifications from existing codebases",
   "type": "module",
   "main": "dist/api/index.js",
@@ -103,8 +103,7 @@
     "yaml": "^2.6.1"
   },
   "optionalDependencies": {
-    "@lancedb/lancedb-darwin-x64": "^0.26.2",
-    "@lancedb/lancedb-linux-x64-gnu": "^0.26.2"
+    "tree-sitter-cli": "^0.23"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
@@ -117,8 +116,5 @@
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.19.1",
     "vitest": "^4.0.18"
-  },
-  "optionalDependencies": {
-    "tree-sitter-cli": "^0.23"
   }
 }
