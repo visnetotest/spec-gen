@@ -20,6 +20,7 @@ async function initRepo(dir: string): Promise<void> {
   await execFileAsync('git', ['init', '-b', 'main'], { cwd: dir });
   await execFileAsync('git', ['config', 'user.email', 'test@test.com'], { cwd: dir });
   await execFileAsync('git', ['config', 'user.name', 'Test User'], { cwd: dir });
+  await execFileAsync('git', ['config', 'commit.gpgSign', 'false'], { cwd: dir });
 }
 
 async function commit(dir: string, message = 'initial commit'): Promise<void> {
