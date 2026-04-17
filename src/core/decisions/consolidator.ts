@@ -47,12 +47,17 @@ interface ConsolidatedRaw {
   supersededIds: string[];
 }
 
+export interface ConsolidateResult {
+  decisions: PendingDecision[];
+  supersededIds: string[];
+}
+
 export async function consolidateDrafts(
   store: DecisionStore,
   llm: LLMService,
-): Promise<PendingDecision[]> {
+): Promise<ConsolidateResult> {
   const drafts = store.decisions.filter((d) => d.status === 'draft');
-  if (drafts.length === 0) return [];
+  if (drafts.length === 0) return { decisions: [], supersededIds: [] };
 
   const userContent = JSON.stringify(
     drafts.map((d) => ({
@@ -79,8 +84,9 @@ export async function consolidateDrafts(
 
   const consolidated = parseJSON<ConsolidatedRaw[]>(raw, []);
   const now = new Date().toISOString();
+  const allSupersededIds = consolidated.flatMap((c) => c.supersededIds ?? []);
 
-  return consolidated.map((c): PendingDecision => {
+  const decisions = consolidated.map((c): PendingDecision => {
     const domain = c.affectedDomains[0] ?? 'unknown';
     return {
       id: makeDecisionId(store.sessionId, domain, c.title),
@@ -98,10 +104,14 @@ export async function consolidateDrafts(
       syncedToSpecs: [],
     };
   });
+
+  return { decisions, supersededIds: allSupersededIds };
 }
 
 function parseJSON<T>(text: string, fallback: T): T {
-  const match = text.match(/\[[\s\S]*\]/);
+  // Strip markdown code fences before extracting JSON
+  const stripped = text.replace(/```(?:json)?\s*/g, '').replace(/```\s*/g, '');
+  const match = stripped.match(/\[[\s\S]*\]/);
   if (!match) return fallback;
   try {
     return JSON.parse(match[0]) as T;

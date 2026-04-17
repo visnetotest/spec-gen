@@ -36,16 +36,19 @@ export async function handleRecordDecision(
   supersedes?: string,
 ): Promise<unknown> {
   try {
+    if (!title?.trim()) return { error: 'title is required and must not be empty.' };
+    if (!rationale?.trim()) return { error: 'rationale is required and must not be empty.' };
+
     const rootPath = await validateDirectory(directory);
     const store = await loadDecisionStore(rootPath);
 
-    const id = makeDecisionId(store.sessionId, 'unknown', title);
+    const id = makeDecisionId(store.sessionId, 'unknown', title.trim());
 
     const decision: PendingDecision = {
       id,
       status: 'draft',
-      title,
-      rationale,
+      title: title.trim(),
+      rationale: rationale.trim(),
       consequences: consequences ?? '',
       proposedRequirement: null,
       affectedDomains: [],

@@ -87,10 +87,11 @@ Significant choices: data structure, library/dependency, API contract, auth stra
 
 \`\`\`
 record_decision({
-  title: "Use JWTs for stateless auth",       // short imperative
-  rationale: "Avoids session store in infra", // why this choice
-  affectedFiles: ["src/auth/middleware.ts"],  // optional
-  supersedes: "<id>"                          // if reversing a prior decision
+  title: "Use JWTs for stateless auth",         // short imperative
+  rationale: "Avoids session store in infra",   // why this choice
+  consequences: "Tokens can't be revoked early", // trade-offs
+  affectedFiles: ["src/auth/middleware.ts"],    // optional
+  supersedes: "a1b2c3d4"                        // 8-char ID of prior decision being reversed
 })
 \`\`\`
 

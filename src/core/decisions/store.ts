@@ -5,6 +5,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { logger } from '../../utils/logger.js';
 import {
   SPEC_GEN_DIR,
   SPEC_GEN_DECISIONS_SUBDIR,
@@ -25,7 +26,11 @@ export async function loadDecisionStore(rootPath: string): Promise<DecisionStore
   try {
     const raw = await readFile(path, 'utf-8');
     return JSON.parse(raw) as DecisionStore;
-  } catch {
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      logger.warning(`decisions store: failed to read ${path} (${(err as Error).message}) — starting fresh`);
+    }
     return emptyStore();
   }
 }

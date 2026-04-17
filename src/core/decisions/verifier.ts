@@ -8,6 +8,7 @@
  */
 
 import { DECISIONS_VERIFICATION_MAX_TOKENS } from '../../constants.js';
+import { logger } from '../../utils/logger.js';
 import type { LLMService } from '../services/llm-service.js';
 import type { PendingDecision } from '../../types/index.js';
 
@@ -62,7 +63,11 @@ export async function verifyDecisions(
     proposedRequirement: d.proposedRequirement,
   }));
 
-  const userContent = `Decisions:\n${JSON.stringify(decisionSummary, null, 2)}\n\nDiff:\n${diff.slice(0, 20_000)}`;
+  const DIFF_LIMIT = 20_000;
+  if (diff.length > DIFF_LIMIT) {
+    logger.warning(`verifyDecisions: diff truncated to ${DIFF_LIMIT} chars (was ${diff.length}) — some decisions may be incorrectly marked phantom`);
+  }
+  const userContent = `Decisions:\n${JSON.stringify(decisionSummary, null, 2)}\n\nDiff:\n${diff.slice(0, DIFF_LIMIT)}`;
 
   const response = await llm.complete({
     systemPrompt: SYSTEM_PROMPT,
@@ -78,26 +83,26 @@ export async function verifyDecisions(
   const now = new Date().toISOString();
 
   const verified: PendingDecision[] = result.verified
-    .map((v) => {
+    .flatMap((v) => {
       const d = byId.get(v.id);
-      if (!d) return null;
-      return { ...d, status: 'verified' as const, confidence: v.confidence, evidenceFile: v.evidenceFile, verifiedAt: now };
-    })
-    .filter((d): d is PendingDecision => d !== null);
+      if (!d) return [];
+      return [{ ...d, status: 'verified' as const, confidence: v.confidence, evidenceFile: v.evidenceFile, verifiedAt: now }];
+    });
 
   const phantom: PendingDecision[] = result.phantom
-    .map((p) => {
+    .flatMap((p) => {
       const d = byId.get(p.id);
-      if (!d) return null;
-      return { ...d, status: 'phantom' as const, confidence: 'low' as const, verifiedAt: now };
-    })
-    .filter((d): d is PendingDecision => d !== null);
+      if (!d) return [];
+      return [{ ...d, status: 'phantom' as const, confidence: 'low' as const, verifiedAt: now }];
+    });
 
   return { verified, phantom, missing: result.missing };
 }
 
 function parseJSON<T>(text: string, fallback: T): T {
-  const match = text.match(/\{[\s\S]*\}/);
+  // Strip markdown code fences before extracting JSON
+  const stripped = text.replace(/```(?:json)?\s*/g, '').replace(/```\s*/g, '');
+  const match = stripped.match(/\{[\s\S]*\}/);
   if (!match) return fallback;
   try {
     return JSON.parse(match[0]) as T;

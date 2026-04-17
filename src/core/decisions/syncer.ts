@@ -126,10 +126,12 @@ function addSourceFiles(content: string, newFiles: string[]): string {
 
 function appendRequirement(content: string, decision: PendingDecision): string {
   const slug = toPascalCase(decision.title);
+  const req = decision.proposedRequirement ?? '';
+  const reqText = /^the system shall\b/i.test(req.trim()) ? req.trim() : `The system SHALL ${req}`;
   const block = `
 ### Requirement: ${slug}
 
-The system SHALL ${decision.proposedRequirement}
+${reqText}
 
 > Decision recorded: ${decision.id}
 > Date: ${decision.syncedAt ?? new Date().toISOString().slice(0, 10)}

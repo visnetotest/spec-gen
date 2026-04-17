@@ -12,7 +12,7 @@ import { Command } from 'commander';
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
-import { fileExists, parseList, resolveLLMProvider } from '../../utils/command-helpers.js';
+import { fileExists, resolveLLMProvider } from '../../utils/command-helpers.js';
 import { readSpecGenConfig } from '../../core/services/config-manager.js';
 import { createLLMService } from '../../core/services/llm-service.js';
 import { isGitRepository, getChangedFiles, getFileDiff, resolveBaseRef, buildSpecMap } from '../../core/drift/index.js';
@@ -22,8 +22,6 @@ import {
   upsertDecisions,
   patchDecision,
   getDecisionsByStatus,
-  makeDecisionId,
-  newSessionId,
 } from '../../core/decisions/store.js';
 import { consolidateDrafts } from '../../core/decisions/consolidator.js';
 import { extractFromDiff } from '../../core/decisions/extractor.js';
@@ -36,9 +34,8 @@ import {
   OPENSPEC_SPECS_SUBDIR,
   DECISIONS_EXTRACTION_MAX_FILES,
   DECISIONS_DIFF_MAX_CHARS,
-  SPEC_GEN_CONFIG_REL_PATH,
 } from '../../constants.js';
-import type { PendingDecision, DecisionStore } from '../../types/index.js';
+import type { PendingDecision } from '../../types/index.js';
 
 // ============================================================================
 // AGENT INSTRUCTION FILES
@@ -58,8 +55,9 @@ module boundary, database schema, caching approach, error handling pattern.
 record_decision({
   title: "Use JWTs for stateless auth",
   rationale: "Avoids session store in infra",
+  consequences: "Tokens can't be revoked early",
   affectedFiles: ["src/auth/middleware.ts"],
-  supersedes: "<id>"   // if reversing a prior decision
+  supersedes: "a1b2c3d4"  // 8-char ID of prior decision being reversed
 })
 \`\`\`
 
@@ -211,13 +209,13 @@ function displayDecision(d: PendingDecision, verbose = false): void {
     d.confidence === 'medium' ? '\x1b[33mmedium\x1b[0m' :
                                 '\x1b[31mlow\x1b[0m';
 
-  logger.info(`${icon} [${d.id}] ${d.title}`);
+  console.log(`${icon} [${d.id}] ${d.title}`);
   if (verbose) {
-    logger.info(`   Status     : ${d.status}  Confidence: ${confidence}`);
-    logger.info(`   Rationale  : ${d.rationale}`);
-    if (d.affectedDomains.length) logger.info(`   Domains    : ${d.affectedDomains.join(', ')}`);
-    if (d.proposedRequirement) logger.info(`   Requirement: ${d.proposedRequirement}`);
-    if (d.evidenceFile) logger.info(`   Evidence   : ${d.evidenceFile}`);
+    console.log(`   Status     : ${d.status}  Confidence: ${confidence}`);
+    console.log(`   Rationale  : ${d.rationale}`);
+    if (d.affectedDomains.length) console.log(`   Domains    : ${d.affectedDomains.join(', ')}`);
+    if (d.proposedRequirement) console.log(`   Requirement: ${d.proposedRequirement}`);
+    if (d.evidenceFile) console.log(`   Evidence   : ${d.evidenceFile}`);
   }
 }
 
@@ -227,7 +225,7 @@ function displayMissing(missing: Array<{ file: string; description: string }>): 
   for (const m of missing) {
     logger.warning(`⚠ ${m.file}: ${m.description}`);
   }
-  logger.info('These changes were not recorded as decisions. Consider adding them with record_decision.');
+  console.log('These changes were not recorded as decisions. Consider adding them with record_decision.');
 }
 
 // ============================================================================
@@ -369,9 +367,12 @@ Examples:
 
       // Step 1 — Consolidate drafts OR extract from diff as fallback
       let consolidated: PendingDecision[];
+      let supersededIds: string[] = [];
       if (hasDrafts) {
         if (!options.json) logger.discovery(`Consolidating ${drafts.length} draft decision(s) via ${resolved.provider}...`);
-        consolidated = await consolidateDrafts(store, llm);
+        const result = await consolidateDrafts(store, llm);
+        consolidated = result.decisions;
+        supersededIds = result.supersededIds;
       } else {
         if (!options.json) logger.discovery(`No drafts found — extracting decisions from diff via ${resolved.provider}...`);
         const openspecPath = join(rootPath, specGenConfig.openspecPath ?? OPENSPEC_DIR);
@@ -379,7 +380,7 @@ Examples:
         consolidated = await extractFromDiff({ rootPath, specMap, sessionId: store.sessionId, llm });
       }
       if (consolidated.length === 0) {
-        if (!options.json) logger.info('No architectural decisions found in drafts.');
+        if (!options.json) console.log('No architectural decisions found in drafts.');
         if (options.gate) process.exitCode = 0;
         return;
       }
@@ -396,7 +397,9 @@ Examples:
           );
           combinedDiff = diffs.join('\n\n');
         }
-      } catch { /* diff unavailable — skip verification */ }
+      } catch (err) {
+        logger.warning(`Could not build git diff for verification: ${(err as Error).message}`);
+      }
 
       // Step 3 — Verify
       const { verified, phantom, missing } = combinedDiff
@@ -406,7 +409,6 @@ Examples:
       // Step 4 — Persist
       let updatedStore = { ...store };
       // Mark superseded drafts as rejected
-      const supersededIds = new Set(consolidated.flatMap((c: any) => c.supersededIds ?? []));
       for (const id of supersededIds) {
         updatedStore = patchDecision(updatedStore, id, { status: 'rejected' });
       }
@@ -423,20 +425,20 @@ Examples:
       logger.section('Architectural Decisions — Review Required');
 
       if (verified.length > 0) {
-        logger.info('\nVerified decisions (found in code):');
+        console.log('\nVerified decisions (found in code):');
         for (const d of verified) displayDecision(d, options.verbose);
       }
 
       if (phantom.length > 0) {
-        logger.info('\nPhantom decisions (recorded but not found in diff):');
+        console.log('\nPhantom decisions (recorded but not found in diff):');
         for (const d of phantom) displayDecision(d, options.verbose);
       }
 
       displayMissing(missing);
 
-      logger.info('\nApprove with: spec-gen decisions --approve <id>');
-      logger.info('Reject with:  spec-gen decisions --reject <id>');
-      logger.info('Sync all approved: spec-gen decisions --sync');
+      console.log('\nApprove with: spec-gen decisions --approve <id>');
+      console.log('Reject with:  spec-gen decisions --reject <id>');
+      console.log('Sync all approved: spec-gen decisions --sync');
 
       if (options.gate && verified.length > 0) {
         logger.warning('\nCommit gated — review decisions above before committing.');
@@ -466,7 +468,7 @@ Examples:
       const approved = getDecisionsByStatus(store, 'approved');
 
       if (approved.length === 0) {
-        logger.info('No approved decisions to sync. Use --approve <id> first.');
+        console.log('No approved decisions to sync. Use --approve <id> first.');
         return;
       }
 
@@ -486,16 +488,22 @@ Examples:
 
       for (const d of result.synced) {
         logger.success(`✔ Synced [${d.id}] ${d.title}`);
-        for (const p of d.syncedToSpecs) logger.info(`   → ${p}`);
+        for (const p of d.syncedToSpecs) console.log(`   → ${p}`);
       }
       for (const e of result.errors) {
         logger.error(`✗ [${e.id}] ${e.error}`);
       }
-      if (options.dryRun) logger.info('\n(dry-run — no files were written)');
+      if (options.dryRun) console.log('\n(dry-run — no files were written)');
       return;
     }
 
     // ── Default: list ────────────────────────────────────────────────────────
+    const VALID_STATUSES = new Set(['draft', 'consolidated', 'verified', 'phantom', 'approved', 'rejected', 'synced']);
+    if (options.status && !VALID_STATUSES.has(options.status)) {
+      logger.error(`Invalid status "${options.status}". Valid values: ${[...VALID_STATUSES].join('|')}`);
+      process.exitCode = 1;
+      return;
+    }
     const all = options.status
       ? store.decisions.filter((d) => d.status === options.status)
       : store.decisions;
@@ -506,11 +514,11 @@ Examples:
     }
 
     if (all.length === 0) {
-      logger.info('No decisions recorded yet. Agents can call the record_decision MCP tool during development.');
+      console.log('No decisions recorded yet. Agents can call the record_decision MCP tool during development.');
       return;
     }
 
     logger.section('Architectural Decisions');
     for (const d of all) displayDecision(d, options.verbose);
-    logger.info(`\nTotal: ${all.length}`);
+    console.log(`\nTotal: ${all.length}`);
   });

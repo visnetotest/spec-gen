@@ -25,13 +25,12 @@ import {
   upsertDecisions,
   patchDecision,
   makeDecisionId,
-  newSessionId,
 } from '../core/decisions/store.js';
 import { consolidateDrafts } from '../core/decisions/consolidator.js';
+import type { ProviderName } from '../utils/command-helpers.js';
 import { verifyDecisions } from '../core/decisions/verifier.js';
 import { syncApprovedDecisions } from '../core/decisions/syncer.js';
 import type { PendingDecision, DecisionStore } from '../types/index.js';
-import type { VerificationResult } from '../core/decisions/verifier.js';
 import type { SyncResult } from '../core/decisions/syncer.js';
 import type { BaseOptions, ProgressCallback } from './types.js';
 
@@ -137,7 +136,7 @@ export async function specGenConsolidateDecisions(
   if (!provider) throw new Error('No LLM provider configured. Set an API key or configure generation.provider.');
 
   const llm = createLLMService({
-    provider: provider as any,
+    provider: provider as ProviderName,
     model: options.model ?? specGenConfig.generation?.model,
     apiBase: options.apiBase ?? specGenConfig.llm?.apiBase,
     sslVerify: options.sslVerify ?? specGenConfig.llm?.sslVerify ?? true,
@@ -148,7 +147,7 @@ export async function specGenConsolidateDecisions(
   const store = await loadDecisionStore(rootPath);
 
   progress(onProgress, 'Consolidating drafts', 'start');
-  const consolidated = await consolidateDrafts(store, llm);
+  const { decisions: consolidated, supersededIds } = await consolidateDrafts(store, llm);
   progress(onProgress, 'Consolidating drafts', 'complete', `${consolidated.length} decisions`);
 
   if (consolidated.length === 0) {
@@ -180,6 +179,9 @@ export async function specGenConsolidateDecisions(
   progress(onProgress, 'Verifying decisions', 'complete', `${verified.length} verified`);
 
   let updatedStore = { ...store };
+  for (const id of supersededIds) {
+    updatedStore = patchDecision(updatedStore, id, { status: 'rejected' });
+  }
   updatedStore = upsertDecisions(updatedStore, [...verified, ...phantom]);
   await saveDecisionStore(rootPath, updatedStore);
 
