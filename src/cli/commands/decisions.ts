@@ -41,6 +41,53 @@ import {
 import type { PendingDecision } from '../../types/index.js';
 
 // ============================================================================
+// AGENT INSTRUCTION FILES
+// ============================================================================
+
+const AGENT_INSTRUCTIONS_MARKER = '<!-- spec-gen-decisions-instructions -->';
+
+const AGENT_INSTRUCTIONS_BLOCK = `${AGENT_INSTRUCTIONS_MARKER}
+## Architectural decisions
+
+When making a significant design choice, call \`record_decision\` **before** writing the code.
+
+Significant choices: data structure, library/dependency, API contract, auth strategy,
+module boundary, database schema, caching approach, error handling pattern.
+
+\`\`\`
+record_decision({
+  title: "Use JWTs for stateless auth",
+  rationale: "Avoids session store in infra",
+  affectedFiles: ["src/auth/middleware.ts"],
+  supersedes: "<id>"   // if reversing a prior decision
+})
+\`\`\`
+
+Decisions are consolidated and cross-checked against the git diff before each commit.
+<!-- end-spec-gen-decisions-instructions -->
+`;
+
+/** Inject decisions instructions into an existing agent file, idempotently. */
+async function injectAgentInstructions(filePath: string): Promise<'injected' | 'already' | 'missing'> {
+  if (!(await fileExists(filePath))) return 'missing';
+  const content = await readFile(filePath, 'utf-8');
+  if (content.includes(AGENT_INSTRUCTIONS_MARKER)) return 'already';
+  await writeFile(filePath, content.trimEnd() + '\n\n' + AGENT_INSTRUCTIONS_BLOCK, 'utf-8');
+  return 'injected';
+}
+
+/** Remove decisions instructions block from an agent file. */
+async function removeAgentInstructions(filePath: string): Promise<void> {
+  if (!(await fileExists(filePath))) return;
+  const content = await readFile(filePath, 'utf-8');
+  if (!content.includes(AGENT_INSTRUCTIONS_MARKER)) return;
+  const cleaned = content
+    .replace(/\n*<!-- spec-gen-decisions-instructions -->[\s\S]*?<!-- end-spec-gen-decisions-instructions -->\n*/g, '')
+    .trim();
+  await writeFile(filePath, cleaned + '\n', 'utf-8');
+}
+
+// ============================================================================
 // HOOK MANAGEMENT
 // ============================================================================
 
@@ -89,6 +136,22 @@ async function installPreCommitHook(rootPath: string): Promise<void> {
   await chmod(hookPath, 0o755);
   logger.success('Pre-commit hook installed at .git/hooks/pre-commit');
   logger.discovery('Commits will be gated until decisions are approved. Use --no-verify to skip.');
+
+  // Inject record_decision instructions into existing agent context files
+  const agentFiles = [
+    { path: join(rootPath, 'CLAUDE.md'), label: 'CLAUDE.md' },
+    { path: join(rootPath, 'AGENTS.md'), label: 'AGENTS.md' },
+    { path: join(rootPath, '.cursorrules'), label: '.cursorrules' },
+    { path: join(rootPath, '.clinerules', 'spec-gen.md'), label: '.clinerules/spec-gen.md' },
+    { path: join(rootPath, '.github', 'copilot-instructions.md'), label: '.github/copilot-instructions.md' },
+    { path: join(rootPath, '.windsurf', 'rules.md'), label: '.windsurf/rules.md' },
+    { path: join(rootPath, '.vibe', 'skills', 'spec-gen.md'), label: '.vibe/skills/spec-gen.md' },
+  ];
+
+  for (const { path: filePath, label } of agentFiles) {
+    const result = await injectAgentInstructions(filePath);
+    if (result === 'injected') logger.discovery(`  → record_decision instructions added to ${label}`);
+  }
 }
 
 async function uninstallPreCommitHook(rootPath: string): Promise<void> {
@@ -117,6 +180,18 @@ async function uninstallPreCommitHook(rootPath: string): Promise<void> {
     await writeFile(hookPath, newContent + '\n', 'utf-8');
     logger.success('Spec-gen decisions gate removed from pre-commit hook.');
   }
+
+  // Remove record_decision instructions from agent context files
+  const agentFiles = [
+    join(rootPath, 'CLAUDE.md'),
+    join(rootPath, 'AGENTS.md'),
+    join(rootPath, '.cursorrules'),
+    join(rootPath, '.clinerules', 'spec-gen.md'),
+    join(rootPath, '.github', 'copilot-instructions.md'),
+    join(rootPath, '.windsurf', 'rules.md'),
+    join(rootPath, '.vibe', 'skills', 'spec-gen.md'),
+  ];
+  for (const filePath of agentFiles) await removeAgentInstructions(filePath);
 }
 
 // ============================================================================
