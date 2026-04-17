@@ -222,6 +222,13 @@ graph TD
             DD -.->|optional| LE[LLM Enhancer]
         end
 
+        subgraph Decisions["Decisions -- LLM optional"]
+            DR[Decision Recorder] --> DC[Consolidator]
+            DC -.->|LLM cross-check| DV[Verifier]
+            DV --> DS[Syncer]
+            GA -.->|fallback| DC
+        end
+
         LLM[LLM Service -- Anthropic / OpenAI / Compatible]
     end
 
@@ -252,6 +259,8 @@ graph TD
     ADR --> ADRS
     AG --> ANALYSIS
     DD --> REPORT
+    DS --> SPECS
+    DS --> ADRS
 ```
 
 ## Drift Detection
@@ -816,6 +825,21 @@ spec-gen analyze --ai-configs   # project-specific context files
 spec-gen setup                   # workflow skills
 ```
 
+### Decisions Options
+
+```bash
+spec-gen decisions [options]
+  --list                 # List decisions, optionally filtered by --status
+  --status <status>      # Filter by status: draft, consolidated, verified, approved, synced, phantom
+  --approve <id>         # Approve a decision by ID
+  --reject <id>          # Reject a decision by ID
+  --reason <text>        # Rejection reason (used with --reject)
+  --sync                 # Write approved decisions into specs and ADRs
+  --dry-run              # Preview sync without writing files
+  --install-hook         # Install decisions pre-commit hook
+  --uninstall-hook       # Remove decisions pre-commit hook
+```
+
 ### Verify Options
 
 ```bash
@@ -1110,7 +1134,7 @@ curl -sL https://raw.githubusercontent.com/clay-good/spec-gen/main/skills/opensp
 
 ### Tools
 
-All tools run on **pure static analysis** -- no LLM quota consumed.
+Most tools run on **pure static analysis** — no LLM quota consumed. Exceptions: `record_decision` consolidation (LLM optional, falls back to diff extraction) and `sync_decisions` (writes to files).
 
 **Run analysis**
 
@@ -1134,7 +1158,6 @@ All tools run on **pure static analysis** -- no LLM quota consumed.
 | `get_function_skeleton` | Noise-stripped view of a source file: logs, inline comments, and non-JSDoc block comments removed. Signatures, control flow, return/throw, and call expressions preserved. Returns reduction %. | No |
 | `get_file_dependencies` | Return the file-level import dependencies for a given source file (imports, imported-by, or both). | Yes |
 | `get_architecture_overview` | High-level cluster map: roles (entry layer, orchestrator, core utilities, API layer, internal), inter-cluster dependencies, global entry points, and critical hubs. No LLM required. | Yes |
-| `get_signatures` | Compact function/class signatures per file. Filter by path substring with `filePattern`. Useful for understanding a module's public API without reading full source. | Yes |
 
 **Stack inventory**
 
@@ -1150,14 +1173,12 @@ All tools run on **pure static analysis** -- no LLM quota consumed.
 
 | Tool | Description | Requires prior analysis |
 |------|-------------|:---:|
-| `get_call_graph` | Hub functions (high fan-in), entry points (no internal callers), and architectural layer violations. Supports TypeScript, JavaScript, Python, Go, Rust, Ruby, Java, C++. | Yes |
 | `get_refactor_report` | Prioritized list of functions with structural issues: unreachable code, hub overload (high fan-in), god functions (high fan-out), SRP violations, cyclic dependencies. | Yes |
 | `get_critical_hubs` | Highest-impact hub functions ranked by criticality. Each hub gets a stability score (0-100) and a recommended approach: extract, split, facade, or delegate. | Yes |
 | `get_god_functions` | Detect god functions (high fan-out, likely orchestrators) in the project or in a specific file, and return their call-graph neighborhood. Use this to identify which functions need to be refactored and understand what logical blocks to extract. | Yes |
 | `analyze_impact` | Deep impact analysis for a specific function: fan-in/fan-out, upstream call chain, downstream critical path, risk score (0-100), blast radius, and recommended strategy. | Yes |
 | `get_low_risk_refactor_candidates` | Safest functions to refactor first: low fan-in, low fan-out, not a hub, no cyclic involvement. Best starting point for incremental, low-risk sessions. | Yes |
 | `get_leaf_functions` | Functions that make no internal calls (leaves of the call graph). Zero downstream blast radius. Sorted by fan-in by default -- most-called leaves have the best unit-test ROI. | Yes |
-| `get_duplicate_report` | Detect duplicate code: Type 1 (exact clones), Type 2 (structural -- renamed variables), Type 3 (near-clones with Jaccard similarity >= 0.7). Groups sorted by impact. | Yes |
 
 **Specs**
 
@@ -1377,6 +1398,42 @@ storyFilePath  string   Path to the story file (relative to project root or abso
 description    string   Natural-language summary of the story for structural analysis
 ```
 
+**`record_decision`**
+```
+directory             string    Absolute path to the project directory
+title                 string    Short decision title (e.g. "Use Redis for session cache")
+rationale             string    Why this approach was chosen
+consequences          string    Trade-offs and impacts of this decision
+affectedFiles         string[]  Source files involved (relative paths)
+proposedRequirement   string    Optional: "The system SHALL …" requirement to add to specs
+supersedes            string    Optional: ID of a prior decision this replaces
+```
+
+**`list_decisions`**
+```
+directory  string   Absolute path to the project directory
+status     string   Optional filter: draft | consolidated | verified | approved | synced | phantom
+```
+
+**`approve_decision`**
+```
+directory  string    Absolute path to the project directory
+ids        string[]  Decision IDs to approve
+```
+
+**`reject_decision`**
+```
+directory  string   Absolute path to the project directory
+id         string   Decision ID to reject
+reason     string   Reason for rejection
+```
+
+**`sync_decisions`**
+```
+directory  string    Absolute path to the project directory
+dryRun     boolean   Preview changes without writing files (default: false)
+```
+
 ### Typical workflow
 
 **Scenario A -- Initial exploration**
@@ -1424,6 +1481,20 @@ description    string   Natural-language summary of the story for structural ana
    # orphan requirements. 0 LLM calls, ~200ms.
 2. If staleDomains includes your target: spec-gen generate --domains $DOMAIN
 3. If hubGaps includes a function you'll touch: flag it in your risk check
+```
+
+**Scenario F -- Decisions workflow**
+```
+1. record_decision({ directory, title, rationale, consequences, affectedFiles })
+   # Call this before writing code — captures the design choice
+2. [implement the feature / refactor]
+3. git commit  # decisions hook consolidates drafts, cross-checks against diff,
+               # blocks commit if unreviewed decisions remain
+4. list_decisions({ directory, status: "verified" })
+   # Review the consolidated + verified decisions
+5. approve_decision({ directory, ids: ["<id>"] })
+6. sync_decisions({ directory, dryRun: true })   # preview
+7. sync_decisions({ directory })                  # write to specs and ADRs
 ```
 
 ---
