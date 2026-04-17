@@ -15,8 +15,7 @@ import { logger } from '../../utils/logger.js';
 import { fileExists, parseList, resolveLLMProvider } from '../../utils/command-helpers.js';
 import { readSpecGenConfig } from '../../core/services/config-manager.js';
 import { createLLMService } from '../../core/services/llm-service.js';
-import { isGitRepository, getChangedFiles, getFileDiff, resolveBaseRef } from '../../core/drift/index.js';
-import { buildSpecMap } from '../../core/drift/index.js';
+import { isGitRepository, getChangedFiles, getFileDiff, resolveBaseRef, buildSpecMap } from '../../core/drift/index.js';
 import {
   loadDecisionStore,
   saveDecisionStore,
@@ -27,6 +26,7 @@ import {
   newSessionId,
 } from '../../core/decisions/store.js';
 import { consolidateDrafts } from '../../core/decisions/consolidator.js';
+import { extractFromDiff } from '../../core/decisions/extractor.js';
 import { verifyDecisions } from '../../core/decisions/verifier.js';
 import { syncApprovedDecisions } from '../../core/decisions/syncer.js';
 import {
@@ -38,7 +38,7 @@ import {
   DECISIONS_DIFF_MAX_CHARS,
   SPEC_GEN_CONFIG_REL_PATH,
 } from '../../constants.js';
-import type { PendingDecision } from '../../types/index.js';
+import type { PendingDecision, DecisionStore } from '../../types/index.js';
 
 // ============================================================================
 // AGENT INSTRUCTION FILES
@@ -347,11 +347,7 @@ Examples:
       }
 
       const drafts = getDecisionsByStatus(store, 'draft');
-      if (drafts.length === 0) {
-        if (options.gate) process.exitCode = 0;
-        else logger.info('No draft decisions to consolidate.');
-        return;
-      }
+      const hasDrafts = drafts.length > 0;
 
       const resolved = resolveLLMProvider(specGenConfig);
       if (!resolved) {
@@ -371,10 +367,17 @@ Examples:
         logDir: join(rootPath, SPEC_GEN_DIR, SPEC_GEN_LOGS_SUBDIR),
       });
 
-      if (!options.json) logger.discovery(`Consolidating ${drafts.length} draft decision(s) via ${resolved.provider}...`);
-
-      // Step 1 — Consolidate
-      const consolidated = await consolidateDrafts(store, llm);
+      // Step 1 — Consolidate drafts OR extract from diff as fallback
+      let consolidated: PendingDecision[];
+      if (hasDrafts) {
+        if (!options.json) logger.discovery(`Consolidating ${drafts.length} draft decision(s) via ${resolved.provider}...`);
+        consolidated = await consolidateDrafts(store, llm);
+      } else {
+        if (!options.json) logger.discovery(`No drafts found — extracting decisions from diff via ${resolved.provider}...`);
+        const openspecPath = join(rootPath, specGenConfig.openspecPath ?? OPENSPEC_DIR);
+        const specMap = await buildSpecMap({ rootPath, openspecPath });
+        consolidated = await extractFromDiff({ rootPath, specMap, sessionId: store.sessionId, llm });
+      }
       if (consolidated.length === 0) {
         if (!options.json) logger.info('No architectural decisions found in drafts.');
         if (options.gate) process.exitCode = 0;

@@ -11,6 +11,8 @@
 
 export { loadDecisionStore, saveDecisionStore, upsertDecisions, patchDecision, getDecisionsByStatus, makeDecisionId, newSessionId, decisionsDir } from './store.js';
 export { consolidateDrafts } from './consolidator.js';
+export { extractFromDiff } from './extractor.js';
+export type { ExtractFromDiffOptions } from './extractor.js';
 export { verifyDecisions } from './verifier.js';
 export type { VerificationResult } from './verifier.js';
 export { syncApprovedDecisions } from './syncer.js';
