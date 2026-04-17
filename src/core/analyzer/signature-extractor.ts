@@ -552,6 +552,106 @@ function extractSwift(content: string): ExtractedSignature[] {
 }
 
 // ============================================================================
+// JAVA EXTRACTOR
+// ============================================================================
+
+/** Java modifier keywords that can precede a type or method declaration. */
+const JAVA_MODIFIER_PREFIX =
+  '(?:public\\s+|private\\s+|protected\\s+|static\\s+|final\\s+|abstract\\s+|synchronized\\s+|default\\s+|native\\s+|sealed\\s+|non-sealed\\s+)*';
+
+/** Keywords that look like method names but are not. */
+const JAVA_SKIP_NAMES = new Set([
+  'if', 'for', 'while', 'switch', 'return', 'do', 'else', 'try', 'catch', 'finally',
+  'new', 'throw', 'class', 'interface', 'enum', 'record',
+]);
+
+function extractJava(content: string): ExtractedSignature[] {
+  const entries: ExtractedSignature[] = [];
+  const lines = content.split('\n');
+
+  for (let i = 0; i < lines.length && entries.length < MAX_SIGS_PER_FILE; i++) {
+    const line = lines[i];
+    const trimmed = line.trimStart();
+
+    // Skip lines that are clearly not declarations
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue;
+    if (trimmed.startsWith('@')) continue; // annotations
+
+    // Collect Javadoc comment above the declaration (walk back through
+    // annotations and blank lines to find the closing `*/`).
+    const docstring = extractJavadoc(lines, i);
+
+    // class / interface / enum / record / @interface
+    const typeMatch = trimmed.match(
+      new RegExp('^' + JAVA_MODIFIER_PREFIX + '(class|interface|enum|record|@interface)\\s+(\\w+)')
+    );
+    if (typeMatch) {
+      const keyword = typeMatch[1];
+      const name = typeMatch[2];
+      const kind: ExtractedSignature['kind'] =
+        keyword === 'interface' || keyword === '@interface' ? 'interface' : 'class';
+      const sig = trimmed.replace(/\s*\{.*$/, '').slice(0, 120);
+      entries.push({ kind, name, signature: sig, docstring });
+      continue;
+    }
+
+    // Method: `[modifiers] [<generics>] ReturnType name(params)` — return type
+    // may include generics, arrays, and dotted package-qualified names.
+    const methodMatch = trimmed.match(
+      new RegExp(
+        '^' + JAVA_MODIFIER_PREFIX + '(?:<[^>]+>\\s+)?([\\w<>\\[\\], ?.]+?)\\s+(\\w+)\\s*\\(([^)]*)\\)'
+      )
+    );
+    if (methodMatch) {
+      const returnType = methodMatch[1].trim();
+      const name = methodMatch[2];
+      if (JAVA_SKIP_NAMES.has(name)) continue;
+      // Skip obvious field declarations like `private final Foo bar = ...` —
+      // fields don't have `(` so the regex wouldn't match. This path is
+      // method-only by construction.
+      const params = compactParams(methodMatch[3]);
+      const isMethod = line.startsWith('  ') || line.startsWith('\t');
+      const sig = `${returnType} ${name}(${params})`;
+      entries.push({
+        kind: isMethod ? 'method' : 'function',
+        name,
+        signature: (isMethod ? '  ' : '') + sig,
+        docstring,
+      });
+      continue;
+    }
+  }
+
+  return entries;
+}
+
+/**
+ * Walk backwards from declLineIdx, skipping annotations and blank lines, to
+ * find a preceding Javadoc block (`/** … *\/`). Returns the first meaningful
+ * line of the block, or undefined.
+ */
+function extractJavadoc(lines: string[], declLineIdx: number): string | undefined {
+  let endIdx = declLineIdx - 1;
+  // Skip annotation lines and blanks
+  while (endIdx >= 0) {
+    const t = lines[endIdx].trim();
+    if (t === '' || t.startsWith('@')) { endIdx--; continue; }
+    break;
+  }
+  if (endIdx < 0 || !lines[endIdx].trim().endsWith('*/')) return undefined;
+
+  let startIdx = endIdx;
+  while (startIdx >= 0 && !lines[startIdx].trim().startsWith('/**')) startIdx--;
+  if (startIdx < 0) return undefined;
+
+  for (let j = startIdx + 1; j <= endIdx; j++) {
+    const t = lines[j].replace(/^\s*\*\s?/, '').trim();
+    if (t && !t.startsWith('@') && !t.startsWith('/')) return t;
+  }
+  return undefined;
+}
+
+// ============================================================================
 // GENERIC FALLBACK EXTRACTOR
 // ============================================================================
 
@@ -601,6 +701,9 @@ export function extractSignatures(filePath: string, content: string): FileSignat
       break;
     case 'Swift':
       entries = extractSwift(content);
+      break;
+    case 'Java':
+      entries = extractJava(content);
       break;
     default:
       entries = extractGeneric(content);

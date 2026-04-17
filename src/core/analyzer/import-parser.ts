@@ -3,7 +3,7 @@
  *
  * Parses source files to extract imports and exports.
  * Uses regex-based parsing for speed and simplicity.
- * Supports JavaScript/TypeScript and Python.
+ * Supports JavaScript/TypeScript, Python, and Java.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -52,6 +52,8 @@ export interface FileAnalysis {
   localImports: string[];
   externalImports: string[];
   parseErrors: string[];
+  /** Java package declaration (e.g. "com.example.service"), if this is a .java file */
+  javaPackage?: string;
 }
 
 /**
@@ -64,6 +66,8 @@ export interface ResolveOptions {
   pathAliases?: Record<string, string[]>;
   /** File extensions to try when resolving */
   extensions?: string[];
+  /** Java package declaration of the source file (used to locate source root) */
+  sourcePackage?: string;
 }
 
 // ============================================================================
@@ -651,6 +655,164 @@ function parsePythonExports(content: string): ExportInfo[] {
 }
 
 // ============================================================================
+// JAVA PARSER
+// ============================================================================
+
+/** Package prefixes considered JDK/standard-library imports (not project code) */
+const JAVA_BUILTIN_PREFIXES = [
+  'java.',
+  'javax.',
+  'jakarta.',
+  'sun.',
+  'com.sun.',
+  'jdk.',
+  'org.w3c.',
+  'org.xml.',
+];
+
+function isJavaBuiltin(source: string): boolean {
+  return JAVA_BUILTIN_PREFIXES.some(p => source.startsWith(p));
+}
+
+/**
+ * Extract the package declaration from Java source content.
+ * Returns undefined for files without a package declaration (default package).
+ */
+export function parseJavaPackage(content: string): string | undefined {
+  // Strip block comments so we don't match inside them.
+  const clean = content.replace(/\/\*[\s\S]*?\*\//g, '');
+  const match = clean.match(/^\s*package\s+([\w.]+)\s*;/m);
+  return match ? match[1] : undefined;
+}
+
+/**
+ * Parse imports from Java source content.
+ *
+ * Handles:
+ *   import com.foo.Bar;
+ *   import com.foo.*;                 (wildcard — hasNamespace=true)
+ *   import static com.foo.Bar.baz;    (static member import — class is com.foo.Bar)
+ *   import static com.foo.Bar.*;      (static wildcard — class is com.foo.Bar)
+ */
+function parseJavaImports(content: string): ImportInfo[] {
+  const imports: ImportInfo[] = [];
+
+  // Strip comments to avoid false matches
+  const clean = content
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '');
+
+  const importRegex = /^\s*import\s+(static\s+)?([\w.]+(?:\.\*)?)\s*;/gm;
+  let match: RegExpExecArray | null;
+  while ((match = importRegex.exec(clean)) !== null) {
+    const isStatic = !!match[1];
+    let source = match[2];
+    const isWildcard = source.endsWith('.*');
+
+    // For `import static com.foo.Bar.baz;` the member `baz` is not a class —
+    // the class we want to link to is `com.foo.Bar`. Strip the trailing
+    // lowercase identifier (Java convention: classes start uppercase).
+    if (isStatic && !isWildcard) {
+      const lastDot = source.lastIndexOf('.');
+      if (lastDot > 0) {
+        const last = source.slice(lastDot + 1);
+        if (/^[a-z_$]/.test(last)) {
+          source = source.slice(0, lastDot);
+        }
+      }
+    }
+
+    // For `import static com.foo.Bar.*;` strip the `.*` — we still want to
+    // resolve `com.foo.Bar` (the class), not `com.foo` (the package).
+    if (isStatic && isWildcard) {
+      source = source.slice(0, -2);
+    }
+
+    const cleanSource = isWildcard && !isStatic ? source.slice(0, -2) : source;
+    const isBuiltin = isJavaBuiltin(cleanSource);
+    const displayName = isWildcard && !isStatic
+      ? '*'
+      : cleanSource.slice(cleanSource.lastIndexOf('.') + 1);
+
+    imports.push({
+      source,
+      isRelative: false,
+      isPackage: !isBuiltin,
+      isBuiltin,
+      importedNames: [displayName],
+      hasDefault: false,
+      hasNamespace: isWildcard && !isStatic,
+      isTypeOnly: false,
+      isDynamic: false,
+      line: getLineNumber(content, match.index),
+    });
+  }
+
+  return imports;
+}
+
+/**
+ * Parse exports from Java source content.
+ *
+ * "Exports" in Java are public top-level types: classes, interfaces,
+ * enums, records, and annotations. Also includes public static methods
+ * and public fields on those types since downstream mapping uses
+ * function-level exports to connect requirements to code.
+ */
+function parseJavaExports(content: string): ExportInfo[] {
+  const exports: ExportInfo[] = [];
+
+  const clean = content
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '');
+
+  let match: RegExpExecArray | null;
+
+  // public class|interface|enum|record|@interface Name
+  const typeRegex =
+    /\bpublic\s+(?:static\s+|final\s+|abstract\s+|sealed\s+|non-sealed\s+)*(class|interface|enum|record|@interface)\s+(\w+)/g;
+  while ((match = typeRegex.exec(clean)) !== null) {
+    const keyword = match[1];
+    const name = match[2];
+    const kind: ExportInfo['kind'] =
+      keyword === 'interface' || keyword === '@interface' ? 'interface'
+      : keyword === 'enum' ? 'enum'
+      : 'class';
+    exports.push({
+      name,
+      isDefault: false,
+      isType: false,
+      isReExport: false,
+      kind,
+      line: getLineNumber(content, match.index),
+    });
+  }
+
+  // Public methods: `public [static] [final] ReturnType name(`
+  // We keep this conservative: only methods with an explicit `public` modifier.
+  // The return-type capture is non-greedy and excludes keywords that start
+  // type declarations (class/interface/enum/record) to avoid false matches.
+  const methodRegex =
+    /\bpublic\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?!class\b|interface\b|enum\b|record\b|@interface\b)(?:<[^>]+>\s+)?[\w<>[\], ?.]+?\s+(\w+)\s*\(/g;
+  while ((match = methodRegex.exec(clean)) !== null) {
+    const name = match[1];
+    // Filter obvious non-methods (the regex can match some constructors or
+    // edge cases; keep common false-positives out).
+    if (['class', 'interface', 'enum', 'record', 'new', 'return', 'if', 'for', 'while'].includes(name)) continue;
+    exports.push({
+      name,
+      isDefault: false,
+      isType: false,
+      isReExport: false,
+      kind: 'function',
+      line: getLineNumber(content, match.index),
+    });
+  }
+
+  return exports;
+}
+
+// ============================================================================
 // IMPORT RESOLUTION
 // ============================================================================
 
@@ -664,6 +826,13 @@ export async function resolveImport(
 ): Promise<string | null> {
   const fromExt = extname(fromFile).toLowerCase();
   const isPython = fromExt === '.py' || fromExt === '.pyw';
+  const isJava = fromExt === '.java';
+
+  // Java imports are always absolute class FQNs (com.foo.Bar), never relative.
+  // Resolve them against the computed source root (dir minus packagePath).
+  if (isJava) {
+    return resolveJavaImport(importSource, fromFile, options);
+  }
 
   // For non-Python files, external packages can never resolve to a local file.
   // For Python files we must NOT bail out here: `from services.retriever import X`
@@ -748,6 +917,79 @@ export async function resolveImport(
   return null;
 }
 
+/**
+ * Resolve a Java import (fully-qualified class name) to an absolute file path.
+ *
+ * Java imports are always absolute: `import com.example.foo.Bar;`
+ * To find `com/example/foo/Bar.java`, we compute the "source root" by
+ * stripping the file's package path from its directory. E.g. for
+ *   /repo/src/main/java/com/example/service/UserService.java
+ *   package com.example.service;
+ * the source root is /repo/src/main/java.
+ *
+ * If the package declaration is missing or doesn't match the directory
+ * structure, fall back to walking the file's ancestors looking for a
+ * conventional source root (src/main/java, src/test/java, src, app).
+ */
+async function resolveJavaImport(
+  importSource: string,
+  fromFile: string,
+  options: ResolveOptions
+): Promise<string | null> {
+  if (isJavaBuiltin(importSource)) return null;
+  // Wildcard non-static import (`import com.foo.*;`) cannot be resolved to a
+  // specific file.
+  if (importSource.endsWith('.*')) return null;
+
+  const fromDir = dirname(fromFile);
+  const candidateRoots: string[] = [];
+
+  // Primary strategy: strip the package path from fromDir.
+  if (options.sourcePackage) {
+    const pkgPath = options.sourcePackage.replace(/\./g, '/');
+    // Normalize separators for comparison (Windows may have backslashes).
+    const normalizedDir = fromDir.replace(/\\/g, '/');
+    if (normalizedDir.endsWith('/' + pkgPath)) {
+      candidateRoots.push(fromDir.slice(0, fromDir.length - pkgPath.length - 1));
+    } else if (normalizedDir === pkgPath || normalizedDir.endsWith(pkgPath)) {
+      candidateRoots.push(fromDir.slice(0, fromDir.length - pkgPath.length));
+    }
+  }
+
+  // Fallback: walk up the directory tree looking for conventional Java source
+  // roots. Covers default-package files and inconsistent package declarations.
+  const conventional = ['src/main/java', 'src/test/java', 'src/main/kotlin', 'src/test/kotlin', 'src', 'app'];
+  for (const marker of conventional) {
+    const normalizedFrom = fromFile.replace(/\\/g, '/');
+    const idx = normalizedFrom.lastIndexOf('/' + marker + '/');
+    if (idx >= 0) {
+      candidateRoots.push(fromFile.slice(0, idx + 1 + marker.length));
+    }
+  }
+
+  // Last resort: baseDir (project root).
+  if (options.baseDir) {
+    candidateRoots.push(options.baseDir);
+  }
+
+  // Deduplicate while preserving order.
+  const seen = new Set<string>();
+  const relPath = importSource.replace(/\./g, '/') + '.java';
+  for (const root of candidateRoots) {
+    if (!root || seen.has(root)) continue;
+    seen.add(root);
+    const candidate = join(root, relPath);
+    try {
+      await readFile(candidate);
+      return candidate;
+    } catch {
+      // try next root
+    }
+  }
+
+  return null;
+}
+
 // ============================================================================
 // MAIN PARSER CLASS
 // ============================================================================
@@ -768,12 +1010,13 @@ export class ImportExportParser {
   /**
    * Get file extension type
    */
-  private getFileType(filePath: string): 'js' | 'ts' | 'python' | 'unknown' {
+  private getFileType(filePath: string): 'js' | 'ts' | 'python' | 'java' | 'unknown' {
     const ext = extname(filePath).toLowerCase();
 
     if (['.ts', '.tsx', '.mts', '.cts'].includes(ext)) return 'ts';
     if (['.js', '.jsx', '.mjs', '.cjs'].includes(ext)) return 'js';
     if (['.py', '.pyw'].includes(ext)) return 'python';
+    if (ext === '.java') return 'java';
 
     return 'unknown';
   }
@@ -807,6 +1050,10 @@ export class ImportExportParser {
       } else if (fileType === 'python') {
         analysis.imports = parsePythonImports(content);
         analysis.exports = parsePythonExports(content);
+      } else if (fileType === 'java') {
+        analysis.imports = parseJavaImports(content);
+        analysis.exports = parseJavaExports(content);
+        analysis.javaPackage = parseJavaPackage(content);
       } else {
         analysis.parseErrors.push(`Unsupported file type: ${extname(filePath)}`);
       }

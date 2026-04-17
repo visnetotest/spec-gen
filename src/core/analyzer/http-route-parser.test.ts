@@ -22,6 +22,7 @@ import {
   normalizeUrl,
   extractHttpCalls,
   extractRouteDefinitions,
+  extractJavaRouteDefinitions,
   buildHttpEdges,
   extractAllHttpEdges,
   type HttpCall,
@@ -932,5 +933,219 @@ async def list_users():
     expect(result.calls).toHaveLength(0);
     expect(result.routes).toHaveLength(0);
     expect(result.edges).toHaveLength(0);
+  });
+});
+
+// ============================================================================
+// extractJavaRouteDefinitions — Spring MVC / JAX-RS
+// ============================================================================
+
+describe('extractJavaRouteDefinitions — Spring', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir();
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('should extract @GetMapping with class-level @RequestMapping prefix', async () => {
+    const file = await createFile(tempDir, 'UserController.java', `
+package com.example.web;
+
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+
+    @GetMapping("/{id}")
+    public User getUser(@PathVariable Long id) {
+        return null;
+    }
+}
+`);
+
+    const routes = await extractJavaRouteDefinitions(file);
+    expect(routes).toHaveLength(1);
+    expect(routes[0]).toMatchObject({
+      method: 'GET',
+      path: '/api/users/{id}',
+      framework: 'spring',
+      handlerName: 'getUser',
+    });
+  });
+
+  it('should extract multiple HTTP methods in one controller', async () => {
+    const file = await createFile(tempDir, 'UserController.java', `
+package com.example.web;
+
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+
+    @GetMapping
+    public List<User> listUsers() { return null; }
+
+    @PostMapping
+    public User createUser(@RequestBody User user) { return null; }
+
+    @PutMapping("/{id}")
+    public User updateUser(@PathVariable Long id, @RequestBody User u) { return null; }
+
+    @DeleteMapping("/{id}")
+    public void deleteUser(@PathVariable Long id) {}
+
+    @PatchMapping("/{id}")
+    public User patchUser(@PathVariable Long id) { return null; }
+}
+`);
+
+    const routes = await extractJavaRouteDefinitions(file);
+    const byMethod = Object.fromEntries(routes.map(r => [r.method, r.path]));
+    expect(byMethod.GET).toBe('/api/users');
+    expect(byMethod.POST).toBe('/api/users');
+    expect(byMethod.PUT).toBe('/api/users/{id}');
+    expect(byMethod.DELETE).toBe('/api/users/{id}');
+    expect(byMethod.PATCH).toBe('/api/users/{id}');
+  });
+
+  it('should extract @RequestMapping with method= on a method', async () => {
+    const file = await createFile(tempDir, 'SearchController.java', `
+package com.example.web;
+
+@RestController
+public class SearchController {
+
+    @RequestMapping(value = "/search", method = RequestMethod.GET)
+    public List<Result> search() { return null; }
+}
+`);
+
+    const routes = await extractJavaRouteDefinitions(file);
+    expect(routes).toHaveLength(1);
+    expect(routes[0]).toMatchObject({
+      method: 'GET',
+      path: '/search',
+      framework: 'spring',
+      handlerName: 'search',
+    });
+  });
+
+  it('should handle named path arg (path = "/foo")', async () => {
+    const file = await createFile(tempDir, 'X.java', `
+@RestController
+public class X {
+  @GetMapping(path = "/foo")
+  public String foo() { return ""; }
+}
+`);
+
+    const routes = await extractJavaRouteDefinitions(file);
+    expect(routes).toHaveLength(1);
+    expect(routes[0].path).toBe('/foo');
+  });
+
+  it('should not treat class-level @RequestMapping as a route', async () => {
+    const file = await createFile(tempDir, 'UserController.java', `
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    @GetMapping
+    public List<User> list() { return null; }
+}
+`);
+
+    const routes = await extractJavaRouteDefinitions(file);
+    // Only @GetMapping should produce a route — the class-level @RequestMapping
+    // is a prefix, not a route.
+    expect(routes).toHaveLength(1);
+    expect(routes[0].method).toBe('GET');
+  });
+
+  it('should ignore non-Java files', async () => {
+    const file = await createFile(tempDir, 'App.py', '@app.get("/foo")');
+    expect(await extractJavaRouteDefinitions(file)).toEqual([]);
+  });
+});
+
+describe('extractJavaRouteDefinitions — JAX-RS', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir();
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('should extract @GET / @POST on @Path-annotated class', async () => {
+    const file = await createFile(tempDir, 'UserResource.java', `
+package com.example;
+
+import jakarta.ws.rs.*;
+
+@Path("/users")
+public class UserResource {
+
+    @GET
+    public List<User> list() { return null; }
+
+    @POST
+    public User create(User user) { return null; }
+
+    @GET
+    @Path("/{id}")
+    public User get(@PathParam("id") Long id) { return null; }
+}
+`);
+
+    const routes = await extractJavaRouteDefinitions(file);
+    expect(routes.every(r => r.framework === 'jaxrs')).toBe(true);
+    const paths = routes.map(r => [r.method, r.path].join(' '));
+    expect(paths).toContain('GET /users');
+    expect(paths).toContain('POST /users');
+    expect(paths).toContain('GET /users/{id}');
+  });
+});
+
+describe('extractAllHttpEdges with Java', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir();
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('should produce edges between JS caller and Spring handler', async () => {
+    const frontend = await createFile(tempDir, 'client.ts', `
+      axios.get('/api/users/42');
+      axios.post('/api/users', { name: 'alice' });
+    `);
+    const backend = await createFile(tempDir, 'UserController.java', `
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+  @GetMapping("/{id}")
+  public User getUser(@PathVariable Long id) { return null; }
+
+  @PostMapping
+  public User createUser(@RequestBody User u) { return null; }
+}
+`);
+
+    const result = await extractAllHttpEdges([frontend, backend]);
+
+    expect(result.routes.length).toBeGreaterThanOrEqual(2);
+    expect(result.edges.length).toBeGreaterThanOrEqual(2);
+    const edgeMethods = result.edges.map(e => e.method).sort();
+    expect(edgeMethods).toContain('GET');
+    expect(edgeMethods).toContain('POST');
   });
 });

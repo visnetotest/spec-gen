@@ -279,12 +279,16 @@ export class DependencyGraphBuilder {
     const filePaths = Array.from(fileSet);
 
     // Skip HTTP edge detection entirely when there cannot be any cross-language
-    // edges: we need at least one JS/TS caller file AND one Python handler file.
+    // edges: we need at least one caller file AND at least one handler file.
+    // Callers are JS/TS. Handlers can be Python, Java, or TS/JS (server-side).
     const jsExts = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs']);
     const pyExts = new Set(['.py', '.pyw']);
     const hasJs = filePaths.some(fp => jsExts.has(fp.slice(fp.lastIndexOf('.')).toLowerCase()));
-    const hasPy = filePaths.some(fp => pyExts.has(fp.slice(fp.lastIndexOf('.')).toLowerCase()));
-    if (!hasJs || !hasPy) return;
+    const hasHandler = filePaths.some(fp => {
+      const ext = fp.slice(fp.lastIndexOf('.')).toLowerCase();
+      return pyExts.has(ext) || ext === '.java';
+    });
+    if (!hasJs || !hasHandler) return;
 
     const { edges: httpEdges } = await extractAllHttpEdges(filePaths);
 
@@ -329,20 +333,24 @@ export class DependencyGraphBuilder {
       if (!analysis) continue;
 
       const isPythonFile = file.absolutePath.endsWith('.py') || file.absolutePath.endsWith('.pyw');
+      const isJavaFile = file.absolutePath.endsWith('.java');
 
       for (const imp of analysis.imports) {
         // Skip non-relative imports for JS/TS (those are always npm packages).
         // For Python files we must NOT skip: `from services.retriever import X`
         // is flagged isRelative=false but may resolve to a local module.
-        if (!imp.isRelative && !isPythonFile) continue;
-        // Even for Python, skip known builtins and third-party packages that
-        // will never resolve to a file inside the project.
-        if (!imp.isRelative && isPythonFile && imp.isBuiltin) continue;
+        // For Java files we also must NOT skip: imports are always absolute
+        // class FQNs and we try to resolve them against the project source root.
+        if (!imp.isRelative && !isPythonFile && !isJavaFile) continue;
+        // Skip known builtins and third-party packages that can't resolve to
+        // a file inside the project (Python stdlib, JDK, Spring, etc.).
+        if (!imp.isRelative && imp.isBuiltin) continue;
 
         // Resolve the import to an absolute path
         const resolvedPath = await resolveImport(imp.source, file.absolutePath, {
           baseDir: this.options.rootDir,
           extensions: this.options.extensions.length > 0 ? this.options.extensions : undefined,
+          sourcePackage: isJavaFile ? analysis.javaPackage : undefined,
         });
 
         // Skip if not resolved or not in our file set

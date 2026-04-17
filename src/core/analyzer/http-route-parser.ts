@@ -422,6 +422,243 @@ export async function extractRouteDefinitions(filePath: string): Promise<RouteDe
 }
 
 // ============================================================================
+// ROUTE DEFINITION EXTRACTION  (Java — Spring MVC / JAX-RS)
+// ============================================================================
+
+const SPRING_METHOD_ANNOTATIONS: Array<[string, string]> = [
+  ['GetMapping', 'GET'],
+  ['PostMapping', 'POST'],
+  ['PutMapping', 'PUT'],
+  ['DeleteMapping', 'DELETE'],
+  ['PatchMapping', 'PATCH'],
+];
+
+const JAXRS_METHOD_ANNOTATIONS: Array<[string, string]> = [
+  ['GET', 'GET'],
+  ['POST', 'POST'],
+  ['PUT', 'PUT'],
+  ['DELETE', 'DELETE'],
+  ['PATCH', 'PATCH'],
+  ['HEAD', 'HEAD'],
+  ['OPTIONS', 'OPTIONS'],
+];
+
+/**
+ * Extract a path string from a Spring annotation argument blob.
+ *   ("/foo")           → /foo
+ *   (value = "/foo")   → /foo
+ *   (path  = "/foo")   → /foo
+ *   (value = {"/foo", "/bar"}) → /foo (first only)
+ *   ("/foo", method=…) → /foo
+ */
+function extractSpringPath(argsBlob: string): string | null {
+  // Positional string: first quoted literal at start, possibly preceded by `{`
+  const positional = argsBlob.match(/^\s*\{?\s*"([^"]*)"/);
+  if (positional) return positional[1];
+  const named = argsBlob.match(/(?:value|path)\s*=\s*\{?\s*"([^"]*)"/);
+  if (named) return named[1];
+  return null;
+}
+
+/**
+ * Extract HTTP method from a Spring @RequestMapping argument blob.
+ *   (method = RequestMethod.GET)  → GET
+ *   (method = {RequestMethod.GET, RequestMethod.POST}) → [GET, POST]
+ */
+function extractSpringMethods(argsBlob: string): string[] {
+  const match = argsBlob.match(/method\s*=\s*\{?([^}]+)\}?/);
+  if (!match) return [];
+  const methods: string[] = [];
+  const methodRegex = /(?:RequestMethod\.)?([A-Z]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = methodRegex.exec(match[1])) !== null) {
+    methods.push(m[1].toUpperCase());
+  }
+  return methods;
+}
+
+function combineSpringPaths(prefix: string, path: string): string {
+  const normalizedPrefix = prefix.replace(/\/+$/, '');
+  const normalizedPath = path ? '/' + path.replace(/^\/+/, '') : '';
+  const combined = normalizedPrefix + normalizedPath;
+  return combined || '/';
+}
+
+/**
+ * Scan forward from an annotation line to find the handler method name.
+ * Java method signatures: `public ReturnType methodName(args) ...`
+ */
+function extractNextJavaMethodName(lines: string[], annotationLine: number): string {
+  const start = annotationLine - 1;
+  const maxLook = Math.min(lines.length, start + 20);
+  const skipNames = new Set(['if', 'for', 'while', 'switch', 'return', 'class', 'interface', 'enum', 'record', 'new']);
+  for (let i = start; i < maxLook; i++) {
+    const l = lines[i] ?? '';
+    // Skip further annotation lines
+    if (l.trim().startsWith('@')) continue;
+    // Match `[modifiers] ReturnType methodName(` — return type can include
+    // generics, arrays, and dotted names.
+    const match = l.match(
+      /\b(?:public|private|protected)\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?:<[^>]+>\s+)?[\w<>[\], ?.]+?\s+(\w+)\s*\(/
+    );
+    if (match && !skipNames.has(match[1])) return match[1];
+  }
+  return 'unknown';
+}
+
+/**
+ * Extract all HTTP route definitions from a Java source file.
+ * Supports Spring MVC (@RestController / @Controller + @RequestMapping and the
+ * shorthand @GetMapping / @PostMapping / …) and JAX-RS (@Path + @GET / @POST).
+ */
+export async function extractJavaRouteDefinitions(filePath: string): Promise<RouteDefinition[]> {
+  const ext = extname(filePath).toLowerCase();
+  if (ext !== '.java') return [];
+
+  let content: string;
+  try {
+    content = await readFile(filePath, 'utf8');
+  } catch {
+    return [];
+  }
+
+  const routes: RouteDefinition[] = [];
+  const lines = content.split('\n');
+
+  // Strip comments but preserve offsets so line numbers stay accurate.
+  const clean = content
+    .replace(/\/\*[\s\S]*?\*\//g, m => ' '.repeat(m.length))
+    .replace(/\/\/.*$/gm, m => ' '.repeat(m.length));
+
+  // ── Detect framework and compute class-level path prefix ───────────────────
+  // Spring: class-level @RequestMapping(...)  |  JAX-RS: class-level @Path(...)
+  let springPrefix = '';
+  let jaxrsPrefix = '';
+
+  // Find the first class declaration and look at annotations preceding it.
+  const classMatch = clean.match(/\bclass\s+\w+/);
+  if (classMatch && classMatch.index !== undefined) {
+    const preamble = clean.slice(0, classMatch.index);
+    const springClassMapping = preamble.match(/@RequestMapping\s*\(([^)]*)\)(?![^@]*@RequestMapping)/);
+    if (springClassMapping) {
+      const p = extractSpringPath(springClassMapping[1]);
+      if (p) springPrefix = '/' + p.replace(/^\//, '');
+    }
+    const jaxrsClassPath = preamble.match(/@Path\s*\(\s*"([^"]+)"\s*\)(?![^@]*@Path)/);
+    if (jaxrsClassPath) {
+      jaxrsPrefix = '/' + jaxrsClassPath[1].replace(/^\//, '');
+    }
+  }
+
+  const isSpring = /@(?:Rest)?Controller\b|@(?:Get|Post|Put|Delete|Patch)Mapping\b|@RequestMapping\b/.test(clean);
+  const isJaxrs = /@Path\b/.test(clean) && /@(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/.test(clean);
+
+  // ── Spring: shorthand mappings (@GetMapping, @PostMapping, …) ──────────────
+  if (isSpring) {
+    for (const [annotation, method] of SPRING_METHOD_ANNOTATIONS) {
+      const re = new RegExp(`@${annotation}\\s*(?:\\(([^)]*)\\))?`, 'g');
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(clean)) !== null) {
+        const argsBlob = m[1] ?? '';
+        const path = extractSpringPath(argsBlob) ?? '';
+        const fullPath = combineSpringPaths(springPrefix, path);
+        const lineNum = getLine(lines, m.index);
+        const handlerName = extractNextJavaMethodName(lines, lineNum);
+        routes.push({
+          file: filePath,
+          method,
+          path: fullPath,
+          normalizedPath: normalizeUrl(fullPath),
+          handlerName,
+          framework: 'spring',
+          line: lineNum,
+          contractSource: 'none' as const,
+        });
+      }
+    }
+
+    // @RequestMapping(method = RequestMethod.GET, value = "/foo") on a method.
+    // The class-level @RequestMapping is skipped because the class declaration
+    // immediately follows it — we detect that by checking whether the nearest
+    // forward token after the annotation is `class`.
+    const reqMappingRegex = /@RequestMapping\s*\(([^)]*)\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = reqMappingRegex.exec(clean)) !== null) {
+      const argsBlob = m[1];
+      const methods = extractSpringMethods(argsBlob);
+      if (methods.length === 0) continue; // no method= → class-level or unhandled
+
+      // Ensure this annotation is on a method, not on the class. Peek forward
+      // past any subsequent annotations and check that we don't hit `class`
+      // before a method-like signature.
+      const afterIdx = m.index + m[0].length;
+      const ahead = clean.slice(afterIdx, afterIdx + 400);
+      const nextClass = ahead.search(/\bclass\s+\w+/);
+      const nextMethod = ahead.search(
+        /\b(?:public|private|protected)\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?:<[^>]+>\s+)?[\w<>[\], ?.]+?\s+\w+\s*\(/
+      );
+      if (nextClass >= 0 && (nextMethod < 0 || nextClass < nextMethod)) continue;
+
+      const path = extractSpringPath(argsBlob) ?? '';
+      const fullPath = combineSpringPaths(springPrefix, path);
+      const lineNum = getLine(lines, m.index);
+      const handlerName = extractNextJavaMethodName(lines, lineNum);
+      for (const method of methods) {
+        routes.push({
+          file: filePath,
+          method,
+          path: fullPath,
+          normalizedPath: normalizeUrl(fullPath),
+          handlerName,
+          framework: 'spring',
+          line: lineNum,
+          contractSource: 'none' as const,
+        });
+      }
+    }
+  }
+
+  // ── JAX-RS: @GET / @POST / @Path on methods ────────────────────────────────
+  if (isJaxrs) {
+    // Regex for a Java method signature; used to bound the annotation block
+    // of the current method so we don't pick up a @Path from a later method.
+    const methodSigRegex = /\b(?:public|private|protected)\s+[^{;]+?\s+\w+\s*\(/;
+
+    for (const [annotation, method] of JAXRS_METHOD_ANNOTATIONS) {
+      // Bare annotation with no argument list; path comes from class @Path
+      // prefix combined with any @Path on the same method.
+      const re = new RegExp(`@${annotation}\\b\\s*(?!\\()`, 'g');
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(clean)) !== null) {
+        // Only look for a method-level @Path *within this method's annotation
+        // block* — i.e. between the @GET and the next method signature.
+        const afterIdx = m.index + m[0].length;
+        const ahead = clean.slice(afterIdx, afterIdx + 400);
+        const sigMatch = methodSigRegex.exec(ahead);
+        const window = sigMatch ? ahead.slice(0, sigMatch.index) : ahead;
+        const methodPathMatch = window.match(/@Path\s*\(\s*"([^"]+)"\s*\)/);
+        const methodPath = methodPathMatch ? '/' + methodPathMatch[1].replace(/^\//, '') : '';
+        const fullPath = combineSpringPaths(jaxrsPrefix, methodPath);
+        const lineNum = getLine(lines, m.index);
+        const handlerName = extractNextJavaMethodName(lines, lineNum);
+        routes.push({
+          file: filePath,
+          method,
+          path: fullPath,
+          normalizedPath: normalizeUrl(fullPath),
+          handlerName,
+          framework: 'jaxrs',
+          line: lineNum,
+          contractSource: 'none' as const,
+        });
+      }
+    }
+  }
+
+  return routes;
+}
+
+// ============================================================================
 // EDGE BUILDER
 // ============================================================================
 
@@ -542,6 +779,9 @@ export async function extractAllHttpEdges(filePaths: string[]): Promise<{
         allCalls.push(...calls);
       } else if (['.py', '.pyw'].includes(ext)) {
         const routes = await extractRouteDefinitions(fp);
+        allRoutes.push(...routes);
+      } else if (ext === '.java') {
+        const routes = await extractJavaRouteDefinitions(fp);
         allRoutes.push(...routes);
       }
     })
@@ -873,6 +1113,8 @@ export async function buildRouteInventory(
         allRoutes.push(...await extractRouteDefinitions(fp));
       } else if (['.ts', '.tsx', '.js', '.jsx', '.mjs'].includes(ext)) {
         allRoutes.push(...await extractTsRouteDefinitions(fp));
+      } else if (ext === '.java') {
+        allRoutes.push(...await extractJavaRouteDefinitions(fp));
       }
     })
   );

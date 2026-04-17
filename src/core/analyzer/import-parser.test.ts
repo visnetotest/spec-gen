@@ -1373,4 +1373,209 @@ export function test() {}
       expect(analysis.parseErrors).toHaveLength(0);
     });
   });
+
+  // ==========================================================================
+  // Java Tests
+  // ==========================================================================
+
+  describe('Java Imports', () => {
+    it('should parse simple class imports', async () => {
+      const content = `
+        package com.example.service;
+        import com.example.model.User;
+        import com.example.repo.UserRepository;
+      `;
+      const filePath = await createFile(tempDir, 'UserService.java', content);
+      const analysis = await parser.parseFile(filePath);
+
+      expect(analysis.imports).toHaveLength(2);
+      expect(analysis.imports[0].source).toBe('com.example.model.User');
+      expect(analysis.imports[0].isBuiltin).toBe(false);
+      expect(analysis.imports[0].isPackage).toBe(true);
+      expect(analysis.imports[0].importedNames).toEqual(['User']);
+    });
+
+    it('should classify JDK imports as builtin', async () => {
+      const content = `
+        package com.example;
+        import java.util.List;
+        import java.util.Map;
+        import javax.sql.DataSource;
+        import jakarta.servlet.http.HttpServletRequest;
+      `;
+      const filePath = await createFile(tempDir, 'App.java', content);
+      const analysis = await parser.parseFile(filePath);
+
+      expect(analysis.imports).toHaveLength(4);
+      expect(analysis.imports.every(i => i.isBuiltin)).toBe(true);
+    });
+
+    it('should handle wildcard imports', async () => {
+      const content = `
+        package com.example;
+        import com.example.model.*;
+      `;
+      const filePath = await createFile(tempDir, 'App.java', content);
+      const analysis = await parser.parseFile(filePath);
+
+      expect(analysis.imports).toHaveLength(1);
+      expect(analysis.imports[0].source).toBe('com.example.model.*');
+      expect(analysis.imports[0].hasNamespace).toBe(true);
+      expect(analysis.imports[0].importedNames).toEqual(['*']);
+    });
+
+    it('should handle static member imports by stripping the member', async () => {
+      const content = `
+        package com.example;
+        import static com.example.util.Constants.MAX_SIZE;
+        import static org.junit.jupiter.api.Assertions.assertEquals;
+      `;
+      const filePath = await createFile(tempDir, 'App.java', content);
+      const analysis = await parser.parseFile(filePath);
+
+      expect(analysis.imports).toHaveLength(2);
+      // `MAX_SIZE` is UPPER_CASE (not a class), so the member is NOT stripped
+      // — but `assertEquals` is lowercase, so the member IS stripped.
+      expect(analysis.imports[0].source).toBe('com.example.util.Constants.MAX_SIZE');
+      expect(analysis.imports[1].source).toBe('org.junit.jupiter.api.Assertions');
+    });
+
+    it('should extract package declaration', async () => {
+      const content = `
+        package com.example.service;
+        public class Foo {}
+      `;
+      const filePath = await createFile(tempDir, 'Foo.java', content);
+      const analysis = await parser.parseFile(filePath);
+
+      expect(analysis.javaPackage).toBe('com.example.service');
+    });
+
+    it('should ignore imports inside comments', async () => {
+      const content = `
+        package com.example;
+        // import com.fake.Bar;
+        /* import com.another.Baz; */
+        import com.real.Qux;
+      `;
+      const filePath = await createFile(tempDir, 'App.java', content);
+      const analysis = await parser.parseFile(filePath);
+
+      expect(analysis.imports).toHaveLength(1);
+      expect(analysis.imports[0].source).toBe('com.real.Qux');
+    });
+  });
+
+  describe('Java Exports', () => {
+    it('should extract public classes, interfaces, enums, and records', async () => {
+      const content = `
+        package com.example;
+        public class UserService {}
+        public interface UserRepository {}
+        public enum Role { ADMIN, USER }
+        public record UserDto(String name) {}
+      `;
+      const filePath = await createFile(tempDir, 'Types.java', content);
+      const analysis = await parser.parseFile(filePath);
+
+      const byName = Object.fromEntries(analysis.exports.map(e => [e.name, e.kind]));
+      expect(byName.UserService).toBe('class');
+      expect(byName.UserRepository).toBe('interface');
+      expect(byName.Role).toBe('enum');
+      expect(byName.UserDto).toBe('class');
+    });
+
+    it('should extract public methods', async () => {
+      const content = `
+        package com.example;
+        public class Service {
+          public User getUser(Long id) { return null; }
+          public void deleteUser(Long id) {}
+          private void helper() {}
+        }
+      `;
+      const filePath = await createFile(tempDir, 'Service.java', content);
+      const analysis = await parser.parseFile(filePath);
+
+      const methodNames = analysis.exports.filter(e => e.kind === 'function').map(e => e.name);
+      expect(methodNames).toContain('getUser');
+      expect(methodNames).toContain('deleteUser');
+      // private methods are NOT exports
+      expect(methodNames).not.toContain('helper');
+    });
+  });
+
+  describe('Java Import Resolution', () => {
+    it('should resolve import against computed source root from package', async () => {
+      // Gradle layout: src/main/java/com/example/...
+      await mkdir(join(tempDir, 'src/main/java/com/example/model'), { recursive: true });
+      await mkdir(join(tempDir, 'src/main/java/com/example/service'), { recursive: true });
+
+      const userPath = await createFile(
+        tempDir,
+        'src/main/java/com/example/model/User.java',
+        'package com.example.model;\npublic class User {}'
+      );
+      const servicePath = join(tempDir, 'src/main/java/com/example/service/UserService.java');
+      await createFile(
+        tempDir,
+        'src/main/java/com/example/service/UserService.java',
+        `package com.example.service;\nimport com.example.model.User;\npublic class UserService {}`
+      );
+
+      const result = await resolveImport('com.example.model.User', servicePath, {
+        baseDir: tempDir,
+        sourcePackage: 'com.example.service',
+      });
+
+      expect(result).toBe(userPath);
+    });
+
+    it('should return null for JDK builtin imports', async () => {
+      const result = await resolveImport(
+        'java.util.List',
+        join(tempDir, 'src/main/java/com/foo/App.java'),
+        { baseDir: tempDir, sourcePackage: 'com.foo' }
+      );
+
+      expect(result).toBeNull();
+    });
+
+    it('should return null for wildcard imports', async () => {
+      await mkdir(join(tempDir, 'src/main/java/com/example/model'), { recursive: true });
+      await createFile(
+        tempDir,
+        'src/main/java/com/example/model/User.java',
+        'package com.example.model;\npublic class User {}'
+      );
+
+      const result = await resolveImport(
+        'com.example.model.*',
+        join(tempDir, 'src/main/java/com/example/App.java'),
+        { baseDir: tempDir, sourcePackage: 'com.example' }
+      );
+
+      expect(result).toBeNull();
+    });
+
+    it('should fall back to walking for a conventional source root when package is missing', async () => {
+      // File has no package declaration, but lives under src/main/java/.
+      await mkdir(join(tempDir, 'src/main/java/com/foo'), { recursive: true });
+      const fooPath = await createFile(
+        tempDir,
+        'src/main/java/com/foo/Foo.java',
+        'package com.foo;\npublic class Foo {}'
+      );
+      // Caller has no sourcePackage — resolver should still find Foo via
+      // the "src/main/java" ancestor.
+      const appPath = join(tempDir, 'src/main/java/App.java');
+      await createFile(tempDir, 'src/main/java/App.java', 'public class App {}');
+
+      const result = await resolveImport('com.foo.Foo', appPath, {
+        baseDir: tempDir,
+      });
+
+      expect(result).toBe(fooPath);
+    });
+  });
 });

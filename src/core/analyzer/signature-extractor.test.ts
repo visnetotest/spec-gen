@@ -653,3 +653,110 @@ void process() {
     expect(names).not.toContain('while');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Java extractor
+// ---------------------------------------------------------------------------
+
+describe('extractSignatures — Java', () => {
+  it('extracts public class with methods', () => {
+    const { entries } = extractSignatures('UserService.java', `
+package com.example;
+
+public class UserService {
+    public User getUser(Long id) {
+        return null;
+    }
+
+    public void deleteUser(Long id) {
+    }
+
+    private void helper() {
+    }
+}
+`);
+    const cls = entries.find(e => e.kind === 'class');
+    expect(cls?.name).toBe('UserService');
+
+    const methods = entries.filter(e => e.kind === 'method');
+    const methodNames = methods.map(m => m.name);
+    expect(methodNames).toContain('getUser');
+    expect(methodNames).toContain('deleteUser');
+  });
+
+  it('extracts public interface', () => {
+    const { entries } = extractSignatures('UserRepository.java', `
+package com.example;
+
+public interface UserRepository {
+    User findById(Long id);
+}
+`);
+    const iface = entries.find(e => e.kind === 'interface');
+    expect(iface?.name).toBe('UserRepository');
+  });
+
+  it('extracts enum and record', () => {
+    const { entries } = extractSignatures('Types.java', `
+public enum Role { ADMIN, USER }
+
+public record Point(int x, int y) {}
+`);
+    const names = entries.map(e => e.name);
+    expect(names).toContain('Role');
+    expect(names).toContain('Point');
+  });
+
+  it('extracts Javadoc above declaration', () => {
+    const { entries } = extractSignatures('Service.java', `
+package com.example;
+
+/**
+ * Manages user accounts.
+ */
+public class Service {
+
+    /**
+     * Find a user by id.
+     * @param id primary key
+     */
+    public User getUser(Long id) {
+        return null;
+    }
+}
+`);
+    const cls = entries.find(e => e.kind === 'class');
+    expect(cls?.docstring).toBe('Manages user accounts.');
+    const method = entries.find(e => e.name === 'getUser');
+    expect(method?.docstring).toBe('Find a user by id.');
+  });
+
+  it('skips control-flow inside method bodies', () => {
+    const { entries } = extractSignatures('Logic.java', `
+public class Logic {
+    public void process() {
+        if (x > 0) { foo(); }
+        for (int i = 0; i < 10; i++) {}
+        while (running) {}
+    }
+}
+`);
+    const names = entries.map(e => e.name);
+    expect(names).not.toContain('if');
+    expect(names).not.toContain('for');
+    expect(names).not.toContain('while');
+    expect(names).toContain('process');
+  });
+
+  it('handles generic return types', () => {
+    const { entries } = extractSignatures('Repo.java', `
+public class Repo {
+    public List<User> findAll() { return null; }
+    public Map<String, User> byId() { return null; }
+}
+`);
+    const names = entries.map(e => e.name);
+    expect(names).toContain('findAll');
+    expect(names).toContain('byId');
+  });
+});

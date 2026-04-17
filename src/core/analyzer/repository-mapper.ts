@@ -571,11 +571,17 @@ export class RepositoryMapper {
     const hasPyproject = files.some(f => f.name === 'pyproject.toml' || f.name === 'setup.py');
     const hasCargoToml = files.some(f => f.name === 'Cargo.toml');
     const hasGoMod = files.some(f => f.name === 'go.mod');
+    const hasJavaBuild = files.some(f => f.name === 'pom.xml' || f.name === 'build.gradle' || f.name === 'build.gradle.kts');
+    const hasGemfile = files.some(f => f.name === 'Gemfile');
+    const hasComposer = files.some(f => f.name === 'composer.json');
 
     if (hasPackageJson) return 'nodejs';
     if (hasPyproject) return 'python';
     if (hasCargoToml) return 'rust';
     if (hasGoMod) return 'go';
+    if (hasJavaBuild) return 'java';
+    if (hasGemfile) return 'ruby';
+    if (hasComposer) return 'php';
 
     return 'unknown';
   }
