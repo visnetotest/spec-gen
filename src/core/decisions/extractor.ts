@@ -13,7 +13,7 @@ import {
   DECISIONS_CONSOLIDATION_MAX_TOKENS,
 } from '../../constants.js';
 import { getChangedFiles, getFileDiff, resolveBaseRef } from '../drift/git-diff.js';
-import { buildSpecMap, matchFileToDomains, getSpecContent } from '../drift/spec-mapper.js';
+import { matchFileToDomains, getSpecContent } from '../drift/spec-mapper.js';
 import { isSpecRelevantChange } from '../drift/drift-detector.js';
 import type { LLMService } from '../services/llm-service.js';
 import type { PendingDecision, SpecMap } from '../../types/index.js';
@@ -147,7 +147,9 @@ function extractRequirements(specContent: string): string {
 }
 
 function parseJSON<T>(text: string, fallback: T): T {
-  const match = text.match(/\[[\s\S]*\]/);
+  // Strip markdown code fences before extracting JSON
+  const stripped = text.replace(/```(?:json)?\s*/g, '').replace(/```\s*/g, '');
+  const match = stripped.match(/\[[\s\S]*\]/);
   if (!match) return fallback;
   try {
     return JSON.parse(match[0]) as T;

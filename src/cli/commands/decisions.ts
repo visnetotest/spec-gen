@@ -106,6 +106,17 @@ fi
 # end-spec-gen-decisions-hook
 `;
 
+async function ensureGitignored(rootPath: string, entry: string): Promise<void> {
+  const gitignorePath = join(rootPath, '.gitignore');
+  let content = '';
+  if (await fileExists(gitignorePath)) {
+    content = await readFile(gitignorePath, 'utf-8');
+    if (content.split('\n').some((l) => l.trim() === entry)) return;
+  }
+  await writeFile(gitignorePath, content.trimEnd() + '\n' + entry + '\n', 'utf-8');
+  logger.discovery(`  → added ${entry} to .gitignore`);
+}
+
 async function installPreCommitHook(rootPath: string): Promise<void> {
   const hooksDir = join(rootPath, '.git', 'hooks');
   const hookPath = join(hooksDir, 'pre-commit');
@@ -134,6 +145,9 @@ async function installPreCommitHook(rootPath: string): Promise<void> {
   await chmod(hookPath, 0o755);
   logger.success('Pre-commit hook installed at .git/hooks/pre-commit');
   logger.discovery('Commits will be gated until decisions are approved. Use --no-verify to skip.');
+
+  // Ensure pending decisions store is not accidentally committed
+  await ensureGitignored(rootPath, '.spec-gen/decisions/');
 
   // Inject record_decision instructions into existing agent context files
   const agentFiles = [

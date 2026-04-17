@@ -84,9 +84,14 @@ async function syncDecision(
     }
   }
 
-  if (isArchitectural(decision) && !options.dryRun) {
-    const adrPath = await createADR(decision, options);
-    if (adrPath) modified.push(adrPath);
+  if (isArchitectural(decision)) {
+    if (options.dryRun) {
+      const slug = toKebabCase(decision.title);
+      modified.push(`openspec/decisions/adr-XXXX-${slug}.md`);
+    } else {
+      const adrPath = await createADR(decision, options);
+      if (adrPath) modified.push(adrPath);
+    }
   }
 
   return modified;
