@@ -530,6 +530,7 @@ Each spec.md follows OpenSpec conventions:
         force: opts.force,
         progress,
         semanticSearch,
+        chunkMaxChars: specGenConfig.generation?.chunkMaxChars,
       });
 
       let pipelineResult: PipelineResult;
