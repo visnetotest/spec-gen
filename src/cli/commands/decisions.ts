@@ -327,6 +327,27 @@ Examples:
       await saveDecisionStore(rootPath, updated);
       logger.success(`Decision ${id} approved.`);
       if (!options.json) displayDecision({ ...decision, status: 'approved' }, true);
+
+      // Show a dry-run preview of what would land in the spec
+      if (!options.json) {
+        const specGenConfig = await readSpecGenConfig(rootPath);
+        if (specGenConfig) {
+          const openspecPath = join(rootPath, specGenConfig.openspecPath ?? OPENSPEC_DIR);
+          const specsExist = await fileExists(join(openspecPath, OPENSPEC_SPECS_SUBDIR));
+          if (specsExist) {
+            const specMap = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
+            if (specMap) {
+              const { result } = await syncApprovedDecisions(updated, {
+                rootPath, openspecPath, specMap, dryRun: true,
+              });
+              if (result.modifiedSpecs.length > 0) {
+                console.log(`\nWould write to: ${result.modifiedSpecs.join(', ')}`);
+                console.log('Run "spec-gen decisions --sync" to apply.');
+              }
+            }
+          }
+        }
+      }
       return;
     }
 
@@ -434,7 +455,7 @@ Examples:
 
       if (options.json) {
         process.stdout.write(JSON.stringify({ verified, phantom, missing }, null, 2) + '\n');
-        if (options.gate && verified.length > 0) process.exitCode = 1;
+        if (options.gate && missing.length > 0) process.exitCode = 1;
         return;
       }
 
@@ -447,7 +468,7 @@ Examples:
       }
 
       if (phantom.length > 0) {
-        console.log('\nPhantom decisions (recorded but not found in diff):');
+        console.log('\nPhantom decisions (recorded but not found in diff — may have been rolled back):');
         for (const d of phantom) displayDecision(d, options.verbose);
       }
 
@@ -457,9 +478,11 @@ Examples:
       console.log('Reject with:  spec-gen decisions --reject <id>');
       console.log('Sync all approved: spec-gen decisions --sync');
 
-      if (options.gate && verified.length > 0) {
-        logger.warning('\nCommit gated — review decisions above before committing.');
+      if (options.gate && missing.length > 0) {
+        logger.warning(`\nCommit gated — ${missing.length} undocumented change(s) require a decision. Record with: spec-gen decisions --record or record_decision MCP tool.`);
         process.exitCode = 1;
+      } else if (options.gate && verified.length > 0) {
+        logger.warning('\nDecisions verified — approve them before syncing: spec-gen decisions --approve <id>');
       }
       return;
     }

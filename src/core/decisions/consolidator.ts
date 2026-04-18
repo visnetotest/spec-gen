@@ -26,6 +26,16 @@ Rules:
 - Preserve the original rationale and consequences from the drafts
 - proposedRequirement should be a single sentence in imperative form, or null
 
+A decision is only worth keeping if it would add a meaningful new requirement to a spec file.
+Do NOT produce decisions for:
+- Restatements of the existing tech stack ("use TypeScript", "follow existing patterns")
+- Trivial implementation details ("add a helper function", "rename a variable")
+- Generic best practices not specific to this project ("write tests", "handle errors")
+- Anything already obvious from the language or framework choice
+
+Good examples: "Switch from REST to GraphQL for the client API", "Introduce Redis as session store", "Replace direct DB calls with a repository layer in the auth domain"
+Bad examples: "Use TypeScript interfaces for type safety", "Follow existing service pattern", "Add error handling"
+
 Respond with a JSON array only. Each element:
 {
   "title": string,
