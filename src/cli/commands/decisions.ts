@@ -93,15 +93,26 @@ const HOOK_MARKER = '# spec-gen-decisions-hook';
 
 const HOOK_CONTENT = `${HOOK_MARKER}
 # Gate commits until architectural decisions are reviewed.
-# Installed by: spec-gen decisions --install-hook
+# Installed by: spec-gen setup --tools claude
 
-SPEC_GEN=$(command -v spec-gen 2>/dev/null)
-if [ -n "$SPEC_GEN" ]; then
-  "$SPEC_GEN" decisions --consolidate --gate 2>&1
+# Prefer local build over global install.
+if [ -f "./node_modules/.bin/spec-gen" ]; then
+  ./node_modules/.bin/spec-gen decisions --consolidate --gate 2>&1
   DECISIONS_EXIT=$?
-  if [ $DECISIONS_EXIT -ne 0 ]; then
-    exit $DECISIONS_EXIT
+elif [ -f "./dist/cli/index.js" ]; then
+  node ./dist/cli/index.js decisions --consolidate --gate 2>&1
+  DECISIONS_EXIT=$?
+else
+  SPEC_GEN=$(command -v spec-gen 2>/dev/null)
+  if [ -n "$SPEC_GEN" ]; then
+    "$SPEC_GEN" decisions --consolidate --gate 2>&1
+    DECISIONS_EXIT=$?
+  else
+    DECISIONS_EXIT=0
   fi
+fi
+if [ "$DECISIONS_EXIT" -ne 0 ]; then
+  exit "$DECISIONS_EXIT"
 fi
 # end-spec-gen-decisions-hook
 `;
@@ -137,7 +148,9 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
       return;
     }
     logger.discovery('Existing pre-commit hook found. Appending decisions gate.');
-    await writeFile(hookPath, existingContent.trimEnd() + '\n\n' + HOOK_CONTENT, 'utf-8');
+    // Strip a trailing `exit 0` so our block is not unreachable.
+    const stripped = existingContent.trimEnd().replace(/\n*\nexit 0\s*$/, '');
+    await writeFile(hookPath, stripped + '\n\n' + HOOK_CONTENT, 'utf-8');
   } else {
     await writeFile(hookPath, '#!/bin/sh\n\n' + HOOK_CONTENT, 'utf-8');
   }
