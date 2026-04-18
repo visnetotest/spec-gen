@@ -18,7 +18,7 @@ import {
   makeDecisionId,
 } from '../../decisions/store.js';
 import { syncApprovedDecisions } from '../../decisions/syncer.js';
-import { buildSpecMap } from '../../../core/drift/spec-mapper.js';
+import { buildSpecMap, matchFileToDomains } from '../../../core/drift/spec-mapper.js';
 import { readSpecGenConfig } from '../config-manager.js';
 import { join } from 'node:path';
 import { OPENSPEC_DIR } from '../../../constants.js';
@@ -67,7 +67,28 @@ export async function handleRecordDecision(
     const rootPath = await validateDirectory(directory);
     const store = await loadDecisionStore(rootPath);
 
-    const id = makeDecisionId(store.sessionId, 'unknown', title.trim());
+    // Infer domain from affectedFiles via spec-map (best-effort, falls back to 'unknown')
+    let primaryDomain = 'unknown';
+    let inferredDomains: string[] = [];
+    if (affectedFiles?.length) {
+      try {
+        const specGenConfig = await readSpecGenConfig(rootPath);
+        const openspecPath = join(rootPath, specGenConfig?.openspecPath ?? OPENSPEC_DIR);
+        const specMap = await buildSpecMap({ rootPath, openspecPath });
+        const domainSet = new Set<string>();
+        for (const file of affectedFiles) {
+          for (const domain of matchFileToDomains(file, specMap)) {
+            domainSet.add(domain);
+          }
+        }
+        inferredDomains = [...domainSet];
+        if (inferredDomains.length > 0) primaryDomain = inferredDomains[0];
+      } catch {
+        // spec-map unavailable — keep 'unknown'
+      }
+    }
+
+    const id = makeDecisionId(store.sessionId, primaryDomain, title.trim());
 
     const decision: PendingDecision = {
       id,
@@ -76,7 +97,7 @@ export async function handleRecordDecision(
       rationale: rationale.trim(),
       consequences: consequences ?? '',
       proposedRequirement: null,
-      affectedDomains: [],
+      affectedDomains: inferredDomains,
       affectedFiles: affectedFiles ?? [],
       supersedes,
       sessionId: store.sessionId,

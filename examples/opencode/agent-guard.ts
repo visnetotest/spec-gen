@@ -15,6 +15,11 @@
  *      so they survive session summarisation.
  *   4. tool.definition enrichment: adds known spec domains to the record_decision
  *      tool description so the model uses the right domain names.
+ *
+ * Consolidation is NOT the plugin's responsibility.
+ * The record_decision MCP handler spawns `spec-gen decisions --consolidate` in the
+ * background automatically after saving each draft. By commit time, decisions are
+ * already consolidated — the pre-commit gate does no LLM work and is instant.
  */
 
 import type { Plugin } from "@opencode-ai/plugin"

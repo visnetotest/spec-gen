@@ -18,6 +18,7 @@ spec-gen closes this loop. It reverse-engineers structured specifications from e
 | Verify spec accuracy | `spec-gen verify` | Yes | Minutes |
 | Human-readable digest of all specs | `spec-gen digest` | No | Milliseconds |
 | Link drift to the tests that should run | `spec-gen drift --suggest-tests` | No | Milliseconds |
+| Track architectural decisions and gate commits | `spec-gen decisions` | Yes (consolidation) | Background |
 | Give agents pre-loaded architectural context | `spec-gen analyze` → `CODEBASE.md` | No | — |
 | Let agents navigate with graph-based tools | `spec-gen mcp` | No | — |
 | Inspect the dependency graph visually | `spec-gen view` | No | — |
@@ -152,9 +153,10 @@ Turns every spec scenario into an executable test skeleton — or a test with re
 **5. Decisions** (API key required for consolidation)
 
 Tracks architectural decisions across the full development lifecycle:
-- Agents call `record_decision` during development to capture design choices before writing code
-- At commit time, a pre-commit hook consolidates drafts, cross-checks them against the git diff, and blocks until decisions are reviewed
-- Approved decisions are synced to spec.md files (as requirements) and to ADR files in `openspec/decisions/`
+- Agents call `record_decision` during development — consolidation runs immediately in the background (no commit latency)
+- At commit time, a pre-commit hook gates the commit until all verified decisions are reviewed; it reads the already-consolidated store and adds no LLM latency
+- Three gate modes: interactive TUI (TTY), structured JSON for ACP-capable IDEs (Zed, PyCharm), or JSON for agents to present in chat
+- Approved decisions are written to `spec.md` files (as requirements) and `openspec/decisions/` as ADRs
 - A diff-based fallback extractor mines decisions from git changes when the agent produced no drafts
 
 **6. Drift Detection** (no API key needed)
@@ -269,6 +271,8 @@ graph TD
 ## Drift Detection
 
 Drift detection is the core of ongoing spec maintenance. It runs in milliseconds, needs no API key, and works entirely from git diffs and spec file mappings.
+
+> **Drift vs. Decisions**: these address different failure modes. Drift asks *"is this spec's source file coverage still accurate?"* — it fires when a spec-covered file changes without the spec being updated. The [decisions workflow](#what-it-does) asks *"has this architectural choice been reviewed?"* — it gates commits until recorded decisions are approved and written back as new requirements. Syncing a decision appends a requirement but does not update a spec's source file list, so drift can still fire on the same commit. Run both: they catch different things.
 
 ```bash
 $ spec-gen drift
@@ -471,21 +475,36 @@ spec-gen is designed to run in automated pipelines. The deterministic commands (
 
 ### Pre-Commit Hook
 
+spec-gen provides two pre-commit hooks that address spec alignment from opposite directions:
+
+| Hook | Direction | Speed | Installed via |
+|------|-----------|-------|---------------|
+| **Drift** | Reactive — code changed without spec | Milliseconds, no API key | `spec-gen drift --install-hook` |
+| **Decisions gate** | Proactive — pending decisions await review | Instant, no LLM | `spec-gen setup --tools claude` |
+
+**Drift hook** — blocks commits when code changes are not reflected in existing specs:
+
 ```bash
 spec-gen drift --install-hook     # Install
 spec-gen drift --uninstall-hook   # Remove
 ```
 
-The hook runs in static mode (fast, no API key needed) and blocks commits when drift is detected at warning level or above.
-
-A second hook — installed separately — gates commits until all recorded architectural decisions have been reviewed:
+**Decisions gate** — blocks commits until all recorded architectural decisions have been reviewed and approved. No LLM at commit time: consolidation runs in the background each time an agent calls `record_decision`, so by the time the hook fires, decisions are already verified.
 
 ```bash
-spec-gen decisions --install-hook     # Install decisions pre-commit hook
-spec-gen decisions --uninstall-hook   # Remove
+spec-gen setup --tools claude         # Install (also installs Claude Code skills)
+spec-gen decisions --uninstall-hook   # Remove decisions hook only
 ```
 
-The decisions hook consolidates agent-recorded drafts, cross-checks them against the current git diff, and blocks the commit if unreviewed decisions remain. Pending decisions are stored in `.spec-gen/decisions/pending.json` (auto-added to `.gitignore` on install).
+**How they relate**: they address different failure modes and do not substitute for each other.
+
+The decisions gate asks: *"has this architectural choice been reviewed by a human?"* It operates on decisions recorded during development — it has no knowledge of which spec files cover which source files.
+
+The drift hook asks: *"has this source file's spec coverage been kept up to date?"* It compares git-changed files against each spec's source file list — it has no knowledge of recorded decisions.
+
+A commit can trigger drift without any decisions pending (a pure refactor touches a spec-covered file). A commit can have decisions synced without satisfying drift (syncing a decision appends a new requirement but does not update the spec's source file coverage metadata). Run both: decisions for design governance, drift as a coverage staleness check.
+
+Pending decisions are stored in `.spec-gen/decisions/pending.json` (auto-added to `.gitignore` on install).
 
 ### GitHub Actions / CI Pipelines
 
@@ -819,7 +838,7 @@ Files installed:
 |------|-------------|---------|
 | `vibe` | `.vibe/skills/spec-gen-{name}/SKILL.md` | 8 skills |
 | `cline` | `.clinerules/workflows/spec-gen-{name}.md` | 7 workflows |
-| `claude` | `.claude/skills/spec-gen-{name}/SKILL.md` | 8 skills |
+| `claude` | `.claude/skills/spec-gen-{name}/SKILL.md` + decisions pre-commit hook | 8 skills + commit gate |
 | `opencode` | `.opencode/skills/spec-gen-{name}/SKILL.md` + `.opencode/plugins/agent-guard.ts` | 8 skills + guard plugin |
 | `gsd` | `.claude/commands/gsd/spec-gen-{name}.md` | 2 commands |
 | `bmad` | `_bmad/spec-gen/{agents,tasks}/` | 2 agents, 4 tasks |
@@ -842,8 +861,10 @@ spec-gen decisions [options]
   --reason <text>        # Rejection reason (used with --reject)
   --sync                 # Write approved decisions into specs and ADRs
   --dry-run              # Preview sync without writing files
-  --install-hook         # Install decisions pre-commit hook
-  --uninstall-hook       # Remove decisions pre-commit hook
+  --gate                 # Run commit gate check (reads pending.json, no LLM — used by pre-commit hook)
+  --consolidate          # Manually trigger LLM consolidation + diff verification of drafts
+  --json                 # Machine-readable output
+  --uninstall-hook       # Remove decisions pre-commit hook (install via: spec-gen setup --tools claude)
 ```
 
 ### Verify Options
@@ -937,7 +958,7 @@ spec-gen setup [--tools vibe,cline,claude,opencode,gsd,bmad]
 
 Mistral Vibe  ->  .vibe/skills/spec-gen-{name}/SKILL.md       (8 skills)
 Cline / Roo   ->  .clinerules/workflows/spec-gen-{name}.md    (7 workflows)
-Claude Code   ->  .claude/skills/spec-gen-{name}/SKILL.md     (8 skills)
+Claude Code   ->  .claude/skills/spec-gen-{name}/SKILL.md     (8 skills + decisions pre-commit hook)
 OpenCode      ->  .opencode/skills/spec-gen-{name}/SKILL.md   (8 skills)
               ->  .opencode/plugins/agent-guard.ts             (guard plugin)
 GSD           ->  .claude/commands/gsd/spec-gen-{name}.md     (2 commands)
@@ -1222,7 +1243,7 @@ Most tools run on **pure static analysis** — no LLM quota consumed. Exceptions
 
 | Tool | Description | Requires prior analysis |
 |------|-------------|:---:|
-| `record_decision` | Record an architectural decision before writing code. Drafts are consolidated and cross-checked against the git diff at commit time via the decisions pre-commit hook. | No |
+| `record_decision` | Record an architectural decision before writing code. Triggers background consolidation immediately — by commit time, decisions are already verified and the gate adds no LLM latency. | No |
 | `list_decisions` | List decisions in the store, optionally filtered by status (`draft`, `consolidated`, `verified`, `approved`, `synced`, `phantom`). | No |
 | `approve_decision` | Approve one or more decisions by ID, marking them ready to sync into specs and ADRs. | No |
 | `reject_decision` | Reject a decision by ID with a reason. Rejected decisions are excluded from sync. | No |
