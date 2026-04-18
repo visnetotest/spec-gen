@@ -657,6 +657,7 @@ Examples:
               };
               process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
               process.exitCode = 1;
+              return;
             }
           } catch { /* git unavailable — skip */ }
         }
