@@ -441,5 +441,7 @@ export interface DecisionStore {
   /** Cleared when a new session starts (new commit cycle) */
   sessionId: string;
   updatedAt: string;
+  /** Set after consolidation runs — gate uses this to skip no_decisions_recorded warning */
+  lastConsolidatedAt?: string;
   decisions: PendingDecision[];
 }

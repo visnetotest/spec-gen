@@ -64,7 +64,8 @@ export interface ExtractFromDiffOptions {
 export async function extractFromDiff(options: ExtractFromDiffOptions): Promise<PendingDecision[]> {
   const { rootPath, specMap, sessionId, llm } = options;
 
-  const baseRef = await resolveBaseRef(rootPath, options.baseRef ?? 'auto');
+  // Default to HEAD (staged changes only) — 'auto' would compare the full branch vs main.
+  const baseRef = await resolveBaseRef(rootPath, options.baseRef ?? 'HEAD');
   const gitResult = await getChangedFiles({ rootPath, baseRef, includeUnstaged: false });
 
   const relevant = gitResult.files

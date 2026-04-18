@@ -466,7 +466,8 @@ Examples:
       } else {
         if (!options.json) logger.discovery(`No drafts found — extracting decisions from diff via ${resolved.provider}...`);
         const specMap = specMapResult ?? await buildSpecMap({ rootPath, openspecPath });
-        consolidated = await extractFromDiff({ rootPath, specMap, sessionId: store.sessionId, llm });
+        // Use HEAD as base so the fallback only sees staged changes, not the full branch diff.
+        consolidated = await extractFromDiff({ rootPath, baseRef: 'HEAD', specMap, sessionId: store.sessionId, llm });
       }
       if (consolidated.length === 0) {
         if (!options.json) console.log('No architectural decisions found in drafts.');
@@ -499,11 +500,14 @@ Examples:
 
       // Step 4 — Persist
       let updatedStore = { ...store };
-      // Mark superseded drafts as rejected
-      for (const id of supersededIds) {
+      // Reject all original drafts — they've been replaced by consolidated decisions.
+      // Also reject any explicitly superseded IDs from prior sessions.
+      const originalDraftIds = new Set(drafts.map((d) => d.id));
+      for (const id of [...originalDraftIds, ...supersededIds]) {
         updatedStore = patchDecision(updatedStore, id, { status: 'rejected' });
       }
       updatedStore = upsertDecisions(updatedStore, [...verified, ...phantom]);
+      updatedStore = { ...updatedStore, lastConsolidatedAt: new Date().toISOString() };
       await saveDecisionStore(rootPath, updatedStore);
 
       if (options.json) {
@@ -628,6 +632,14 @@ Examples:
           };
           process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
           process.exitCode = 1;
+          return;
+        }
+
+        // If consolidation already ran recently, trust it found nothing — skip the warning.
+        const consolidatedRecently = store.lastConsolidatedAt
+          && (Date.now() - new Date(store.lastConsolidatedAt).getTime()) < 60 * 60 * 1000;
+        if (consolidatedRecently) {
+          process.exitCode = 0;
           return;
         }
 
