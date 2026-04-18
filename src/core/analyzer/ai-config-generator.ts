@@ -95,7 +95,9 @@ record_decision({
 })
 \`\`\`
 
-Decisions are consolidated and cross-checked against the git diff before each commit. Do not record trivial choices (variable names, formatting).
+Decisions are consolidated in the background immediately after \`record_decision\` is called — the pre-commit gate reads the already-consolidated store and adds no LLM latency.
+
+**Performance note**: if you skip \`record_decision\`, the gate detects unrecorded source changes at commit time and triggers a slow LLM extraction on the *next* commit (~10-30s). Calling \`record_decision\` proactively keeps every commit instant. Do not record trivial choices (variable names, formatting).
 `.trim();
 
 function buildContent(analysisDir: string, projectName: string, forClaude: boolean): string {
