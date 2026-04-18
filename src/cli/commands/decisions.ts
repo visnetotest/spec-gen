@@ -605,6 +605,25 @@ Examples:
       const missing: Array<{ file: string; description: string }> = [];
 
       if (verified.length === 0 && missing.length === 0) {
+        // Warn if source files are staged but no decisions were ever recorded this session.
+        // This catches the case where an agent made structural changes without calling record_decision.
+        const activeDecisions = store.decisions.filter(
+          (d) => !['rejected', 'synced'].includes(d.status),
+        );
+        if (activeDecisions.length === 0 && await isGitRepository(rootPath)) {
+          try {
+            const staged = await getChangedFiles({ rootPath, baseRef: 'HEAD', includeUnstaged: false });
+            const SOURCE_EXTS = /\.(ts|js|tsx|jsx|py|go|rs|rb|java|cpp|cc|swift)$/;
+            const hasSourceChanges = staged.files.some((f) => SOURCE_EXTS.test(f.path));
+            if (hasSourceChanges) {
+              logger.warning(
+                '[decisions] Source files staged but no decisions recorded. ' +
+                'If this commit contains an architectural choice, record it with: ' +
+                'spec-gen decisions --record  or the record_decision MCP tool.',
+              );
+            }
+          } catch { /* git unavailable — skip */ }
+        }
         process.exitCode = 0;
         return;
       }
