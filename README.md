@@ -760,7 +760,7 @@ spec-gen generate [options]
   --no-overwrite         # Skip existing files
   --adr                  # Also generate ADRs
   --adr-only             # Generate only ADRs
-  --reanalyze            # Force fresh analysis even if recent exists
+  --force                # Re-run all LLM stages, clear generation cache, remove stale domains
   --analysis <path>      # Path to existing analysis directory
   --output-dir <path>    # Override openspec output location
   -y, --yes              # Skip confirmation prompts
