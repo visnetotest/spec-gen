@@ -1105,7 +1105,10 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'approve_decision',
     description:
-      'Approve a verified architectural decision for syncing into spec.md files. ' +
+      '⚠ REQUIRES EXPLICIT HUMAN AUTHORIZATION — do NOT call this tool autonomously. ' +
+      'Before calling, you MUST present the decision to the user and receive an explicit ' +
+      '"yes" or "approve" response. Never approve on behalf of the user. ' +
+      'Approves a verified architectural decision for syncing into spec.md files. ' +
       'After approving, call sync_decisions to write the decision to the relevant spec.',
     inputSchema: {
       type: 'object',
