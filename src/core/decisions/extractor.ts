@@ -12,9 +12,11 @@ import {
   DECISIONS_DIFF_MAX_CHARS,
   DECISIONS_CONSOLIDATION_MAX_TOKENS,
 } from '../../constants.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { getChangedFiles, getFileDiff, resolveBaseRef } from '../drift/git-diff.js';
+const execFileAsync = promisify(execFile);
 import { matchFileToDomains, getSpecContent } from '../drift/spec-mapper.js';
-import { isSpecRelevantChange } from '../drift/drift-detector.js';
 import type { LLMService } from '../services/llm-service.js';
 import type { PendingDecision, SpecMap } from '../../types/index.js';
 import { makeDecisionId } from './store.js';
@@ -52,9 +54,39 @@ interface ExtractedRaw {
 export interface ExtractFromDiffOptions {
   rootPath: string;
   baseRef?: string;
+  /** When true, use git diff --cached (staged changes only). Overrides baseRef. */
+  stagedOnly?: boolean;
   specMap: SpecMap;
   sessionId: string;
   llm: LLMService;
+}
+
+function isRelevantStagedFile(filePath: string): boolean {
+  const ext = filePath.includes('.') ? filePath.slice(filePath.lastIndexOf('.')) : '';
+  if (ext === '.md' || ext === '.txt' || ext === '.json' || ext === '.lock') return false;
+  if (filePath.startsWith('openspec/') || filePath.startsWith('.spec-gen/')) return false;
+  if (filePath.includes('.test.') || filePath.includes('.spec.') || filePath.includes('/__tests__/')) return false;
+  if (filePath.includes('/dist/') || filePath.includes('/node_modules/')) return false;
+  return true;
+}
+
+async function getStagedFiles(rootPath: string): Promise<Array<{ path: string; status: string }>> {
+  const { stdout } = await execFileAsync(
+    'git', ['diff', '--cached', '--name-status', '--diff-filter=ACDMR'],
+    { cwd: rootPath },
+  );
+  return stdout.trim().split('\n').filter(Boolean).map((line) => {
+    const [status, ...rest] = line.split('\t');
+    return { path: rest.join('\t'), status: status ?? 'M' };
+  });
+}
+
+async function getStagedFileDiff(rootPath: string, filePath: string, maxChars: number): Promise<string> {
+  const { stdout } = await execFileAsync(
+    'git', ['diff', '--cached', '--', filePath],
+    { cwd: rootPath },
+  );
+  return stdout.length > maxChars ? stdout.slice(0, maxChars) + '\n... (truncated)' : stdout;
 }
 
 /**
@@ -63,14 +95,23 @@ export interface ExtractFromDiffOptions {
  * Returns decisions at status 'consolidated', ready for verification.
  */
 export async function extractFromDiff(options: ExtractFromDiffOptions): Promise<PendingDecision[]> {
-  const { rootPath, specMap, sessionId, llm } = options;
+  const { rootPath, specMap, sessionId, llm, stagedOnly } = options;
 
-  // Default to HEAD (staged changes only) — 'auto' would compare the full branch vs main.
-  const baseRef = await resolveBaseRef(rootPath, options.baseRef ?? 'HEAD');
-  const gitResult = await getChangedFiles({ rootPath, baseRef, includeUnstaged: false });
+  let files: Array<{ path: string; status: string }>;
+  let getDiff: (filePath: string) => Promise<string>;
 
-  const relevant = gitResult.files
-    .filter((f) => isSpecRelevantChange(f))
+  if (stagedOnly) {
+    files = await getStagedFiles(rootPath);
+    getDiff = (f) => getStagedFileDiff(rootPath, f, DECISIONS_DIFF_MAX_CHARS);
+  } else {
+    const baseRef = await resolveBaseRef(rootPath, options.baseRef ?? 'auto');
+    const gitResult = await getChangedFiles({ rootPath, baseRef, includeUnstaged: false });
+    files = gitResult.files;
+    getDiff = (f) => getFileDiff(rootPath, f, baseRef, DECISIONS_DIFF_MAX_CHARS);
+  }
+
+  const relevant = files
+    .filter((f) => isRelevantStagedFile(f.path))
     .slice(0, DECISIONS_EXTRACTION_MAX_FILES);
 
   if (relevant.length === 0) return [];
@@ -87,13 +128,11 @@ export async function extractFromDiff(options: ExtractFromDiffOptions): Promise<
   const results: PendingDecision[] = [];
   const now = new Date().toISOString();
 
-  for (const [domain, files] of byDomain) {
-    // Get diffs
+  for (const [domain, domainFiles] of byDomain) {
     const diffs = await Promise.all(
-      files.map((f) => getFileDiff(rootPath, f.path, baseRef, DECISIONS_DIFF_MAX_CHARS))
+      domainFiles.map((f) => getDiff(f.path))
     );
 
-    // Get existing spec requirements for context
     const specExcerpt = await getSpecContent(domain, specMap, rootPath, 2_000) ?? '';
     const requirementsExcerpt = extractRequirements(specExcerpt);
 
@@ -101,7 +140,7 @@ export async function extractFromDiff(options: ExtractFromDiffOptions): Promise<
       `Domain: ${domain}`,
       requirementsExcerpt ? `Existing requirements (excerpt):\n${requirementsExcerpt}` : '',
       '',
-      ...files.map((f, i) => `=== ${f.path} ===\n${diffs[i]}`),
+      ...domainFiles.map((f, i) => `=== ${f.path} ===\n${diffs[i]}`),
     ].filter(Boolean).join('\n\n');
 
     const response = await llm.complete({
@@ -123,7 +162,7 @@ export async function extractFromDiff(options: ExtractFromDiffOptions): Promise<
         consequences: e.consequences,
         proposedRequirement: e.proposedRequirement,
         affectedDomains: [domain],
-        affectedFiles: e.affectedFiles.length ? e.affectedFiles : files.map((f) => f.path),
+        affectedFiles: e.affectedFiles.length ? e.affectedFiles : domainFiles.map((f) => f.path),
         sessionId,
         recordedAt: now,
         consolidatedAt: now,
