@@ -207,6 +207,123 @@ async function uninstallPreCommitHook(rootPath: string): Promise<void> {
 }
 
 // ============================================================================
+// CLAUDE CODE POSTTOOLUSE HOOK
+// ============================================================================
+
+const CLAUDE_HOOK_MARKER = 'spec-gen-mine-last';
+
+async function installClaudeHook(rootPath: string): Promise<void> {
+  const settingsDir = join(rootPath, '.claude');
+  const settingsPath = join(settingsDir, 'settings.json');
+
+  await mkdir(settingsDir, { recursive: true });
+
+  let settings: Record<string, unknown> = {};
+  if (await fileExists(settingsPath)) {
+    try {
+      settings = JSON.parse(await readFile(settingsPath, 'utf-8'));
+    } catch { /* start fresh */ }
+  }
+
+  // Check if already installed
+  const existing = (settings.hooks as any)?.PostToolUse ?? [];
+  if (existing.some((h: any) => JSON.stringify(h).includes(CLAUDE_HOOK_MARKER))) {
+    logger.success('Claude Code PostToolUse hook already installed.');
+    return;
+  }
+
+  const hookEntry = {
+    matcher: 'Edit|Write',
+    hooks: [{
+      type: 'command',
+      command: `spec-gen decisions --mine-last 2>/dev/null || true`,
+    }],
+    _comment: CLAUDE_HOOK_MARKER,
+  };
+
+  if (!settings.hooks) settings.hooks = {};
+  const hooks = settings.hooks as Record<string, unknown[]>;
+  hooks.PostToolUse = [...(hooks.PostToolUse ?? []), hookEntry];
+
+  await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+  logger.success('Claude Code PostToolUse hook installed at .claude/settings.json');
+  logger.discovery('  → spec-gen decisions --mine-last will run after each Edit/Write');
+}
+
+async function uninstallClaudeHook(rootPath: string): Promise<void> {
+  const settingsPath = join(rootPath, '.claude', 'settings.json');
+  if (!(await fileExists(settingsPath))) return;
+
+  try {
+    const settings = JSON.parse(await readFile(settingsPath, 'utf-8'));
+    const hooks = (settings.hooks as any)?.PostToolUse ?? [];
+    const filtered = hooks.filter((h: any) => !JSON.stringify(h).includes(CLAUDE_HOOK_MARKER));
+    if (filtered.length === hooks.length) return;
+    settings.hooks.PostToolUse = filtered;
+    await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+    logger.success('Claude Code PostToolUse hook removed from .claude/settings.json');
+  } catch { /* settings corrupt — skip */ }
+}
+
+/**
+ * Called by the Claude Code PostToolUse hook after Edit/Write.
+ * Reads hook context from stdin, extracts the modified file path,
+ * runs the fallback extractor on that single file, and stores drafts.
+ */
+async function mineLastToolCall(rootPath: string): Promise<void> {
+  // Read Claude Code PostToolUse hook stdin
+  let hookInput: { tool_input?: { file_path?: string } } = {};
+  try {
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+    const raw = Buffer.concat(chunks).toString('utf-8').trim();
+    if (raw) hookInput = JSON.parse(raw);
+  } catch { /* stdin empty or not JSON — skip */ }
+
+  const filePath = hookInput.tool_input?.file_path;
+  if (!filePath) return;
+
+  // Only process source-relevant files
+  const { isSpecRelevantChange } = await import('../../core/drift/drift-detector.js');
+  const rel = filePath.startsWith(rootPath + '/') ? filePath.slice(rootPath.length + 1) : filePath;
+  const dummy = { path: rel, status: 'modified' as const, additions: 1, deletions: 0, isTest: false, isConfig: false, isGenerated: false, extension: rel.split('.').pop() ?? '' };
+  if (!isSpecRelevantChange(dummy)) return;
+
+  const specGenConfig = await readSpecGenConfig(rootPath);
+  const openspecPath = join(rootPath, specGenConfig?.openspecPath ?? OPENSPEC_DIR);
+  const specMap = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
+  if (!specMap) return;
+
+  const resolved = resolveLLMProvider(specGenConfig ?? undefined);
+  if (!resolved) return;
+
+  const llm = createLLMService({
+    provider: resolved.provider,
+    model: specGenConfig?.generation?.model,
+    openaiCompatBaseUrl: resolved.openaiCompatBaseUrl,
+  });
+
+  const { extractFromDiff } = await import('../../core/decisions/extractor.js');
+  const { loadDecisionStore, upsertDecisions, saveDecisionStore } = await import('../../core/decisions/store.js');
+
+  // Stable per-day session ID so decisions from the same work session cluster together
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const sessionId = `claude-hook-${today}`;
+
+  const extracted = await extractFromDiff({ rootPath, specMap, sessionId, llm, baseRef: 'HEAD' }).catch(() => []);
+
+  // Keep only decisions whose affectedFiles include the modified file
+  const relevant = extracted.filter((d) =>
+    d.affectedFiles.some((f) => f === rel || f === filePath),
+  );
+  if (relevant.length === 0) return;
+
+  const store = await loadDecisionStore(rootPath);
+  const updated = upsertDecisions(store, relevant);
+  await saveDecisionStore(rootPath, updated);
+}
+
+// ============================================================================
 // DISPLAY HELPERS
 // ============================================================================
 
@@ -257,8 +374,9 @@ export const decisionsCommand = new Command('decisions')
   .option('--dry-run', 'Preview sync without writing', false)
   .option('--list', 'List decisions (default action when no other flag given)', false)
   .option('--status <status>', 'Filter list by status (draft|consolidated|verified|approved|rejected|synced)')
-  .option('--install-hook', 'Install pre-commit hook', false)
-  .option('--uninstall-hook', 'Remove pre-commit hook', false)
+  .option('--install-hook', 'Install pre-commit hook + Claude Code PostToolUse hook', false)
+  .option('--uninstall-hook', 'Remove pre-commit hook + Claude Code PostToolUse hook', false)
+  .option('--mine-last', 'Extract decisions from the last Edit/Write (called by Claude Code hook via stdin)', false)
   .option('--verbose', 'Show detailed decision info', false)
   .option('--json', 'Output as JSON', false)
   .addHelpText(
@@ -291,6 +409,7 @@ Examples:
     status?: string;
     installHook: boolean;
     uninstallHook: boolean;
+    mineLast: boolean;
     verbose: boolean;
     json: boolean;
   }) {
@@ -300,10 +419,16 @@ Examples:
     // ── Hook management ──────────────────────────────────────────────────────
     if (options.installHook) {
       await installPreCommitHook(rootPath);
+      await installClaudeHook(rootPath);
       return;
     }
     if (options.uninstallHook) {
       await uninstallPreCommitHook(rootPath);
+      await uninstallClaudeHook(rootPath);
+      return;
+    }
+    if (options.mineLast) {
+      await mineLastToolCall(rootPath);
       return;
     }
 
