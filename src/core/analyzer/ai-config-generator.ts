@@ -12,8 +12,9 @@
  * Returns the list of paths that were actually created.
  */
 
-import { writeFile, mkdir, access } from 'node:fs/promises';
+import { writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
+import { fileExists } from '../../utils/command-helpers.js';
 
 // ============================================================================
 // TYPES
@@ -117,15 +118,6 @@ function buildContent(analysisDir: string, projectName: string, forClaude: boole
 // ============================================================================
 // HELPERS
 // ============================================================================
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 async function writeIfAbsent(filePath: string, content: string): Promise<boolean> {
   if (await fileExists(filePath)) return false;
