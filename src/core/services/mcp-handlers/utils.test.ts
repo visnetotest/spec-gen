@@ -6,10 +6,11 @@
  *   - isCacheFresh
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { vi } from 'vitest';
 import {
   validateDirectory,
   sanitizeMcpError,
@@ -20,6 +21,7 @@ import {
   specsForFile,
   functionsForDomain,
 } from './utils.js';
+import { logger } from '../../../utils/logger.js';
 import {
   SPEC_GEN_DIR,
   SPEC_GEN_ANALYSIS_SUBDIR,
@@ -61,6 +63,62 @@ describe('validateDirectory', () => {
     // Use process.cwd() which is definitely a valid directory
     const result = await validateDirectory('.');
     expect(result).toBe(process.cwd());
+  });
+});
+
+// ============================================================================
+// validateDirectory Logging
+// ============================================================================
+
+describe('validateDirectory logging', () => {
+  let tmpDir: string;
+  let debugSpy: ReturnType<typeof vi.spyOn>;
+  let successSpy: ReturnType<typeof vi.spyOn>;
+  let warningSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'mcp-utils-logging-test-'));
+    debugSpy = vi.spyOn(logger, 'debug');
+    successSpy = vi.spyOn(logger, 'success');
+    warningSpy = vi.spyOn(logger, 'warning');
+    errorSpy = vi.spyOn(logger, 'error');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('logs debug message on function entry', async () => {
+    await validateDirectory(tmpDir);
+    expect(debugSpy).toHaveBeenCalledWith(`Validating directory: ${tmpDir}`);
+  });
+
+  it('logs debug message for resolved path', async () => {
+    await validateDirectory(tmpDir);
+    expect(debugSpy).toHaveBeenCalledWith(`Resolved directory path: ${tmpDir}`);
+  });
+
+  it('logs success message on successful validation', async () => {
+    await validateDirectory(tmpDir);
+    expect(successSpy).toHaveBeenCalledWith(`Successfully validated directory: ${tmpDir}`);
+  });
+
+  it('logs warning message on invalid input', async () => {
+    await expect(validateDirectory('')).rejects.toThrow('directory parameter is required');
+    expect(warningSpy).toHaveBeenCalledWith(expect.stringContaining('directory parameter is required'));
+  });
+
+  it('logs error message when directory not found', async () => {
+    await expect(validateDirectory(join(tmpDir, 'nonexistent'))).rejects.toThrow('Directory not found');
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Directory not found'));
+  });
+
+  it('logs error message when path is not a directory', async () => {
+    const filePath = join(tmpDir, 'file.txt');
+    await writeFile(filePath, 'hello', 'utf-8');
+    await expect(validateDirectory(filePath)).rejects.toThrow('Not a directory');
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Not a directory'));
   });
 });
 

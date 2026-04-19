@@ -1,41 +1,34 @@
 /**
  * spec-gen-decision-extractor.ts
  *
- * Plugin OpenCode : extraction proactive des décisions architecturales via le
- * Librarian agent d'oh-my-openagent.
+ * Plugin OpenCode : extraction proactive des décisions architecturales.
  *
  * Mécanisme :
  *   1. tool.execute.after — détecte les écritures de fichiers source et
- *      enregistre les candidats à analyser.
- *   2. session.idle (agent principal) — pour chaque fichier en attente, spawn
- *      une session Librarian. Le Librarian analyse le changement et, s'il
- *      détecte une décision architecturale, appelle record_decision via le MCP
- *      spec-gen directement. Pas de parsing de réponse nécessaire.
- *   3. session.idle (session Librarian) — nettoyage de la session Librarian.
+ *      enregistre les candidats à analyser (avec sessionID).
+ *   2. session.idle — appel HTTP direct au LLM configuré (JSON-only, pas de
+ *      tool calling). Parse la réponse et écrit dans pending.json directement.
+ *      Cooldown 5 min par session pour éviter les spawns répétés.
  *
- * Fallback : si l'agent "librarian" n'est pas disponible (oh-my-openagent non
- * installé), le plugin se replie sur un appel HTTP direct à un endpoint
- * OpenAI-compatible configuré via env vars.
- *
- * Env vars fallback :
- *   OPENAI_BASE_URL         — défaut: http://localhost:11434/v1 (Ollama)
- *   OPENAI_API_KEY          — défaut: "ollama"
- *   OPENAI_MODEL_EXTRACTOR  — défaut: mistral-small-latest
+ * Env vars :
+ *   OPENAI_BASE_URL         — défaut: https://codestral.mistral.ai/v1
+ *   OPENAI_API_KEY          — défaut: $MISTRAL_API_KEY
+ *   OPENAI_MODEL_EXTRACTOR  — défaut: devstral-small-latest
  *
  * Placer dans : .opencode/plugins/spec-gen-decision-extractor.ts
  */
 
 import { execSync } from "child_process"
-import { readFileSync } from "fs"
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs"
 import { join } from "path"
+import { createHash } from "crypto"
 import type { Plugin } from "@opencode-ai/plugin"
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-// Fallback si oh-my-openagent / Librarian non disponible
-const FALLBACK_BASE_URL = process.env.OPENAI_BASE_URL ?? "http://localhost:11434/v1"
-const FALLBACK_API_KEY = process.env.OPENAI_API_KEY ?? "ollama"
-const FALLBACK_MODEL = process.env.OPENAI_MODEL_EXTRACTOR ?? "mistral-small-latest"
+const EXTRACT_BASE_URL = process.env.OPENAI_BASE_URL ?? "https://codestral.mistral.ai/v1"
+const EXTRACT_API_KEY = process.env.OPENAI_API_KEY ?? process.env.MISTRAL_API_KEY ?? ""
+const EXTRACT_MODEL = process.env.OPENAI_MODEL_EXTRACTOR ?? "devstral-small-latest"
 
 const SPEC_GEN_BIN = resolveSpecGen()
 
@@ -120,7 +113,7 @@ interface FileScore {
  * Returns null if the file is not in the graph (new file — treat as unknown).
  * Exported for testing.
  */
-export function scoreFromDepGraph(filePath: string, rootDir = process.cwd()): FileScore | null {
+function scoreFromDepGraph(filePath: string, rootDir = process.cwd()): FileScore | null {
   try {
     const raw = readFileSync(
       join(rootDir, ".spec-gen", "analysis", "dependency-graph.json"),
@@ -189,67 +182,95 @@ function buildPrompt(filePath: string, content: string, score: FileScore | null)
     ``,
     `NOT architectural = formatting, renaming, trivial bug fixes, test additions, config values.`,
     ``,
-    `If architectural: call record_decision with:`,
-    `  title           — max 10 words`,
-    `  rationale       — 2-3 sentences explaining the why`,
-    `  affectedDomains — domain names from the list above`,
-    `  affectedFiles   — ["${filePath}"]`,
-    `  consequences    — 1-2 sentences on downstream impact`,
+    `If architectural: respond with ONLY this JSON object (no explanation, no markdown):`,
+    `{"title":"<max 10 words>","rationale":"<2-3 sentences>","affectedDomains":["<domain>"],"affectedFiles":["${filePath}"],"consequences":"<1-2 sentences>"}`,
     ``,
-    `If NOT architectural: reply only "Not architectural." and stop.`,
+    `If NOT architectural: respond with ONLY the string: NOT_ARCHITECTURAL`,
     ``,
-    `Be decisive. One record_decision call maximum. Do not overthink.`,
+    `Do not call any tools. Do not explain. Respond with JSON or NOT_ARCHITECTURAL only.`,
   ].join("\n")
 }
 
-// ─── Fallback : appel HTTP direct OpenAI-compatible ─────────────────────────
+// ─── Extraction HTTP + écriture pending.json ─────────────────────────────────
 
-async function fallbackExtract(filePath: string, content: string): Promise<void> {
-  const prompt = buildPrompt(filePath, content)
+function writeToPending(decision: any, sessionId: string, rootDir = process.cwd()): void {
+  const dir = join(rootDir, ".spec-gen", "decisions")
+  const file = join(dir, "pending.json")
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+
+  const store = existsSync(file)
+    ? parseJSON<any>(readFileSync(file, "utf-8")) ?? { version: "1", decisions: [] }
+    : { version: "1", decisions: [] }
+
+  const id = createHash("sha256")
+    .update(`${sessionId}:${decision.title}`)
+    .digest("hex")
+    .slice(0, 8)
+
+  store.decisions.push({
+    id,
+    status: "draft",
+    title: decision.title,
+    rationale: decision.rationale,
+    consequences: decision.consequences ?? "",
+    proposedRequirement: null,
+    affectedDomains: decision.affectedDomains ?? [],
+    affectedFiles: decision.affectedFiles ?? [],
+    confidence: "medium",
+    sessionId,
+    recordedAt: new Date().toISOString(),
+    syncedToSpecs: [],
+  })
+
+  store.updatedAt = new Date().toISOString()
+  store.sessionId = sessionId
+  writeFileSync(file, JSON.stringify(store, null, 2))
+}
+
+async function extractAndRecord(
+  filePath: string,
+  content: string,
+  score: FileScore | null,
+  sessionId: string,
+): Promise<void> {
+  if (!EXTRACT_API_KEY) return
+
+  const prompt = buildPrompt(filePath, content, score)
 
   try {
-    const res = await fetch(`${FALLBACK_BASE_URL}/chat/completions`, {
+    const res = await fetch(`${EXTRACT_BASE_URL}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${FALLBACK_API_KEY}`,
+        Authorization: `Bearer ${EXTRACT_API_KEY}`,
       },
       body: JSON.stringify({
-        model: FALLBACK_MODEL,
+        model: EXTRACT_MODEL,
         messages: [{ role: "user", content: prompt }],
-        temperature: 0.3,
-        max_tokens: 350,
+        temperature: 0.1,
+        max_tokens: 300,
       }),
     })
 
     if (!res.ok) return
 
     const data = await res.json()
-    const text: string = data?.choices?.[0]?.message?.content ?? ""
+    const text: string = (data?.choices?.[0]?.message?.content ?? "").trim()
 
-    if (text.trim().startsWith("Not architectural")) return
+    if (text === "NOT_ARCHITECTURAL" || text.startsWith("NOT_ARCHITECTURAL")) return
 
-    // Extraire la décision suggérée et la logguer pour que l'agent la voit
     const decision = parseJSON<any>(text)
-    if (!decision) return
+    if (!decision?.title) return
 
-    console.log(`\n💡 DECISION EXTRACTOR (fallback) — Architectural change in ${filePath}:`)
-    console.log(`   Title    : ${decision.title}`)
-    console.log(`   Rationale: ${decision.rationale}`)
-    console.log(`\n   → Call record_decision:\n`)
-    console.log(
-      JSON.stringify(
-        {
-          title: decision.title,
-          rationale: decision.rationale,
-          affectedDomains: decision.affectedDomains,
-          affectedFiles: [filePath],
-          consequences: decision.consequences,
-        },
-        null,
-        2,
-      ).replace(/^/gm, "     "),
-    )
+    writeToPending(decision, sessionId)
+
+    await (globalThis as any).__opencode_client?.app?.log?.({
+      body: {
+        service: "decision-extractor",
+        level: "info",
+        message: `Decision recorded for ${filePath}: "${decision.title}"`,
+      },
+    })
   } catch {
     // Non-bloquant
   }
@@ -257,19 +278,20 @@ async function fallbackExtract(filePath: string, content: string): Promise<void>
 
 // ─── Plugin ──────────────────────────────────────────────────────────────────
 
-export const SpecGenDecisionExtractor: Plugin = async ({ client }) => {
-  // Fichiers en attente d'analyse : filePath → { content, score }
-  const pending = new Map<string, { content: string; score: FileScore | null }>()
+const COOLDOWN_MS = 5 * 60 * 1000 // 5 minutes entre deux spawns Librarian par session
 
-  // Sessions Librarian actives : libSessionId → filePath
-  const librarianSessions = new Map<string, string>()
+export const SpecGenDecisionExtractor: Plugin = async ({ client }) => {
+  // Fichiers en attente d'analyse : filePath → { content, score, sessionID }
+  const pending = new Map<string, { content: string; score: FileScore | null; sessionID: string }>()
+
+  // Cooldown par sessionID : timestamp du dernier appel d'extraction
+  const lastExtract = new Map<string, number>()
+
+  // Rendre le client accessible dans extractAndRecord pour le logging
+  ;(globalThis as any).__opencode_client = client
 
   return {
     // ── Enrichir record_decision avec les domaines connus ────────────────────
-    //
-    // input: { toolID }
-    // output: { description, parameters } — mutable
-    //
     "tool.definition": async (input: any, output: any) => {
       if (input.toolID !== "record_decision") return
       const domains = getSpecDomains()
@@ -280,10 +302,6 @@ export const SpecGenDecisionExtractor: Plugin = async ({ client }) => {
     },
 
     // ── Collecte des fichiers à analyser ─────────────────────────────────────
-    //
-    // input: { tool, sessionID, callID, args }
-    // output: { title, output, metadata }
-    //
     "tool.execute.after": async (input: any, output: any) => {
       const isFileWrite = [
         "write_file",
@@ -298,8 +316,6 @@ export const SpecGenDecisionExtractor: Plugin = async ({ client }) => {
 
       const score = scoreFromDepGraph(filePath)
 
-      // Fichier connu du graph avec score très faible : probablement pas architectural
-      // (inDegree=0, pageRank<0.1, fileScore<0.3) — on skip pour économiser un appel LLM
       if (
         score !== null &&
         score.inDegree === 0 &&
@@ -309,93 +325,37 @@ export const SpecGenDecisionExtractor: Plugin = async ({ client }) => {
         return
       }
 
-      // Enqueue pour analyse au prochain idle
-      pending.set(filePath, { content: output.output ?? "", score })
+      pending.set(filePath, { content: output.output ?? "", score, sessionID: input.sessionID ?? "" })
     },
 
     event: async ({ event }: any) => {
-      // ── Spawn Librarian sur idle de la session principale ─────────────────
-      //
-      // On attend que l'agent principal s'arrête pour lancer les analyses,
-      // évitant d'interférer avec son travail en cours.
-      //
-      if (event.type === "session.idle" && !librarianSessions.has(event.sessionID)) {
+      // ── Extraction sur idle : appel HTTP direct, pas de Librarian ────────
+      if (event.type === "session.idle") {
         if (pending.size === 0) return
 
-        for (const [filePath, { content, score }] of pending) {
+        const now = Date.now()
+        const sinceLastExtract = now - (lastExtract.get(event.sessionID) ?? 0)
+        if (sinceLastExtract < COOLDOWN_MS) return
+
+        const toProcess = [...pending.entries()]
+          .filter(([, { sessionID }]) => sessionID === event.sessionID)
+
+        if (toProcess.length === 0) return
+
+        lastExtract.set(event.sessionID, now)
+
+        for (const [filePath, { content, score, sessionID }] of toProcess) {
           pending.delete(filePath)
-
-          const prompt = buildPrompt(filePath, content, score)
-
-          try {
-            // Spawn une session Librarian.
-            // agent: "librarian" est le nom oh-my-openagent de l'agent léger
-            // de recherche/analyse. Il a accès au MCP spec-gen et peut appeler
-            // record_decision directement, sans qu'on ait à parser sa réponse.
-            const res = await (client as any).session.create({
-              body: {
-                agent: "librarian",
-                // Titre lisible dans l'UI OpenCode
-                title: `[spec-gen] decision-check: ${filePath.split("/").pop()}`,
-              },
-            })
-
-            const libSessionId: string | undefined = res?.data?.id ?? res?.id
-            if (!libSessionId) {
-              // Librarian non disponible → fallback HTTP
-              await fallbackExtract(filePath, content)
-              continue
-            }
-
-            librarianSessions.set(libSessionId, filePath)
-
-            await (client as any).session.prompt({
-              path: { id: libSessionId },
-              body: { parts: [{ type: "text", text: prompt }] },
-            })
-
-            await client.app.log({
-              body: {
-                service: "decision-extractor",
-                level: "info",
-                message: `Librarian session ${libSessionId} analyzing ${filePath}`,
-              },
-            })
-          } catch {
-            // Fallback si oh-my-openagent / agent "librarian" non disponible
-            await fallbackExtract(filePath, content)
-          }
+          await extractAndRecord(filePath, content, score, sessionID)
         }
         return
       }
 
-      // ── Nettoyage des sessions Librarian terminées ────────────────────────
-      if (event.type === "session.idle" && librarianSessions.has(event.sessionID)) {
-        const filePath = librarianSessions.get(event.sessionID)!
-        librarianSessions.delete(event.sessionID)
-
-        await client.app.log({
-          body: {
-            service: "decision-extractor",
-            level: "info",
-            message: `Librarian done for ${filePath} — session ${event.sessionID}`,
-          },
-        })
-
-        // Supprimer la session Librarian pour ne pas polluer l'historique
-        try {
-          await (client as any).session.delete({
-            path: { id: event.sessionID },
-          })
-        } catch {
-          // Non-bloquant
-        }
-        return
-      }
-
-      // Nettoyage si session principale supprimée
       if (event.type === "session.deleted") {
-        pending.clear()
+        for (const [filePath, { sessionID }] of pending) {
+          if (sessionID === event.sessionID) pending.delete(filePath)
+        }
+        lastExtract.delete(event.sessionID)
       }
     },
   }

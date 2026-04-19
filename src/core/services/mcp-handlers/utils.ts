@@ -6,6 +6,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
 import { ANALYSIS_STALE_THRESHOLD_MS, SPEC_GEN_DIR, SPEC_GEN_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
+import { logger } from '../../../utils/logger.js';
 
 /**
  * Resolve and validate a user-supplied directory path.
@@ -15,23 +16,30 @@ import { ANALYSIS_STALE_THRESHOLD_MS, SPEC_GEN_DIR, SPEC_GEN_ANALYSIS_SUBDIR, AR
  * file path instead of a project directory.
  */
 export async function validateDirectory(directory: string): Promise<string> {
+  logger.debug(`Validating directory: ${directory}`);
   return validateDirectoryImpl(directory);
 }
 
 export async function validateDirectoryImpl(directory: string): Promise<string> {
   if (!directory || typeof directory !== 'string') {
+    logger.warning('Directory validation failed: directory parameter is required and must be a string');
     throw new Error('directory parameter is required and must be a string');
   }
   const absDir = resolve(directory);
+  logger.debug(`Resolved directory path: ${absDir}`);
+
   let s: Awaited<ReturnType<typeof stat>>;
   try {
     s = await stat(absDir);
   } catch {
+    logger.error(`Directory validation failed: Directory not found: ${absDir}`);
     throw new Error(`Directory not found: ${absDir}`);
   }
   if (!s.isDirectory()) {
+    logger.error(`Directory validation failed: Not a directory: ${absDir}`);
     throw new Error(`Not a directory: ${absDir}`);
   }
+  logger.success(`Successfully validated directory: ${absDir}`);
   return absDir;
 }
 

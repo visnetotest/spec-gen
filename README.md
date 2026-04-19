@@ -825,7 +825,7 @@ spec-gen analyze [options]
 
 ```bash
 spec-gen setup [options]
-  --tools <list>   Comma-separated tools to install: vibe, cline, claude, opencode, gsd, bmad (default: interactive prompt)
+  --tools <list>   Comma-separated tools to install: vibe, cline, claude, opencode, gsd, bmad, omoa (default: interactive prompt)
   --force          Overwrite existing files (use after upgrading spec-gen)
   --dir <path>     Project root directory (default: current directory)
 ```
@@ -842,6 +842,9 @@ Files installed:
 | `opencode` | `.opencode/skills/spec-gen-{name}/SKILL.md` + `.opencode/plugins/agent-guard.ts` | 8 skills + guard plugin |
 | `gsd` | `.claude/commands/gsd/spec-gen-{name}.md` | 2 commands |
 | `bmad` | `_bmad/spec-gen/{agents,tasks}/` | 2 agents, 4 tasks |
+| `omoa` | `.opencode/plugins/` + `.opencode/prompts/` | 4 SDD plugins + Sisyphus prompt (oh-my-openagent) |
+
+The `omoa` option is **auto-detected and pre-checked** in the interactive prompt when oh-my-openagent is found in the project or user config.
 
 Never overwrites existing files. Combine with `analyze --ai-configs` for a complete agent setup:
 
@@ -954,13 +957,16 @@ spec-gen setup                   # install workflow skills
 **`spec-gen setup`** copies static workflow assets from the spec-gen package that are identical across all projects. Run once at onboarding; re-run after upgrading spec-gen to get new or updated skills.
 
 ```
-spec-gen setup [--tools vibe,cline,claude,opencode,gsd,bmad]
+spec-gen setup [--tools vibe,cline,claude,opencode,omoa,gsd,bmad]
 
 Mistral Vibe  ->  .vibe/skills/spec-gen-{name}/SKILL.md       (8 skills)
 Cline / Roo   ->  .clinerules/workflows/spec-gen-{name}.md    (7 workflows)
 Claude Code   ->  .claude/skills/spec-gen-{name}/SKILL.md     (8 skills + decisions pre-commit hook)
 OpenCode      ->  .opencode/skills/spec-gen-{name}/SKILL.md   (8 skills)
               ->  .opencode/plugins/agent-guard.ts             (guard plugin)
+oh-my-openagent -> .opencode/plugins/{anti-laziness,spec-gen-enforcer,
+              ->                      spec-gen-decision-extractor,spec-gen-context-injector}.ts
+              ->  .opencode/prompts/sisyphus-sdd.md            (SDD system prompt)
 GSD           ->  .claude/commands/gsd/spec-gen-{name}.md     (2 commands)
 BMAD          ->  _bmad/spec-gen/{agents,tasks}/               (2 agents, 4 tasks)
 ```
@@ -1070,6 +1076,23 @@ The plugin does four things at runtime, with no LLM calls of its own:
 | `tool.execute.after` | Appends a `record_decision` nudge to the output of any write/edit that touches a structural file (`service/`, `domain/`, `core/`, `adapter/`). |
 | `experimental.session.compacting` | Injects pending decisions into the compaction context so they survive session summarisation. |
 | `tool.definition` | Enriches the `record_decision` tool description with the known spec domains for the current project. |
+
+**oh-my-openagent (SDD plugins)** — install four SDD-enforcement plugins for the [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) multi-model orchestration framework:
+
+```bash
+spec-gen setup --tools omoa
+```
+
+`setup` auto-detects an existing OMOA config and pre-checks the option. It installs four plugins into `.opencode/plugins/` and a system prompt into `.opencode/prompts/`:
+
+| Plugin | Behaviour |
+|--------|-----------|
+| `spec-gen-context-injector.ts` | Injects a compact OpenSpec domain index into every turn (`experimental.chat.system.transform`). At session compaction, injects the full content of active-domain specs to preserve architectural contracts across summarisation. Tracks which domains the agent touched via `tool.execute.after`. |
+| `spec-gen-enforcer.ts` | Adds a `record_decision` nudge when the agent writes structural files. Injects pending decisions at compaction. Checks the spec-drift gate on `session.idle`. |
+| `spec-gen-decision-extractor.ts` | On `session.idle`, spawns an OMOA Librarian sub-session to extract architectural decisions from the conversation and record them via `spec-gen decisions`. Falls back to a plain OpenAI-compatible HTTP call if Librarian is unavailable. Skips extraction for low-centrality files using the dependency-graph scores in `.spec-gen/analysis/dependency-graph.json`. |
+| `anti-laziness.ts` | Detects incomplete responses ("I'll let you handle…", "not possible") via `todo.updated` and `experimental.session.compacting`; reminds the agent to complete the task fully. |
+
+Wire the SDD prompt into your OMOA config's `prompt_append` for the Sisyphus agent so it inherits the full SDD workflow on every session start.
 
 ---
 
