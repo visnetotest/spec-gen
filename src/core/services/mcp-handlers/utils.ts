@@ -156,8 +156,18 @@ export interface MappingIndex {
   entries: MappingEntry[];
 }
 
+/** Cache for mapping indices, keyed by directory path */
+const mappingCache = new Map<string, MappingIndex>();
+
 /** Load and index mapping.json for bidirectional lookup. Returns null if not found. */
 export async function loadMappingIndex(absDir: string, retryCount: number = 1): Promise<MappingIndex | null> {
+  // Check cache first
+  const cacheKey = absDir;
+  const cached = mappingCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
   const loadAttempt = async (attempt: number): Promise<MappingIndex | null> => {
     try {
       const raw = await readFile(join(absDir, '.spec-gen', 'analysis', 'mapping.json'), 'utf-8');
@@ -183,7 +193,10 @@ export async function loadMappingIndex(absDir: string, retryCount: number = 1): 
         }
       }
       
-      return { byFile, byDomain, entries };
+      const result = { byFile, byDomain, entries };
+      // Cache the result
+      mappingCache.set(cacheKey, result);
+      return result;
     } catch (error) {
       if (attempt < retryCount && error instanceof Error) {
         const delay = Math.pow(2, attempt) * 100; // Exponential backoff: 200ms, 400ms, 800ms...
@@ -195,6 +208,11 @@ export async function loadMappingIndex(absDir: string, retryCount: number = 1): 
   };
   
   return loadAttempt(1);
+}
+
+/** Clear the mapping cache. Useful for tests to reset state. */
+export function clearMappingCache(): void {
+  mappingCache.clear();
 }
 
 /** Summarise which specs cover a given file path (for search_code enrichment). */
