@@ -18,134 +18,91 @@
  * Placer dans : .opencode/plugins/spec-gen-decision-extractor.ts
  */
 
-import { execSync } from "child_process"
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs"
-import { join } from "path"
-import { createHash } from "crypto"
-import type { Plugin } from "@opencode-ai/plugin"
+import { execSync } from 'child_process';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { join } from 'path';
+import { createHash } from 'crypto';
+import type { Plugin } from '@opencode-ai/plugin';
+import {
+  scoreFromDepGraph,
+  HUB_INDEGREE,
+  HIGH_PAGERANK,
+  HIGH_FILE_SCORE,
+} from './spec-gen-decision-extractor-helpers.js';
+import type { FileScore } from './spec-gen-decision-extractor-helpers.js';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const EXTRACT_BASE_URL = process.env.OPENAI_BASE_URL ?? "https://codestral.mistral.ai/v1"
-const EXTRACT_API_KEY = process.env.OPENAI_API_KEY ?? process.env.MISTRAL_API_KEY ?? ""
-const EXTRACT_MODEL = process.env.OPENAI_MODEL_EXTRACTOR ?? "devstral-small-latest"
+const EXTRACT_BASE_URL = process.env.OPENAI_BASE_URL ?? 'https://codestral.mistral.ai/v1';
+const EXTRACT_API_KEY = process.env.OPENAI_API_KEY ?? process.env.MISTRAL_API_KEY ?? '';
+const EXTRACT_MODEL = process.env.OPENAI_MODEL_EXTRACTOR ?? 'devstral-small-latest';
 
-const SPEC_GEN_BIN = resolveSpecGen()
+const SPEC_GEN_BIN = resolveSpecGen();
 
 function resolveSpecGen(): string {
-  for (const c of ["node_modules/.bin/spec-gen", "dist/cli/index.js"]) {
+  for (const c of ['node_modules/.bin/spec-gen', 'dist/cli/index.js']) {
     try {
-      execSync(`test -f ${c}`, { stdio: "pipe" })
-      return c.endsWith(".js") ? `node ${c}` : c
+      execSync(`test -f ${c}`, { stdio: 'pipe' });
+      return c.endsWith('.js') ? `node ${c}` : c;
     } catch {}
   }
-  return "spec-gen"
+  return 'spec-gen';
 }
 
 // Fichiers source à surveiller
-const SOURCE_PATTERN = /\.(ts|tsx|js|jsx|py|go|rs|rb|java|cpp|c|h)$/
+const SOURCE_PATTERN = /\.(ts|tsx|js|jsx|py|go|rs|rb|java|cpp|c|h)$/;
 const SKIP_PATTERN =
-  /\.(test|spec|stories|mock|fixture)\.[jt]sx?$|\.d\.ts$|\.lock$|\.json$|\.ya?ml$|\.md$|\.env$/
-
-// Seuils de scoring pour le pre-filtrage dep-graph
-// Un fichier est "définitivement architectural" si l'un des critères est vrai
-const HUB_INDEGREE = 3       // ≥ 3 fichiers l'importent
-const HIGH_PAGERANK = 0.4    // PageRank normalisé ≥ 40%
-const HIGH_FILE_SCORE = 0.65 // Significance score ≥ 65%
+  /\.(test|spec|stories|mock|fixture)\.[jt]sx?$|\.d\.ts$|\.lock$|\.json$|\.ya?ml$|\.md$|\.env$/;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function parseJSON<T>(raw: string): T | null {
   try {
-    return JSON.parse(raw.replace(/```json|```/g, "").trim())
+    return JSON.parse(raw.replace(/```json|```/g, '').trim());
   } catch {
-    return null
+    return null;
   }
 }
 
 function run(args: string): string {
   try {
     return execSync(`${SPEC_GEN_BIN} ${args}`, {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    })
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
   } catch (e: any) {
-    return e.stdout ?? ""
+    return e.stdout ?? '';
   }
 }
 
 function getActiveDecisions(): any[] {
-  return parseJSON<any[]>(run("decisions --list --json")) ?? []
+  return parseJSON<any[]>(run('decisions --list --json')) ?? [];
 }
 
 function getSpecDomains(): string[] {
   try {
-    return execSync("ls openspec/specs/", {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
+    return execSync('ls openspec/specs/', {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
-      .split("\n")
-      .filter(Boolean)
+      .split('\n')
+      .filter(Boolean);
   } catch {
-    return []
+    return [];
   }
 }
 
 function isSource(filePath: string): boolean {
-  return SOURCE_PATTERN.test(filePath) && !SKIP_PATTERN.test(filePath)
+  return SOURCE_PATTERN.test(filePath) && !SKIP_PATTERN.test(filePath);
 }
 
 function alreadyCovered(filePath: string): boolean {
-  return getActiveDecisions().some(d => (d.affectedFiles ?? []).includes(filePath))
-}
-
-// ─── Dep-graph scoring ───────────────────────────────────────────────────────
-
-interface FileScore {
-  inDegree: number
-  pageRank: number
-  fileScore: number
-  isHub: boolean
-}
-
-/**
- * Read the dep-graph and score a file by its structural centrality.
- * Returns null if the file is not in the graph (new file — treat as unknown).
- * Exported for testing.
- */
-function scoreFromDepGraph(filePath: string, rootDir = process.cwd()): FileScore | null {
-  try {
-    const raw = readFileSync(
-      join(rootDir, ".spec-gen", "analysis", "dependency-graph.json"),
-      "utf-8",
-    )
-    const graph = JSON.parse(raw)
-    const nodes: any[] = graph.nodes ?? []
-
-    // Match by relative path or absolute path suffix
-    const node = nodes.find(
-      n => n.file?.path === filePath || n.id === filePath || n.file?.path?.endsWith(filePath),
-    )
-    if (!node) return null
-
-    const inDegree: number = node.metrics?.inDegree ?? 0
-    const pageRank: number = node.metrics?.pageRank ?? 0
-    const fileScore: number = node.file?.score ?? 0
-
-    return {
-      inDegree,
-      pageRank,
-      fileScore,
-      isHub: inDegree >= HUB_INDEGREE || pageRank >= HIGH_PAGERANK || fileScore >= HIGH_FILE_SCORE,
-    }
-  } catch {
-    return null
-  }
+  return getActiveDecisions().some((d) => (d.affectedFiles ?? []).includes(filePath));
 }
 
 // Prompt envoyé au Librarian (ou au fallback LLM)
 function buildPrompt(filePath: string, content: string, score: FileScore | null): string {
-  const domains = getSpecDomains()
+  const domains = getSpecDomains();
 
   const scoreContext = score
     ? [
@@ -156,14 +113,14 @@ function buildPrompt(filePath: string, content: string, score: FileScore | null)
         score.isHub
           ? `  → This is a HUB file. Lean toward recording a decision.`
           : `  → Low centrality. Only record if clearly architectural.`,
-      ].join("\n")
-    : `STRUCTURAL CONTEXT: File not found in dep-graph (new file — treat as potentially architectural).`
+      ].join('\n')
+    : `STRUCTURAL CONTEXT: File not found in dep-graph (new file — treat as potentially architectural).`;
 
   return [
     `You are an architectural decision detector for a spec-driven development project.`,
     ``,
     `FILE: ${filePath}`,
-    `KNOWN SPEC DOMAINS: ${domains.join(", ") || "unknown"}`,
+    `KNOWN SPEC DOMAINS: ${domains.join(', ') || 'unknown'}`,
     ``,
     scoreContext,
     ``,
@@ -188,89 +145,89 @@ function buildPrompt(filePath: string, content: string, score: FileScore | null)
     `If NOT architectural: respond with ONLY the string: NOT_ARCHITECTURAL`,
     ``,
     `Do not call any tools. Do not explain. Respond with JSON or NOT_ARCHITECTURAL only.`,
-  ].join("\n")
+  ].join('\n');
 }
 
 // ─── Extraction HTTP + écriture pending.json ─────────────────────────────────
 
 function writeToPending(decision: any, sessionId: string, rootDir = process.cwd()): void {
-  const dir = join(rootDir, ".spec-gen", "decisions")
-  const file = join(dir, "pending.json")
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  const dir = join(rootDir, '.spec-gen', 'decisions');
+  const file = join(dir, 'pending.json');
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
   const store = existsSync(file)
-    ? parseJSON<any>(readFileSync(file, "utf-8")) ?? { version: "1", decisions: [] }
-    : { version: "1", decisions: [] }
+    ? (parseJSON<any>(readFileSync(file, 'utf-8')) ?? { version: '1', decisions: [] })
+    : { version: '1', decisions: [] };
 
-  const id = createHash("sha256")
+  const id = createHash('sha256')
     .update(`${sessionId}:${decision.title}`)
-    .digest("hex")
-    .slice(0, 8)
+    .digest('hex')
+    .slice(0, 8);
 
   store.decisions.push({
     id,
-    status: "draft",
+    status: 'draft',
     title: decision.title,
     rationale: decision.rationale,
-    consequences: decision.consequences ?? "",
+    consequences: decision.consequences ?? '',
     proposedRequirement: null,
     affectedDomains: decision.affectedDomains ?? [],
     affectedFiles: decision.affectedFiles ?? [],
-    confidence: "medium",
+    confidence: 'medium',
     sessionId,
     recordedAt: new Date().toISOString(),
     syncedToSpecs: [],
-  })
+  });
 
-  store.updatedAt = new Date().toISOString()
-  store.sessionId = sessionId
-  writeFileSync(file, JSON.stringify(store, null, 2))
+  store.updatedAt = new Date().toISOString();
+  store.sessionId = sessionId;
+  writeFileSync(file, JSON.stringify(store, null, 2));
 }
 
 async function extractAndRecord(
   filePath: string,
   content: string,
   score: FileScore | null,
-  sessionId: string,
+  sessionId: string
 ): Promise<void> {
-  if (!EXTRACT_API_KEY) return
+  if (!EXTRACT_API_KEY) return;
 
-  const prompt = buildPrompt(filePath, content, score)
+  const prompt = buildPrompt(filePath, content, score);
 
   try {
     const res = await fetch(`${EXTRACT_BASE_URL}/chat/completions`, {
-      method: "POST",
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
+        'Content-Type': 'application/json',
         Authorization: `Bearer ${EXTRACT_API_KEY}`,
       },
       body: JSON.stringify({
         model: EXTRACT_MODEL,
-        messages: [{ role: "user", content: prompt }],
+        messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
         max_tokens: 300,
       }),
-    })
+    });
 
-    if (!res.ok) return
+    if (!res.ok) return;
 
-    const data = await res.json()
-    const text: string = (data?.choices?.[0]?.message?.content ?? "").trim()
+    const data = await res.json();
+    const text: string = (data?.choices?.[0]?.message?.content ?? '').trim();
 
-    if (text === "NOT_ARCHITECTURAL" || text.startsWith("NOT_ARCHITECTURAL")) return
+    if (text === 'NOT_ARCHITECTURAL' || text.startsWith('NOT_ARCHITECTURAL')) return;
 
-    const decision = parseJSON<any>(text)
-    if (!decision?.title) return
+    const decision = parseJSON<any>(text);
+    if (!decision?.title) return;
 
-    writeToPending(decision, sessionId)
+    writeToPending(decision, sessionId);
 
     await (globalThis as any).__opencode_client?.app?.log?.({
       body: {
-        service: "decision-extractor",
-        level: "info",
+        service: 'decision-extractor',
+        level: 'info',
         message: `Decision recorded for ${filePath}: "${decision.title}"`,
       },
-    })
+    });
   } catch {
     // Non-bloquant
   }
@@ -278,88 +235,88 @@ async function extractAndRecord(
 
 // ─── Plugin ──────────────────────────────────────────────────────────────────
 
-const COOLDOWN_MS = 5 * 60 * 1000 // 5 minutes entre deux spawns Librarian par session
+const COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes entre deux spawns Librarian par session
 
 export const SpecGenDecisionExtractor: Plugin = async ({ client }) => {
   // Fichiers en attente d'analyse : filePath → { content, score, sessionID }
-  const pending = new Map<string, { content: string; score: FileScore | null; sessionID: string }>()
+  const pending = new Map<
+    string,
+    { content: string; score: FileScore | null; sessionID: string }
+  >();
 
   // Cooldown par sessionID : timestamp du dernier appel d'extraction
-  const lastExtract = new Map<string, number>()
+  const lastExtract = new Map<string, number>();
 
   // Rendre le client accessible dans extractAndRecord pour le logging
-  ;(globalThis as any).__opencode_client = client
+  (globalThis as any).__opencode_client = client;
 
   return {
     // ── Enrichir record_decision avec les domaines connus ────────────────────
-    "tool.definition": async (input: any, output: any) => {
-      if (input.toolID !== "record_decision") return
-      const domains = getSpecDomains()
-      if (domains.length === 0) return
+    'tool.definition': async (input: any, output: any) => {
+      if (input.toolID !== 'record_decision') return;
+      const domains = getSpecDomains();
+      if (domains.length === 0) return;
       output.description =
-        (output.description ?? "") +
-        `\n\nKnown spec domains: ${domains.join(", ")}. Use these exact names in affectedDomains.`
+        (output.description ?? '') +
+        `\n\nKnown spec domains: ${domains.join(', ')}. Use these exact names in affectedDomains.`;
     },
 
     // ── Collecte des fichiers à analyser ─────────────────────────────────────
-    "tool.execute.after": async (input: any, output: any) => {
+    'tool.execute.after': async (input: any, output: any) => {
       const isFileWrite = [
-        "write_file",
-        "create_file",
-        "str_replace_based_edit_tool",
-        "edit",
-      ].includes(input.tool)
-      if (!isFileWrite) return
+        'write_file',
+        'create_file',
+        'str_replace_based_edit_tool',
+        'edit',
+      ].includes(input.tool);
+      if (!isFileWrite) return;
 
-      const filePath: string = input.args?.filePath ?? input.args?.path ?? input.args?.file_path ?? ""
-      if (!filePath || !isSource(filePath) || alreadyCovered(filePath)) return
+      const filePath: string =
+        input.args?.filePath ?? input.args?.path ?? input.args?.file_path ?? '';
+      if (!filePath || !isSource(filePath) || alreadyCovered(filePath)) return;
 
-      const score = scoreFromDepGraph(filePath)
+      const score = scoreFromDepGraph(filePath);
 
-      if (
-        score !== null &&
-        score.inDegree === 0 &&
-        score.pageRank < 0.1 &&
-        score.fileScore < 0.3
-      ) {
-        return
+      if (score !== null && score.inDegree === 0 && score.pageRank < 0.1 && score.fileScore < 0.3) {
+        return;
       }
 
-      let content = ""
-      try { content = readFileSync(filePath, "utf-8") } catch {}
-      pending.set(filePath, { content, score, sessionID: input.sessionID ?? "" })
+      let content = '';
+      try {
+        content = readFileSync(filePath, 'utf-8');
+      } catch {}
+      pending.set(filePath, { content, score, sessionID: input.sessionID ?? '' });
     },
 
     event: async ({ event }: any) => {
       // ── Extraction sur idle : appel HTTP direct, pas de Librarian ────────
-      const sid: string = event.properties?.sessionID ?? event.sessionID ?? ""
-      if (event.type === "session.idle") {
-        if (pending.size === 0) return
+      const sid: string = event.properties?.sessionID ?? event.sessionID ?? '';
+      if (event.type === 'session.idle') {
+        if (pending.size === 0) return;
 
-        const now = Date.now()
-        const sinceLastExtract = now - (lastExtract.get(sid) ?? 0)
-        if (sinceLastExtract < COOLDOWN_MS) return
+        const now = Date.now();
+        const sinceLastExtract = now - (lastExtract.get(sid) ?? 0);
+        if (sinceLastExtract < COOLDOWN_MS) return;
 
-        const toProcess = [...pending.entries()]
-          .filter(([, { sessionID }]) => sessionID === sid)
+        const toProcess = [...pending.entries()].filter(([, { sessionID }]) => sessionID === sid);
 
-        if (toProcess.length === 0) return
+        if (toProcess.length === 0) return;
 
-        lastExtract.set(sid, now)
+        lastExtract.set(sid, now);
 
         for (const [filePath, { content, score, sessionID }] of toProcess) {
-          pending.delete(filePath)
-          await extractAndRecord(filePath, content, score, sessionID)
+          pending.delete(filePath);
+          await extractAndRecord(filePath, content, score, sessionID);
         }
-        return
+        return;
       }
 
-      if (event.type === "session.deleted") {
+      if (event.type === 'session.deleted') {
         for (const [filePath, { sessionID }] of pending) {
-          if (sessionID === sid) pending.delete(filePath)
+          if (sessionID === sid) pending.delete(filePath);
         }
-        lastExtract.delete(sid)
+        lastExtract.delete(sid);
       }
     },
-  }
-}
+  };
+};

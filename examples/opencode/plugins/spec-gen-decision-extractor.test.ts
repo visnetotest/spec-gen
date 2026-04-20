@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { scoreFromDepGraph } from './spec-gen-decision-extractor.js';
+import { scoreFromDepGraph } from './spec-gen-decision-extractor-helpers.js';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -43,10 +43,7 @@ describe('scoreFromDepGraph', () => {
   });
 
   it('returns null when dependency-graph.json is invalid JSON', async () => {
-    await writeFile(
-      join(tmpDir, '.spec-gen', 'analysis', 'dependency-graph.json'),
-      'not json',
-    );
+    await writeFile(join(tmpDir, '.spec-gen', 'analysis', 'dependency-graph.json'), 'not json');
     const result = scoreFromDepGraph('src/foo.ts', tmpDir);
     expect(result).toBeNull();
   });
@@ -54,7 +51,7 @@ describe('scoreFromDepGraph', () => {
   it('returns null when file is not in the graph', async () => {
     await writeFile(
       join(tmpDir, '.spec-gen', 'analysis', 'dependency-graph.json'),
-      JSON.stringify(makeDepGraph([makeNode('src/other.ts')])),
+      JSON.stringify(makeDepGraph([makeNode('src/other.ts')]))
     );
     const result = scoreFromDepGraph('src/foo.ts', tmpDir);
     expect(result).toBeNull();
@@ -63,7 +60,7 @@ describe('scoreFromDepGraph', () => {
   it('finds a node by exact path', async () => {
     await writeFile(
       join(tmpDir, '.spec-gen', 'analysis', 'dependency-graph.json'),
-      JSON.stringify(makeDepGraph([makeNode('src/foo.ts', 2, 0.3, 0.5)])),
+      JSON.stringify(makeDepGraph([makeNode('src/foo.ts', 2, 0.3, 0.5)]))
     );
     const result = scoreFromDepGraph('src/foo.ts', tmpDir);
     expect(result).not.toBeNull();
@@ -75,7 +72,7 @@ describe('scoreFromDepGraph', () => {
   it('finds a node by path suffix', async () => {
     await writeFile(
       join(tmpDir, '.spec-gen', 'analysis', 'dependency-graph.json'),
-      JSON.stringify(makeDepGraph([makeNode('/absolute/project/src/foo.ts', 1, 0.2, 0.4)])),
+      JSON.stringify(makeDepGraph([makeNode('/absolute/project/src/foo.ts', 1, 0.2, 0.4)]))
     );
     const result = scoreFromDepGraph('src/foo.ts', tmpDir);
     expect(result).not.toBeNull();
@@ -85,7 +82,7 @@ describe('scoreFromDepGraph', () => {
   it('marks a node as hub when inDegree is high', async () => {
     await writeFile(
       join(tmpDir, '.spec-gen', 'analysis', 'dependency-graph.json'),
-      JSON.stringify(makeDepGraph([makeNode('src/hub.ts', 5, 0.1, 0.2)])),
+      JSON.stringify(makeDepGraph([makeNode('src/hub.ts', 5, 0.1, 0.2)]))
     );
     const result = scoreFromDepGraph('src/hub.ts', tmpDir);
     expect(result!.isHub).toBe(true);
@@ -94,7 +91,7 @@ describe('scoreFromDepGraph', () => {
   it('marks a node as hub when pageRank is high', async () => {
     await writeFile(
       join(tmpDir, '.spec-gen', 'analysis', 'dependency-graph.json'),
-      JSON.stringify(makeDepGraph([makeNode('src/central.ts', 0, 0.6, 0.2)])),
+      JSON.stringify(makeDepGraph([makeNode('src/central.ts', 0, 0.6, 0.2)]))
     );
     const result = scoreFromDepGraph('src/central.ts', tmpDir);
     expect(result!.isHub).toBe(true);
@@ -103,7 +100,7 @@ describe('scoreFromDepGraph', () => {
   it('marks a node as hub when fileScore is high', async () => {
     await writeFile(
       join(tmpDir, '.spec-gen', 'analysis', 'dependency-graph.json'),
-      JSON.stringify(makeDepGraph([makeNode('src/important.ts', 0, 0.1, 0.8)])),
+      JSON.stringify(makeDepGraph([makeNode('src/important.ts', 0, 0.1, 0.8)]))
     );
     const result = scoreFromDepGraph('src/important.ts', tmpDir);
     expect(result!.isHub).toBe(true);
@@ -112,7 +109,7 @@ describe('scoreFromDepGraph', () => {
   it('does not mark a low-centrality node as hub', async () => {
     await writeFile(
       join(tmpDir, '.spec-gen', 'analysis', 'dependency-graph.json'),
-      JSON.stringify(makeDepGraph([makeNode('src/leaf.ts', 0, 0.05, 0.1)])),
+      JSON.stringify(makeDepGraph([makeNode('src/leaf.ts', 0, 0.05, 0.1)]))
     );
     const result = scoreFromDepGraph('src/leaf.ts', tmpDir);
     expect(result!.isHub).toBe(false);
@@ -122,7 +119,7 @@ describe('scoreFromDepGraph', () => {
     const node = { id: 'src/bare.ts', file: { path: 'src/bare.ts' }, exports: [] };
     await writeFile(
       join(tmpDir, '.spec-gen', 'analysis', 'dependency-graph.json'),
-      JSON.stringify(makeDepGraph([node])),
+      JSON.stringify(makeDepGraph([node]))
     );
     const result = scoreFromDepGraph('src/bare.ts', tmpDir);
     expect(result).not.toBeNull();
