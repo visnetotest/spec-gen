@@ -276,7 +276,7 @@ export function analyzeForRefactoring(
   mappings?: MappingEntry[],
   duplicates?: DuplicateDetectionResult
 ): RefactorReport {
-  const nodes = callGraph.nodes;
+  const nodes = callGraph.nodes.filter(n => !n.isExternal);
   const edges = callGraph.edges;
 
   // Build requirement reverse index: functionKey → requirement names

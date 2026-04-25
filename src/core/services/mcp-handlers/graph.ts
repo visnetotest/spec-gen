@@ -46,6 +46,9 @@ import { readSpecGenConfig } from '../config-manager.js';
 /**
  * Build forward (caller→callees) and backward (callee→callers) adjacency maps
  * from a serialised call graph, returning both maps and a node lookup.
+ *
+ * Includes inheritance edges: parent class methods point forward to all child
+ * class methods so blast-radius BFS propagates through the class hierarchy.
  */
 export function buildAdjacency(cg: SerializedCallGraph) {
   const nodeMap = new Map(cg.nodes.map(n => [n.id, n]));
@@ -58,9 +61,32 @@ export function buildAdjacency(cg: SerializedCallGraph) {
   }
   for (const e of cg.edges) {
     if (!e.calleeId) continue;
+    // Ensure external nodes (not in cg.nodes) get adjacency entries
+    if (!forward.has(e.calleeId))  forward.set(e.calleeId,  new Set());
+    if (!backward.has(e.calleeId)) backward.set(e.calleeId, new Set());
     forward.get(e.callerId)?.add(e.calleeId);
     backward.get(e.calleeId)?.add(e.callerId);
   }
+
+  // Expand class-level inheritance: parent method → child method
+  // (changing a parent propagates blast radius to all child class methods)
+  const classMap = new Map((cg.classes ?? []).map(c => [c.id, c]));
+  for (const ie of (cg.inheritanceEdges ?? [])) {
+    const parentClass = classMap.get(ie.parentId);
+    const childClass  = classMap.get(ie.childId);
+    if (!parentClass || !childClass) continue;
+    // Guard against N×M explosion on large classes
+    if (parentClass.methodIds.length * childClass.methodIds.length > 200) continue;
+    for (const parentMethodId of parentClass.methodIds) {
+      if (!forward.has(parentMethodId)) forward.set(parentMethodId, new Set());
+      for (const childMethodId of childClass.methodIds) {
+        if (!backward.has(childMethodId)) backward.set(childMethodId, new Set());
+        forward.get(parentMethodId)!.add(childMethodId);
+        backward.get(childMethodId)!.add(parentMethodId);
+      }
+    }
+  }
+
   return { nodeMap, forward, backward };
 }
 
@@ -210,6 +236,7 @@ export async function handleGetSubgraph(
 
   const cg = ctx.callGraph as SerializedCallGraph;
   const lower = functionName.toLowerCase();
+  // cg.nodes includes external synthetic nodes (isExternal: true) added during analysis
   let seeds = cg.nodes.filter(n => n.name.toLowerCase().includes(lower));
 
   // Fallback to semantic search if no exact substring match
@@ -239,14 +266,10 @@ export async function handleGetSubgraph(
 
   if (seeds.length === 0) return { error: `No function matching "${functionName}" found in call graph.` };
 
-  const forward = new Map<string, string[]>();
-  const backward = new Map<string, string[]>();
-  for (const node of cg.nodes) { forward.set(node.id, []); backward.set(node.id, []); }
-  for (const edge of cg.edges) {
-    if (!edge.calleeId) continue;
-    forward.get(edge.callerId)?.push(edge.calleeId);
-    backward.get(edge.calleeId)?.push(edge.callerId);
-  }
+  // Use shared buildAdjacency so inheritance edges are included in traversal
+  const { forward: fwdSets, backward: bwdSets } = buildAdjacency(cg);
+  const forward  = new Map([...fwdSets].map(([k, v]) => [k, [...v]]));
+  const backward = new Map([...bwdSets].map(([k, v]) => [k, [...v]]));
 
   const visitedIds = new Set<string>();
   const queue: Array<{ id: string; depth: number }> = seeds.map(n => ({ id: n.id, depth: 0 }));
@@ -267,9 +290,15 @@ export async function handleGetSubgraph(
   const subNodes = Array.from(visitedIds)
     .map(id => nodeMap.get(id)!)
     .filter(Boolean)
+    // stdlib nodes (Array.isArray, t.slice, …) are noise — exclude unless they are a seed
+    .filter(n => !n.isExternal || n.externalKind !== 'stdlib' || seeds.some(s => s.id === n.id))
     .map(n => ({
-      name: n.name, file: n.filePath, className: n.className,
+      name: n.isExternal ? `[external] ${n.name}` : n.name,
+      file: n.filePath,
+      className: n.className,
       fanIn: n.fanIn, fanOut: n.fanOut, language: n.language,
+      isExternal: n.isExternal ?? false,
+      externalKind: n.externalKind,
       isSeed: seeds.some(s => s.id === n.id),
     }));
 
@@ -277,9 +306,13 @@ export async function handleGetSubgraph(
     .filter(e => e.calleeId && visitedIds.has(e.callerId) && visitedIds.has(e.calleeId))
     .map(e => ({
       caller: nodeMap.get(e.callerId)?.name ?? e.callerId,
-      callee: nodeMap.get(e.calleeId)?.name ?? e.calleeId,
+      callee: nodeMap.get(e.calleeId)?.isExternal
+        ? `[external] ${nodeMap.get(e.calleeId)?.name ?? e.calleeId}`
+        : (nodeMap.get(e.calleeId)?.name ?? e.calleeId),
       callerFile: nodeMap.get(e.callerId)?.filePath,
       calleeFile: nodeMap.get(e.calleeId)?.filePath,
+      kind: e.kind ?? 'calls',
+      callType: e.callType,
     }));
 
   if (format === 'mermaid') {
@@ -468,7 +501,7 @@ export async function handleGetLeafFunctions(
 
   const cg = ctx.callGraph as SerializedCallGraph;
   const hasOutgoing = new Set(cg.edges.filter(e => e.calleeId).map(e => e.callerId));
-  let leaves = cg.nodes.filter(n => !hasOutgoing.has(n.id));
+  let leaves = cg.nodes.filter(n => !n.isExternal && !hasOutgoing.has(n.id));
 
   if (filePattern) leaves = leaves.filter(n => n.filePath.includes(filePattern));
 
@@ -518,7 +551,7 @@ export async function handleGetCriticalHubs(
   );
 
   const hubs = cg.nodes
-    .filter(n => (n.fanIn ?? 0) >= minFanIn)
+    .filter(n => !n.isExternal && (n.fanIn ?? 0) >= minFanIn)
     .map(n => {
       const fanIn        = n.fanIn  ?? 0;
       const fanOut       = n.fanOut ?? 0;
@@ -559,7 +592,7 @@ export async function handleGetCriticalHubs(
     .slice(0, limit);
 
   return {
-    totalHubs: cg.nodes.filter(n => (n.fanIn ?? 0) >= minFanIn).length,
+    totalHubs: cg.nodes.filter(n => !n.isExternal && (n.fanIn ?? 0) >= minFanIn).length,
     returned: hubs.length, minFanIn, hubs,
     guidance: 'Start with hubs that have the highest stabilityScore (easiest wins). Defer hubs with stabilityScore < 30 until their dependencies are cleaner.',
   };
@@ -584,7 +617,7 @@ export async function handleGetGodFunctions(
   if (filePath) {
     candidates = getFileGodFunctions(cg, filePath, fanOutThreshold);
   } else {
-    candidates = cg.nodes.filter(n => n.fanOut >= fanOutThreshold);
+    candidates = cg.nodes.filter(n => !n.isExternal && n.fanOut >= fanOutThreshold);
   }
 
   if (candidates.length === 0) {

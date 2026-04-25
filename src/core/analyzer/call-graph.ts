@@ -29,7 +29,18 @@ export type EdgeConfidence =
   | 'http_endpoint'  // cross-language HTTP route match
   | 'same_file'      // multiple candidates; same-file wins
   | 'name_only'      // last-resort: pick first candidate by name
-  | 'type_name';     // Swift/C++ capitalized receiver treated as type name
+  | 'type_name'      // Swift/C++ capitalized receiver treated as type name
+  | 'external';      // unresolved external/stdlib call (synthetic leaf node)
+
+/** Broad relationship kind */
+export type EdgeKind = 'calls' | 'tested_by';
+
+/** Semantic nature of the call at the call site */
+export type CallType =
+  | 'direct'       // foo()
+  | 'method'       // obj.method()
+  | 'awaited'      // await foo() or await obj.method()
+  | 'constructor'; // new Foo()
 
 /** Internal raw edge before resolution */
 interface RawEdge {
@@ -38,6 +49,8 @@ interface RawEdge {
   line: number;
   /** Receiver variable name in `obj.method()` calls */
   calleeObject?: string;
+  /** Call type detected from AST shape at extraction time */
+  callType?: CallType;
 }
 
 export interface FunctionNode {
@@ -57,16 +70,27 @@ export interface FunctionNode {
   docstring?: string;
   /** Declaration line(s) up to opening brace/colon, whitespace-normalized */
   signature?: string;
+  /** True for synthetic nodes representing unresolved external/stdlib calls (e.g. fetch, https.request) */
+  isExternal?: boolean;
+  /** Classification of external node — used to filter stdlib noise from views */
+  externalKind?: ExternalKind;
 }
+
+/** Broad category of an external (unresolved) call */
+export type ExternalKind = 'http' | 'database' | 'filesystem' | 'stdlib' | 'unknown';
 
 export interface CallEdge {
   callerId: string;
-  /** Resolved callee ID, or '' if unresolved (external/stdlib) */
+  /** Resolved callee ID */
   calleeId: string;
   /** Raw name as it appears in source */
   calleeName: string;
   line?: number;
   confidence: EdgeConfidence;
+  /** Broad relationship kind — omitted on legacy/pre-existing edges, treated as 'calls' */
+  kind?: EdgeKind;
+  /** Semantic call type; only set when kind === 'calls' */
+  callType?: CallType;
 }
 
 export interface LayerViolation {
@@ -632,11 +656,18 @@ async function extractTSGraph(
     const caller = findEnclosingFunction(nodes, callPos);
     if (!caller) continue;
 
+    // Detect call type from AST parent context
+    let callType: CallType = objectCapture ? 'method' : 'direct';
+    const parentType = nodeCapture.node.parent?.type;
+    if (parentType === 'await_expression') callType = 'awaited';
+    else if (parentType === 'new_expression') callType = 'constructor';
+
     rawEdges.push({
       callerId: caller.id,
       calleeName,
       line: nodeCapture.node.startPosition.row + 1,
       calleeObject: objectCapture?.node.text,
+      callType,
     });
   }
 
@@ -762,10 +793,13 @@ async function extractPyGraph(
     const caller = findEnclosingFunction(nodes, callPos);
     if (!caller) continue;
 
+    // In Python tree-sitter, `await expr` wraps the call: parent type is 'await'
+    const callType: CallType = nodeCapture.node.parent?.type === 'await' ? 'awaited' : 'direct';
     rawEdges.push({
       callerId: caller.id,
       calleeName,
       line: nodeCapture.node.startPosition.row + 1,
+      callType,
     });
   }
 
@@ -783,11 +817,13 @@ async function extractPyGraph(
     const caller = findEnclosingFunction(nodes, callPos);
     if (!caller) continue;
 
+    const methodCallType: CallType = nodeCapture.node.parent?.type === 'await' ? 'awaited' : 'method';
     rawEdges.push({
       callerId: caller.id,
       calleeName,
       line: nodeCapture.node.startPosition.row + 1,
       calleeObject: objectCapture.node.text,
+      callType: methodCallType,
     });
   }
 
@@ -1683,6 +1719,55 @@ function buildClassNodes(
 }
 
 // ============================================================================
+// EXTERNAL NODE HELPER
+// ============================================================================
+
+const TEST_FILE_PATTERNS = [
+  /\.test\.[tj]sx?$/, /\.spec\.[tj]sx?$/,
+  /_test\.py$/, /test_[^/]+\.py$/,
+  /_spec\.rb$/, /_test\.go$/, /[A-Z][^/]*Test\.java$/,
+];
+
+function isTestFile(filePath: string): boolean {
+  return TEST_FILE_PATTERNS.some(p => p.test(filePath));
+}
+
+const EXTERNAL_HTTP_RE = /^(fetch|axios|got|superagent|node-fetch|ky|request|https?|xmlhttprequest|grpc|undici)$/;
+const EXTERNAL_DB_RE = /^(pg|mysql|mysql2|sqlite|sqlite3|redis|ioredis|mongoose|mongo|mongodb|prisma|knex|sequelize|typeorm|drizzle|cassandra|dynamodb|firestore|supabase|neo4j|influxdb|clickhouse|kysely)$/;
+const EXTERNAL_FS_RE = /^(fs|fsp|readfile|writefile|readdir|stat|mkdir|unlink|rename|copyfile|createreadstream|createwritestream)$/;
+const EXTERNAL_STDLIB_BASES = new Set([
+  'array', 'object', 'string', 'number', 'math', 'json', 'date', 'regexp',
+  'promise', 'map', 'set', 'weakmap', 'weakset', 'symbol', 'reflect', 'proxy',
+  'console', 'error', 'buffer', 'process', 'int8array', 'uint8array',
+]);
+const EXTERNAL_NOISE_RECEIVERS = new Set([
+  'response', 'body', 't', 'err', 'error', 'buf', 'str', 'res', 'req', 'data', 'result',
+]);
+
+function classifyExternal(name: string): ExternalKind {
+  const base = name.split('.')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (EXTERNAL_HTTP_RE.test(base)) return 'http';
+  if (EXTERNAL_DB_RE.test(base)) return 'database';
+  if (EXTERNAL_FS_RE.test(base)) return 'filesystem';
+  if (EXTERNAL_STDLIB_BASES.has(base)) return 'stdlib';
+  if (name.includes('.') && EXTERNAL_NOISE_RECEIVERS.has(name.split('.')[0].toLowerCase())) return 'stdlib';
+  return 'unknown';
+}
+
+function getOrCreateExternalNode(name: string, nodes: Map<string, FunctionNode>): FunctionNode {
+  const id = `external::${name}`;
+  if (!nodes.has(id)) {
+    nodes.set(id, {
+      id, name, filePath: 'external', isExternal: true,
+      externalKind: classifyExternal(name),
+      isAsync: false, language: 'external',
+      startIndex: 0, endIndex: 0, fanIn: 0, fanOut: 0,
+    });
+  }
+  return nodes.get(id)!;
+}
+
+// ============================================================================
 // CALL GRAPH BUILDER
 // ============================================================================
 
@@ -1802,13 +1887,28 @@ export class CallGraphBuilder {
       // skip name_only fallback to avoid false-positive edges.
       if (!calleeNode && !raw.calleeObject) {
         const candidates = trie.findBySimpleName(raw.calleeName);
-        if (candidates.length === 0) continue; // external call, skip
-        const sameFile = candidates.find(c => c.filePath === callerNode.filePath);
-        if (sameFile) { calleeNode = sameFile; confidence = 'same_file'; }
-        else { calleeNode = candidates[0]; confidence = 'name_only'; }
+        if (candidates.length === 0) {
+          // Unresolved bare call — create a synthetic external leaf node
+          calleeNode = getOrCreateExternalNode(raw.calleeName, allNodes);
+          confidence = 'external';
+        } else {
+          const sameFile = candidates.find(c => c.filePath === callerNode.filePath);
+          if (sameFile) { calleeNode = sameFile; confidence = 'same_file'; }
+          else { calleeNode = candidates[0]; confidence = 'name_only'; }
+        }
       }
 
-      if (!calleeNode) continue;
+      if (!calleeNode) {
+        // Unresolved receiver-based call (e.g. redis_client.get()) — synthetic external node
+        const label = raw.calleeObject
+          ? `${raw.calleeObject}.${raw.calleeName}`
+          : raw.calleeName;
+        calleeNode = getOrCreateExternalNode(label, allNodes);
+        confidence = 'external';
+      }
+
+      const callType: CallType = raw.callType
+        ?? (raw.calleeObject ? 'method' : 'direct');
 
       edges.push({
         callerId: raw.callerId,
@@ -1816,6 +1916,8 @@ export class CallGraphBuilder {
         calleeName: raw.calleeName,
         line: raw.line,
         confidence,
+        kind: 'calls',
+        callType,
       });
     }
 
@@ -1851,6 +1953,8 @@ export class CallGraphBuilder {
           calleeName: he.route.handlerName,
           line: he.call.line,
           confidence: 'http_endpoint',
+          kind: 'calls',
+          callType: 'direct',
         });
       }
     } catch {
@@ -1869,15 +1973,32 @@ export class CallGraphBuilder {
       if (callee) callee.fanIn++;
     }
 
-    // Pass 4: Derive hub functions, entry points, layer violations
-    const nodes = Array.from(allNodes.values());
+    // Pass 3b: Derive tested_by edges — reverse edges from production fn ← test fn
+    const callsEdges = edges.filter(e => !e.kind || e.kind === 'calls');
+    for (const edge of callsEdges) {
+      const caller = allNodes.get(edge.callerId);
+      if (!caller || !isTestFile(caller.filePath)) continue;
+      edges.push({
+        kind: 'tested_by',
+        callerId: edge.calleeId,
+        calleeId: edge.callerId,
+        calleeName: caller.name,
+        confidence: edge.confidence,
+        callType: undefined,
+      });
+    }
 
-    const hubFunctions = nodes
+    // Pass 4: Derive hub functions, entry points, layer violations
+    // External nodes are excluded from structural stats — they are leaf placeholders
+    const nodes = Array.from(allNodes.values());
+    const internalNodes = nodes.filter(n => !n.isExternal);
+
+    const hubFunctions = internalNodes
       .filter(n => n.fanIn >= HUB_THRESHOLD)
       .sort((a, b) => b.fanIn - a.fanIn);
 
     const calledIds = new Set(edges.map(e => e.calleeId));
-    const entryPoints = nodes
+    const entryPoints = internalNodes
       .filter(n => !calledIds.has(n.id))
       .sort((a, b) => b.fanOut - a.fanOut);
 
@@ -1885,8 +2006,8 @@ export class CallGraphBuilder {
       ? this.detectLayerViolations(edges, allNodes, layers)
       : [];
 
-    const totalFanIn = nodes.reduce((s, n) => s + n.fanIn, 0);
-    const totalFanOut = nodes.reduce((s, n) => s + n.fanOut, 0);
+    const totalFanIn = internalNodes.reduce((s, n) => s + n.fanIn, 0);
+    const totalFanOut = internalNodes.reduce((s, n) => s + n.fanOut, 0);
 
     // Pass 5: Build class hierarchy (inheritance + grouping)
     const relationships = await extractClassRelationships(files);
@@ -1901,10 +2022,10 @@ export class CallGraphBuilder {
       entryPoints,
       layerViolations,
       stats: {
-        totalNodes: nodes.length,
-        totalEdges: edges.length,
-        avgFanIn: nodes.length > 0 ? totalFanIn / nodes.length : 0,
-        avgFanOut: nodes.length > 0 ? totalFanOut / nodes.length : 0,
+        totalNodes: internalNodes.length,
+        totalEdges: edges.filter(e => !e.kind || e.kind === 'calls').length,
+        avgFanIn: internalNodes.length > 0 ? totalFanIn / internalNodes.length : 0,
+        avgFanOut: internalNodes.length > 0 ? totalFanOut / internalNodes.length : 0,
       },
     };
   }

@@ -212,7 +212,10 @@ export async function handleOrient(
   }
 
   // ── Relevant functions (top-N) ────────────────────────────────────────────
-  const topResults = rawResults.slice(0, clampedLimit);
+  // Exclude external synthetic nodes (fetch, https.request, etc.) — they have no spec/docstring
+  const topResults = rawResults
+    .filter(r => r.record.filePath !== 'external' && !r.record.id?.startsWith('external::'))
+    .slice(0, clampedLimit);
 
   const relevantFunctions: OrientFunction[] = topResults.map(r => ({
     name: r.record.name,

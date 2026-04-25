@@ -102,7 +102,12 @@ vi.mock('../core/generator/adr-generator.js', () => ({
   }),
 }));
 
+vi.mock('../core/services/mcp-handlers/utils.js', () => ({
+  isCacheFresh: vi.fn(),
+}));
+
 import { access, stat, readFile } from 'node:fs/promises';
+import { isCacheFresh } from '../core/services/mcp-handlers/utils.js';
 import { detectProjectType, getProjectTypeName } from '../core/services/project-detector.js';
 import { getDefaultConfig, readSpecGenConfig, writeSpecGenConfig, specGenConfigExists, openspecDirExists, createOpenSpecStructure } from '../core/services/config-manager.js';
 import { gitignoreExists, isInGitignore, addToGitignore } from '../core/services/gitignore-manager.js';
@@ -129,6 +134,7 @@ const mockGitignoreExists = vi.mocked(gitignoreExists);
 const mockIsInGitignore = vi.mocked(isInGitignore);
 const mockAddToGitignore = vi.mocked(addToGitignore);
 const mockCreateLLMService = vi.mocked(createLLMService);
+const mockIsCacheFresh = vi.mocked(isCacheFresh);
 
 // ============================================================================
 // FIXTURES
@@ -185,6 +191,7 @@ function setupMocks({ configExists = false, analysisRecent = false } = {}) {
 
   // Analysis mocks
   const mtime = analysisRecent ? RECENT_MTIME : OLD_MTIME;
+  mockIsCacheFresh.mockResolvedValue(analysisRecent);
   mockAccess.mockResolvedValue(undefined);
   mockStat.mockResolvedValue({ mtime } as Awaited<ReturnType<typeof stat>>);
   mockReadFile.mockImplementation((path) => {

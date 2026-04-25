@@ -2,10 +2,11 @@
  * Shared utilities for MCP tool handlers.
  */
 
-import { readFile, stat } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { createHash } from 'node:crypto';
+import { readFile, readdir, stat } from 'node:fs/promises';
+import { extname, join, relative, resolve, sep } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
-import { ANALYSIS_STALE_THRESHOLD_MS, SPEC_GEN_DIR, SPEC_GEN_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
+import { ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_FINGERPRINT, ARTIFACT_LLM_CONTEXT, SPEC_GEN_ANALYSIS_SUBDIR, SPEC_GEN_DIR } from '../../../constants.js';
 import { logger } from '../../../utils/logger.js';
 
 /**
@@ -130,13 +131,76 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
   }
 }
 
-/** Returns true if the cached analysis is present and less than 1 hour old. */
-export async function isCacheFresh(directory: string): Promise<boolean> {
+// ============================================================================
+// PROJECT FINGERPRINT — content-hash based cache invalidation
+// ============================================================================
+
+const FINGERPRINT_SKIP_DIRS = new Set([
+  '.git', 'node_modules', 'dist', 'build', '.next', '.spec-gen',
+  'coverage', '.cache', '__pycache__', '.venv', 'venv', 'target',
+  '.dart_tool', '.pub-cache',
+]);
+
+const FINGERPRINT_SOURCE_EXTS = new Set([
+  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
+  '.py', '.go', '.rs', '.rb', '.java', '.kt', '.swift',
+  '.cpp', '.cc', '.cxx', '.c', '.h', '.hpp', '.cs',
+]);
+
+async function walkForFingerprint(
+  dir: string,
+  root: string,
+  out: Array<{ path: string; mtime: number; size: number }>
+): Promise<void> {
+  let entries;
   try {
-    const s = await stat(join(directory, SPEC_GEN_DIR, SPEC_GEN_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT));
-    return Date.now() - s.mtimeMs < ANALYSIS_STALE_THRESHOLD_MS;
+    entries = await readdir(dir, { withFileTypes: true });
   } catch {
-    return false;
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      if (!FINGERPRINT_SKIP_DIRS.has(entry.name)) {
+        await walkForFingerprint(join(dir, entry.name), root, out);
+      }
+    } else if (entry.isFile() && FINGERPRINT_SOURCE_EXTS.has(extname(entry.name))) {
+      try {
+        const s = await stat(join(dir, entry.name));
+        out.push({ path: relative(root, join(dir, entry.name)), mtime: s.mtimeMs, size: s.size });
+      } catch {
+        // skip unreadable
+      }
+    }
+  }
+}
+
+/** Compute a SHA-256 fingerprint of all source file mtimes+sizes under rootDir. */
+export async function computeProjectFingerprint(rootDir: string): Promise<string> {
+  const files: Array<{ path: string; mtime: number; size: number }> = [];
+  await walkForFingerprint(rootDir, rootDir, files);
+  files.sort((a, b) => a.path.localeCompare(b.path));
+  const payload = files.map(f => `${f.path}:${f.mtime}:${f.size}`).join('\n');
+  return createHash('sha256').update(payload).digest('hex');
+}
+
+/**
+ * Returns true if the cached analysis matches the current source files.
+ * Uses content-hash fingerprint when available; falls back to TTL check.
+ */
+export async function isCacheFresh(directory: string): Promise<boolean> {
+  const fingerprintPath = join(directory, SPEC_GEN_DIR, SPEC_GEN_ANALYSIS_SUBDIR, ARTIFACT_FINGERPRINT);
+  try {
+    const stored = JSON.parse(await readFile(fingerprintPath, 'utf-8')) as { hash: string };
+    const current = await computeProjectFingerprint(directory);
+    return current === stored.hash;
+  } catch {
+    // No fingerprint yet — fall back to TTL
+    try {
+      const s = await stat(join(directory, SPEC_GEN_DIR, SPEC_GEN_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT));
+      return Date.now() - s.mtimeMs < ANALYSIS_STALE_THRESHOLD_MS;
+    } catch {
+      return false;
+    }
   }
 }
 

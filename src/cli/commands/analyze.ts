@@ -12,18 +12,20 @@ import { logger } from '../../utils/logger.js';
 import { fileExists, formatDuration, formatAge, getAnalysisAge } from '../../utils/command-helpers.js';
 import {
   ANALYSIS_STALE_THRESHOLD_MS,
+  ARTIFACT_DEPENDENCY_GRAPH,
+  ARTIFACT_FINGERPRINT,
+  ARTIFACT_REFACTOR_PRIORITIES,
+  ARTIFACT_REPO_STRUCTURE,
   DEFAULT_MAX_FILES,
-  MAX_DEEP_ANALYSIS_FILES,
   DEEP_ANALYSIS_FILE_RATIO,
+  MAX_DEEP_ANALYSIS_FILES,
   MAX_VALIDATION_FILES,
-  SPEC_GEN_ANALYSIS_REL_PATH,
-  SPEC_GEN_CONFIG_REL_PATH,
   OPENSPEC_DIR,
   OPENSPEC_SPECS_SUBDIR,
-  ARTIFACT_REPO_STRUCTURE,
-  ARTIFACT_DEPENDENCY_GRAPH,
-  ARTIFACT_REFACTOR_PRIORITIES,
+  SPEC_GEN_ANALYSIS_REL_PATH,
+  SPEC_GEN_CONFIG_REL_PATH,
 } from '../../constants.js';
+import { computeProjectFingerprint } from '../../core/services/mcp-handlers/utils.js';
 import type { AnalyzeOptions, SpecGenConfig } from '../../types/index.js';
 import { readSpecGenConfig } from '../../core/services/config-manager.js';
 import { RepositoryMapper, type RepositoryMap } from '../../core/analyzer/repository-mapper.js';
@@ -176,6 +178,14 @@ export async function runAnalysis(
   await writeFile(
     join(outputPath, ARTIFACT_DEPENDENCY_GRAPH),
     JSON.stringify(depGraph, null, 2)
+  );
+
+  // Write content-hash fingerprint so future runs can skip re-analysis when
+  // source files are unchanged (replaces the 1-hour TTL on a warm cache).
+  const fingerprintHash = await computeProjectFingerprint(rootPath);
+  await writeFile(
+    join(outputPath, ARTIFACT_FINGERPRINT),
+    JSON.stringify({ hash: fingerprintHash, computedAt: new Date().toISOString(), fileCount: repoMap.allFiles.length })
   );
 
   const duration = Date.now() - startTime;

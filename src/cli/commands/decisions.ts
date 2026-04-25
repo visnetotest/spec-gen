@@ -226,9 +226,39 @@ export async function uninstallPreCommitHook(rootPath: string): Promise<void> {
   for (const filePath of agentFiles) await removeAgentInstructions(filePath);
 }
 
-export async function installClaudeHook(_rootPath: string): Promise<void> {
-  // PostToolUse hook removed — mine-last runs against HEAD and misses in-session edits.
-  // Hook installation is now a no-op; kept for API compatibility with setup.ts.
+const ANALYZE_HOOK_MARKER = 'spec-gen analyze';
+const ANALYZE_HOOK_ENTRY = {
+  _comment: 'spec-gen: keep call graph fresh after every file edit (debounced 10s)',
+  type: 'command',
+  command: [
+    'LOCK=.spec-gen/.analyze.lock;',
+    'if [ ! -f "$LOCK" ] || [ $(( $(date +%s) - $(cat "$LOCK" 2>/dev/null || echo 0) )) -gt 10 ]; then',
+    '  echo $(date +%s) > "$LOCK";',
+    '  spec-gen analyze --output .spec-gen/analysis 2>/dev/null & true;',
+    'fi',
+  ].join(' '),
+};
+
+export async function installClaudeHook(rootPath: string): Promise<void> {
+  const settingsPath = join(rootPath, '.claude', 'settings.json');
+  let settings: ClaudeSettings = {};
+
+  try {
+    settings = JSON.parse(await readFile(settingsPath, 'utf-8')) as ClaudeSettings;
+  } catch { /* file missing or corrupt — start fresh */ }
+
+  const hooks = settings.hooks?.PostToolUse ?? [];
+  if (hooks.some((h) => JSON.stringify(h).includes(ANALYZE_HOOK_MARKER))) {
+    logger.success('Claude Code analyze hook already present in .claude/settings.json');
+    return;
+  }
+
+  settings.hooks ??= {};
+  settings.hooks.PostToolUse = [...hooks, ANALYZE_HOOK_ENTRY];
+
+  await mkdir(join(rootPath, '.claude'), { recursive: true });
+  await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+  logger.success('Claude Code PostToolUse hook added to .claude/settings.json');
 }
 
 interface ClaudeSettings {
@@ -246,7 +276,7 @@ export async function uninstallClaudeHook(rootPath: string): Promise<void> {
   try {
     const settings = JSON.parse(await readFile(settingsPath, 'utf-8')) as ClaudeSettings;
     const hooks = settings.hooks?.PostToolUse ?? [];
-    const filtered = hooks.filter((h) => !JSON.stringify(h).includes('spec-gen-mine-last'));
+    const filtered = hooks.filter((h) => !JSON.stringify(h).includes('spec-gen-mine-last') && !JSON.stringify(h).includes(ANALYZE_HOOK_MARKER));
     if (filtered.length === hooks.length) return;
     if (filtered.length === 0) delete settings.hooks!.PostToolUse;
     else settings.hooks!.PostToolUse = filtered;

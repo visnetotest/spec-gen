@@ -7,9 +7,10 @@
  */
 
 import { join } from 'node:path';
-import { readFile, stat, mkdir, writeFile } from 'node:fs/promises';
-import { ANALYSIS_REUSE_THRESHOLD_MS, DEFAULT_MAX_FILES, DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_OPENAI_COMPAT_MODEL, DEFAULT_COPILOT_MODEL, SPEC_GEN_DIR, SPEC_GEN_ANALYSIS_SUBDIR, SPEC_GEN_LOGS_SUBDIR, SPEC_GEN_CONFIG_REL_PATH, SPEC_GEN_GENERATION_SUBDIR, SPEC_GEN_RUNS_SUBDIR, DEFAULT_OPENSPEC_PATH, ARTIFACT_REPO_STRUCTURE, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_LLM_CONTEXT } from '../constants.js';
+import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { DEFAULT_MAX_FILES, DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_OPENAI_COMPAT_MODEL, DEFAULT_COPILOT_MODEL, SPEC_GEN_DIR, SPEC_GEN_ANALYSIS_SUBDIR, SPEC_GEN_LOGS_SUBDIR, SPEC_GEN_CONFIG_REL_PATH, SPEC_GEN_GENERATION_SUBDIR, SPEC_GEN_RUNS_SUBDIR, DEFAULT_OPENSPEC_PATH, ARTIFACT_REPO_STRUCTURE, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_LLM_CONTEXT } from '../constants.js';
 import { fileExists, readJsonFile } from '../utils/command-helpers.js';
+import { isCacheFresh } from '../core/services/mcp-handlers/utils.js';
 import {
   detectProjectType,
   getProjectTypeName,
@@ -144,16 +145,12 @@ export async function specGenRun(options: RunApiOptions = {}): Promise<RunResult
   const analysisPath = join(rootPath, SPEC_GEN_DIR, SPEC_GEN_ANALYSIS_SUBDIR);
   let analyzeResult: AnalyzeResult;
 
-  // Check for existing recent analysis
+  // Check for existing fresh analysis (content-hash or TTL)
   const repoStructurePath = join(analysisPath, ARTIFACT_REPO_STRUCTURE);
   let useExisting = false;
 
-  if (await fileExists(repoStructurePath)) {
-    const stats = await stat(repoStructurePath);
-    const age = Date.now() - stats.mtime.getTime();
-    if (age < ANALYSIS_REUSE_THRESHOLD_MS && !reanalyze && !force) {
-      useExisting = true;
-    }
+  if (!reanalyze && !force && await fileExists(repoStructurePath) && await isCacheFresh(rootPath)) {
+    useExisting = true;
   }
 
   if (useExisting) {

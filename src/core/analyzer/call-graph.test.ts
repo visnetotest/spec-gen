@@ -187,7 +187,7 @@ class DataService:
     expect(fanOut(result, 'run')).toBe(2);
   });
 
-  it('does NOT create edges for external method calls like redis.get()', async () => {
+  it('creates external leaf node for unresolved method calls like redis.get()', async () => {
     const builder = new CallGraphBuilder();
     const result = await builder.build([{
       path: 'cache.py',
@@ -201,9 +201,14 @@ def get():
       `,
     }]);
 
-    // redis_client.get() should not resolve to the local get() function
+    // redis_client.get() should NOT resolve to the local get() function
     expect(fanIn(result, 'get')).toBe(0);
-    expect(result.stats.totalEdges).toBe(0);
+    // Instead it should create a synthetic external leaf node
+    const externalNode = Array.from(result.nodes.values()).find(n => n.isExternal);
+    expect(externalNode).toBeDefined();
+    expect(externalNode!.name).toBe('redis_client.get');
+    // One edge: get_value → external::redis_client.get
+    expect(result.stats.totalEdges).toBe(1);
   });
 });
 
