@@ -44,6 +44,7 @@ import {
 } from '../../constants.js';
 import type { PendingDecision } from '../../types/index.js';
 import { runTuiApproval } from '../tui-approval.js';
+import { emit } from '../../core/services/telemetry.js';
 
 // ============================================================================
 // AGENT INSTRUCTION FILES
@@ -507,6 +508,7 @@ Examples:
         reviewNote: options.note ?? options.reason,
       });
       await saveDecisionStore(rootPath, updated);
+      emit(rootPath, 'decisions', { event: 'decision_approved', id, title: decision.title, transport: 'cli' });
       logger.success(`Decision ${id} approved.`);
       if (!options.json) displayDecision({ ...decision, status: 'approved' }, true);
 
@@ -548,6 +550,7 @@ Examples:
         reviewNote: options.note ?? options.reason,
       });
       await saveDecisionStore(rootPath, updated);
+      emit(rootPath, 'decisions', { event: 'decision_rejected', id, title: decision.title, transport: 'cli' });
       logger.success(`Decision ${id} rejected.`);
 
       if (!options.json && decision.affectedFiles.length > 0) {
@@ -684,6 +687,8 @@ Examples:
               status: decision,
               reviewedAt: new Date().toISOString(),
             });
+            const d = updatedStore.decisions.find((x) => x.id === id);
+            emit(rootPath, 'decisions', { event: `decision_${decision}`, id, title: d?.title, transport: 'cli-tui' });
           }
         }
         await saveDecisionStore(rootPath, gateStore);
@@ -934,6 +939,7 @@ Examples:
         specMap,
         dryRun: options.dryRun,
       });
+      emit(rootPath, 'decisions', { event: 'decisions_synced', count: result.synced.length, dry_run: options.dryRun, transport: 'cli' });
 
       if (options.json) {
         process.stdout.write(JSON.stringify(result, null, 2) + '\n');

@@ -17,6 +17,7 @@ AI agents are powerful but amnesiac. On every new task:
 - They forget architectural decisions made two sessions ago
 - They have no link between specs and code — drift is invisible
 - File-by-file navigation often burns **15,000–50,000 tokens** per orientation pass, before a single line of useful code is written
+- In long sessions, they drift from authoritative retrieval toward internally cached reasoning — producing subtly wrong architectural assumptions that compound silently until a refactor breaks
 
 openlore closes this loop. Run a full analysis once, then keep the graph incrementally updated as the codebase evolves. Even greenfield projects become cognitively "brownfield" after only a few agent sessions — architectural context fragments, decisions disappear, and agents repeatedly reconstruct the same understanding from scratch.
 
@@ -49,6 +50,7 @@ You can use layer 1 alone to give agents structural context. Add layer 2 for sem
 | Token-efficient orient() | ❌ | ❌ | ✓ ~1–3k vs 15–50k tokens |
 | Living spec generation | ❌ | ❌ | ✓ |
 | Persistent cross-session architectural memory | ❌ | Partial | ✓ |
+| Long-session confidence decay (Epistemic Lease) | ❌ | ❌ | ✓ |
 
 Traditional coding agents reconstruct architecture from repeated file reads every session. openlore persists it as a queryable graph.
 
@@ -167,9 +169,53 @@ Compares git changes against spec mappings in milliseconds. Detects: Gap (code c
 
 `orient()` runs in **~430µs p50** against a 15k-node codebase (TypeScript compiler, ~79k edges). Full benchmark results: [scripts/BENCHMARKS.md](scripts/BENCHMARKS.md).
 
+**Epistemic Lease** (no API key)
+
+> **Core principle**: EpistemicLease models architectural drift as a behavioral navigation phenomenon rather than a semantic understanding problem. Context decay is driven by where the agent goes (cross-module trajectory), not what it knows.
+
+As a session grows longer, agents naturally shift from authoritative graph retrieval toward internally cached reasoning. This is useful for fluency but dangerous for architectural correctness — cross-module assumptions go stale, dependency hallucinations accumulate, and delegation prompts embed incorrect repository understanding that cannot easily be corrected downstream.
+
+The Epistemic Lease models this decay explicitly. Every MCP tool response carries a freshness signal when the agent's architectural context has degraded or expired. Decay is triggered by any of: time elapsed since `orient()`, git hash divergence from the orient baseline, weighted cognitive load accumulation (heavier tools count more), or cross-module file access breadth.
+
+The signal escalates through three levels to resist [warning blindness](https://en.wikipedia.org/wiki/Alarm_fatigue):
+
+| Level | Trigger | Signal style |
+|---|---|---|
+| Degraded | load ≥ 30, age ≥ 15min, or cross-module density ≥ 0.15 | Advisory signal appended |
+| Stale | load ≥ 60, age ≥ 30min, git hash divergence, or density ≥ 0.30 | Procedural block prepended: what NOT to do |
+| Stale [Elevated] | load ≥ 85 or age ≥ 45min | Risk-framing: names downstream consequences |
+| Stale [Critical] | load ≥ 110 or age ≥ 60min | Imperative: `STOP. Call orient().` — minimal, hardest to skim |
+
+Cross-module density is computed as a sliding-window trajectory model: `switches_in_last_15_calls / 15`. The fixed denominator prevents false positives during session warmup. Each module switch adds +5 cognitive debt; a high-density window adds +15; a burst (density ≥ 0.60) adds +20. A 5s dampening window prevents back-and-forth from double-counting.
+
+An oscillation coefficient (`repeated_bigram_transitions / total_transitions`) separately distinguishes confusion loops (A→B→A→B scores 1.0) from genuine exploration (A→B→C→D scores 0.0). When already stale, a heavy architectural tool (weight ≥ 8) or density burst (≥ 0.60) triggers immediate escalation to Stale [Critical].
+
+When fresh, injection is zero-overhead. Calling `orient()` resets the tracker. Unlike governance systems, the lease never blocks — it modulates the agent's confidence in its own cached reasoning rather than constraining its actions.
+
 **Decisions** (API key for consolidation)
 
 Agents call `record_decision` before writing code. Consolidation runs immediately in the background. At commit time, a pre-commit hook gates the commit until all verified decisions are reviewed and written back as requirements in `spec.md` files. Decisions are classified by scope (`local / component / cross-domain / system`); only `cross-domain` and `system` decisions produce ADR files, keeping the decision log signal-dense.
+
+**Telemetry** (opt-in, no API key)
+
+Cognitive telemetry for empirical measurement of EpistemicLease behavior. Gated by `OPENLORE_TELEMETRY=1` — disabled by default. Writes append-only JSONL to `.openlore/telemetry/` per domain. Agent identity is captured from the MCP `initialize` handshake, enabling per-agent behavioral comparison.
+
+```
+.openlore/telemetry/
+  mcp.jsonl              # every tool call: latency, errors, agent name
+  orient.jsonl           # orient quality: function/file/insertion_point counts
+  cache.jsonl            # readCachedContext hit/miss
+  epistemic-lease.jsonl  # state transitions: degraded, stale, depth escalation
+```
+
+Analyze with `openlore telemetry`:
+
+```
+openlore telemetry [directory]   # summary: latency, cache hit rate, obstinacy index
+openlore telemetry --live        # stream events in real time as they occur
+```
+
+Key metrics: **obstinacy index** (tool calls after stale before orient — measures whether agents act on warnings), **recovery efficiency** (stale→orient latency), **trajectory dynamics** (avg cross-module density, burst frequency). These turn EpistemicLease from a tuning-by-intuition system into an empirically measurable one.
 
 ---
 
@@ -220,6 +266,7 @@ The graph and the OpenSpec spec layer are co-equal: the graph makes orientation 
 | Agentic workflows (BMAD, Vibe, GSD, spec-kit) | [docs/agentic-workflows.md](docs/agentic-workflows.md) |
 | Troubleshooting | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 | Philosophy | [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) |
+| Telemetry & cognitive metrics | [docs/telemetry.md](docs/telemetry.md) |
 
 ---
 

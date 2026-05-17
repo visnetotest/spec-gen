@@ -17,15 +17,23 @@
  *   }
  */
 
+import { createRequire } from 'node:module';
+const _require = createRequire(import.meta.url);
+const _pkgVersion = (_require('../../../package.json') as { version: string }).version;
+
 import { Command } from 'commander';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
+  InitializeRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { sanitizeMcpError, validateDirectory } from '../../core/services/mcp-handlers/utils.js';
+import { createTracker, updateTracker, getFreshnessSignal } from '../../core/services/mcp-handlers/epistemic-lease.js';
+import type { EpistemicTracker } from '../../core/services/mcp-handlers/epistemic-lease.js';
+import { emit } from '../../core/services/telemetry.js';
 import { DEFAULT_DRIFT_MAX_FILES } from '../../constants.js';
 import {
   handleGetCallGraph,
@@ -1295,8 +1303,25 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
     tools: activeTools.map(t => ({ ...t, annotations: TOOL_ANNOTATIONS[t.name] })),
   }));
 
+  // Per-session epistemic lease tracker — re-initialized when directory changes.
+  let tracker: EpistemicTracker | undefined;
+  let trackerDir = '';
+
   // --watch-auto: start the watcher on the first tool call that carries a directory
   let autoWatcher: import('../../core/services/mcp-watcher.js').McpWatcher | undefined;
+
+  // Agent identity captured from initialize handshake
+  let agentName = 'unknown';
+  let agentVersion = 'unknown';
+  server.setRequestHandler(InitializeRequestSchema, async (request) => {
+    agentName = request.params.clientInfo?.name ?? 'unknown';
+    agentVersion = request.params.clientInfo?.version ?? 'unknown';
+    return {
+      protocolVersion: request.params.protocolVersion,
+      capabilities: { tools: {} },
+      serverInfo: { name: 'openlore', version: _pkgVersion },
+    };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
@@ -1318,12 +1343,37 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       }
     }
 
+    const _dir = (args as Record<string, unknown>).directory;
+    const directory = typeof _dir === 'string' ? _dir : '';
+    const _t0 = Date.now();
+
     try {
+      const filePath = (args as Record<string, unknown>).filePath;
+
+      // Init (or re-init when project directory changes between calls)
+      if (directory && (!tracker || directory !== trackerDir)) {
+        tracker = createTracker(directory);
+        trackerDir = directory;
+      }
+      // Update epistemic state before dispatch (orient resets tracker internally)
+      if (tracker && directory) updateTracker(tracker, name, directory, typeof filePath === 'string' ? filePath : undefined);
+
       let result: unknown;
 
       if (name === 'orient') {
-        const { directory, task, limit = 5 } = args as { directory: string; task: string; limit?: number };
+        const { task, limit = 5 } = args as { task: string; limit?: number };
         result = await handleOrient(directory, task, limit);
+        if (result && typeof result === 'object') {
+          const r = result as Record<string, unknown>;
+          emit(directory, 'orient', {
+            event: 'orient_call',
+            agent: agentName,
+            functions: Array.isArray(r['relevantFunctions']) ? r['relevantFunctions'].length : 0,
+            files: Array.isArray(r['relevantFiles']) ? r['relevantFiles'].length : 0,
+            spec_domains: Array.isArray(r['specDomains']) ? r['specDomains'].length : 0,
+            insertion_points: Array.isArray(r['insertionPoints']) ? r['insertionPoints'].length : 0,
+          });
+        }
       } else if (name === 'analyze_codebase') {
         const { directory, force = false } = args as { directory: string; force?: boolean };
         result = await handleAnalyzeCodebase(directory, force);
@@ -1490,13 +1540,23 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         };
       }
 
+      emit(directory, 'mcp', { event: 'tool_call', tool: name, ms: Date.now() - _t0, agent: agentName, agent_version: agentVersion });
+
       const text =
         typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+      const signal = tracker ? getFreshnessSignal(tracker) : null;
 
-      return {
-        content: [{ type: 'text', text }],
-      };
+      // Freshness signal is a separate content item — never concatenated into
+      // the result body — so structured outputs (JSON, patches) are not corrupted.
+      const content: Array<{ type: 'text'; text: string }> = signal
+        ? signal.prepend
+          ? [{ type: 'text', text: signal.text }, { type: 'text', text }]
+          : [{ type: 'text', text }, { type: 'text', text: signal.text }]
+        : [{ type: 'text', text }];
+
+      return { content };
     } catch (err) {
+      emit(directory, 'mcp', { event: 'tool_error', tool: name, ms: Date.now() - _t0, agent: agentName, error: sanitizeMcpError(err) });
       return {
         content: [{ type: 'text', text: `Tool error: ${sanitizeMcpError(err)}` }],
         isError: true,
