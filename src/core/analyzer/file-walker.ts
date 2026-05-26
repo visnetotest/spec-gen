@@ -45,35 +45,38 @@ export interface FileWalkerProgress {
  */
 const SKIP_DIRECTORIES = new Set([
   'node_modules',
-  '.git',
-  '.svn',
-  '.hg',
   'dist',
   'build',
   'out',
   'target',
   'bin',
   'obj',
-  '.cache',
-  '.tmp',
-  '.temp',
   '__pycache__',
-  '.pytest_cache',
   'coverage',
-  '.nyc_output',
-  '.coverage',
-  '.idea',
-  '.vscode',
-  '.vs',
+  'vendor',
+  'storybook-static',
+  'cdk.out',
+  'android',
+  'ios',
   OPENSPEC_DIR,
   OPENLORE_DIR,
+]);
+
+/**
+ * Hidden directories (dot-prefixed) we DO want to traverse — they hold
+ * analysis-relevant config (CI workflows, etc.).
+ */
+const ALLOW_DOT_DIRECTORIES = new Set([
+  '.github',
+  '.gitlab',
+  '.circleci',
+  '.azure',
 ]);
 
 /**
  * Directories to skip only when not at root level
  */
 const SKIP_DIRECTORIES_NOT_ROOT = new Set([
-  'vendor',
   'deps',
   'packages',
 ]);
@@ -398,6 +401,12 @@ export class FileWalker {
   private shouldSkipDirectory(dirName: string, depth: number, relativeDir?: string): boolean {
     // Always skip these directories
     if (SKIP_DIRECTORIES.has(dirName)) {
+      return true;
+    }
+
+    // Skip hidden directories (dot-prefixed) — never contain analyzable source code.
+    // Allow-list a few that hold CI/config metadata we DO want to detect.
+    if (dirName.startsWith('.') && !ALLOW_DOT_DIRECTORIES.has(dirName)) {
       return true;
     }
 
