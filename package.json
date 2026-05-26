@@ -22,7 +22,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/cli/index.ts",
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-assets.mjs",
     "start": "node dist/cli/index.js",
     "view": "tsx src/cli/index.ts view",
     "bench": "tsx scripts/bench.ts",
