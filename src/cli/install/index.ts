@@ -127,6 +127,13 @@ function printSummary(
             : '[noop]';
     if (c.kind === 'noop') logger.discovery(`${tag} ${c.summary}`);
     else logger.success(`${tag} ${c.summary}`);
+    if (dryRun && c.preview) {
+      const indented = c.preview
+        .split('\n')
+        .map((l) => '    ' + l)
+        .join('\n');
+      process.stderr.write(indented + '\n');
+    }
   }
   for (const w of warnings) logger.warning(w);
   if (dryRun) {

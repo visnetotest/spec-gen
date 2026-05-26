@@ -12,6 +12,7 @@
 import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-managed.js';
+import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 
 const CONFIG_PATH = '.continue/config.json';
@@ -61,6 +62,8 @@ export const continueAdapter: Adapter = {
       { path: 'slashCommands', value: nextSlash },
     ]);
 
+    const before = had ? JSON.stringify(existing, null, 2) + '\n' : '';
+    const after = JSON.stringify(next, null, 2) + '\n';
     const change: PlannedChange = {
       path: configPath,
       kind: !had ? 'create' : action === 'noop' ? 'noop' : 'update',
@@ -69,6 +72,11 @@ export const continueAdapter: Adapter = {
         : action === 'noop'
           ? `${CONFIG_PATH}: already up to date`
           : `add /orient slash command to ${CONFIG_PATH}`,
+      preview: !had
+        ? previewCreate(configPath, after)
+        : action === 'noop'
+          ? undefined
+          : previewDiff(configPath, before, after),
     };
 
     const warnings = [

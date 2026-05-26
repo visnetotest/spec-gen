@@ -14,6 +14,7 @@ import {
   removeBlock,
   renderBlock,
 } from '../block.js';
+import { previewCreate, previewDiff } from '../diff.js';
 import type { ApplyContext, ApplyResult, PlannedChange } from './types.js';
 
 export interface MarkdownBlockOptions {
@@ -84,6 +85,12 @@ export async function applyMarkdownBlock(
         : action === 'noop'
           ? `${opts.fileName}: already up to date`
           : `update OpenLore block in ${opts.fileName}`,
+    preview:
+      existing === null
+        ? previewCreate(filePath, next)
+        : action === 'noop'
+          ? undefined
+          : previewDiff(filePath, base, next),
   };
 
   if (!ctx.dryRun && action !== 'noop') {
@@ -121,7 +128,14 @@ export async function uninstallMarkdownBlock(
   }
   if (!ctx.dryRun) await writeFile(filePath, removed, 'utf8');
   return {
-    changes: [{ path: filePath, kind: 'update', summary: `strip OpenLore block from ${fileName}` }],
+    changes: [
+      {
+        path: filePath,
+        kind: 'update',
+        summary: `strip OpenLore block from ${fileName}`,
+        preview: previewDiff(filePath, existing, removed),
+      },
+    ],
     warnings: [],
     conflict: false,
   };

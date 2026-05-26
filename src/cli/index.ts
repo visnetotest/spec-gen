@@ -81,15 +81,16 @@ program
     `
 Workflow:
   1. openlore init                    Detect project type, create config
-  2. openlore analyze                 Scan codebase, build dependency graph
-  3. openlore analyze --ai-configs    Generate context files (CLAUDE.md, .cursorrules…)
-  4. openlore setup                   Install workflow skills (Vibe, Cline, GSD)
-  5. openlore view                    Review visually the dependency graph
-  6. openlore generate                Create OpenSpec files using LLM
-  7. openlore verify                  Validate specs against source code
-  8. openlore drift                   Detect when code outpaces specs
-  9. openlore test                    Generate spec-driven tests or check coverage
-  10. openlore digest                  Plain-English summary of specs for human review
+  2. openlore install                 Auto-configure agent surfaces to call orient()
+  3. openlore analyze                 Scan codebase, build dependency graph
+  4. openlore analyze --ai-configs    Generate context files (CLAUDE.md, .cursorrules…)
+  5. openlore setup                   Install workflow skills (Vibe, Cline, GSD)
+  6. openlore view                    Review visually the dependency graph
+  7. openlore generate                Create OpenSpec files using LLM
+  8. openlore verify                  Validate specs against source code
+  9. openlore drift                   Detect when code outpaces specs
+  10. openlore test                    Generate spec-driven tests or check coverage
+  11. openlore digest                  Plain-English summary of specs for human review
 
 Quick start:
   $ cd your-project

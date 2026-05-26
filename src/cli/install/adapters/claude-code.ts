@@ -8,6 +8,7 @@ import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { applyMarkdownBlock, uninstallMarkdownBlock } from './markdown-block.js';
 import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-managed.js';
+import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 
 const MD_FILE = 'CLAUDE.md';
@@ -120,6 +121,8 @@ export const claudeCodeAdapter: Adapter = {
     const finalAction =
       action === 'noop' && !sessionChanged ? 'noop' : action === 'created' ? 'created' : 'updated';
 
+    const before = had ? JSON.stringify(existing, null, 2) + '\n' : '';
+    const after = JSON.stringify(next, null, 2) + '\n';
     const change: PlannedChange = {
       path: settingsPath,
       kind: !had ? 'create' : finalAction === 'noop' ? 'noop' : 'update',
@@ -128,6 +131,11 @@ export const claudeCodeAdapter: Adapter = {
         : finalAction === 'noop'
           ? `${SETTINGS_PATH}: already up to date`
           : `update SessionStart hook + mcpServers.openlore in ${SETTINGS_PATH}`,
+      preview: !had
+        ? previewCreate(settingsPath, after)
+        : finalAction === 'noop'
+          ? undefined
+          : previewDiff(settingsPath, before, after),
     };
 
     if (!ctx.dryRun && (finalAction !== 'noop' || !had)) {

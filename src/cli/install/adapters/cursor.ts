@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { applyMarkdownBlock, uninstallMarkdownBlock } from './markdown-block.js';
 import { fingerprint } from '../block.js';
 import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-managed.js';
+import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 
 const RULES_FILE = '.cursorrules';
@@ -92,6 +93,10 @@ export const cursorAdapter: Adapter = {
       path: mdcPath,
       kind: existing === null ? 'create' : 'update',
       summary: existing === null ? `create ${MDC_FILE}` : `update ${MDC_FILE}`,
+      preview:
+        existing === null
+          ? previewCreate(mdcPath, desired)
+          : previewDiff(mdcPath, existing, desired),
     };
     if (!ctx.dryRun) {
       await mkdir(dirname(mdcPath), { recursive: true });
@@ -128,6 +133,8 @@ export const cursorAdapter: Adapter = {
     const { next: nextMcp, action: mcpAction } = mergeEntries(mcpExisting, [
       { path: 'mcpServers.openlore', value: MCP_ENTRY },
     ]);
+    const beforeMcp = mcpHad ? JSON.stringify(mcpExisting, null, 2) + '\n' : '';
+    const afterMcp = JSON.stringify(nextMcp, null, 2) + '\n';
     rulesResult.changes.push({
       path: mcpPath,
       kind: !mcpHad ? 'create' : mcpAction === 'noop' ? 'noop' : 'update',
@@ -136,6 +143,11 @@ export const cursorAdapter: Adapter = {
         : mcpAction === 'noop'
           ? `${MCP_FILE}: already up to date`
           : `update mcpServers.openlore in ${MCP_FILE}`,
+      preview: !mcpHad
+        ? previewCreate(mcpPath, afterMcp)
+        : mcpAction === 'noop'
+          ? undefined
+          : previewDiff(mcpPath, beforeMcp, afterMcp),
     });
     if (!ctx.dryRun && (mcpAction !== 'noop' || !mcpHad)) {
       await mkdir(dirname(mcpPath), { recursive: true });

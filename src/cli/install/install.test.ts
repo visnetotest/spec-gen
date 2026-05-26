@@ -33,6 +33,25 @@ describe('openlore install (end-to-end)', () => {
     expect(await exists(join(dir, '.claude/settings.json'))).toBe(false);
   });
 
+  it('--dry-run emits diff previews to stderr', async () => {
+    await writeFile(join(dir, 'CLAUDE.md'), '# project\n');
+    const captured: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      captured.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      await runInstall({ cwd: dir, agent: 'claude-code', dryRun: true });
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    const combined = captured.join('');
+    // Markdown block preview contains a diff hunk; settings.json preview shows new content.
+    expect(combined).toMatch(/\+ <!-- BEGIN OPENLORE/);
+    expect(combined).toMatch(/\(new file\).+settings\.json/);
+  });
+
   it('agent-md install creates AGENTS.md with managed block', async () => {
     const code = await runInstall({ cwd: dir, agent: 'agents-md' });
     expect(code).toBe(0);
