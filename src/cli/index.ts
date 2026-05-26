@@ -26,6 +26,7 @@ import { digestCommand } from './commands/digest.js';
 import { decisionsCommand } from './commands/decisions.js';
 import { telemetryCommand } from './commands/telemetry.js';
 import { installCommand } from './install/index.js';
+import { preflightCommand } from './preflight/index.js';
 import { configureLogger } from '../utils/logger.js';
 
 // Read version from package.json at runtime so it never drifts from the published version
@@ -91,6 +92,7 @@ Workflow:
   9. openlore drift                   Detect when code outpaces specs
   10. openlore test                    Generate spec-driven tests or check coverage
   11. openlore digest                  Plain-English summary of specs for human review
+  12. openlore preflight               CI staleness gate: fail PRs when the graph is out of date
 
 Quick start:
   $ cd your-project
@@ -138,5 +140,6 @@ program.addCommand(digestCommand);
 program.addCommand(decisionsCommand);
 program.addCommand(telemetryCommand);
 program.addCommand(installCommand);
+program.addCommand(preflightCommand);
 
 program.parse();
