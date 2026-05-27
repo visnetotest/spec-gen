@@ -15,7 +15,7 @@ Branch: `openlore-spec-04-scip-export`. Export-only shipped; import deferred per
 - [x] Fail-loudly when a node lacks a defining line; zero-width col-0 ranges + one-time warning otherwise (`TODO(spec-04-followup): column ranges in analyzer`)
 - [x] Tests + 3-file fixture (`src/core/scip/` — tests are co-located per repo convention; `test/` is gitignored): round-trip parse, byte-determinism (SHA-256), exact counts (3 docs / 4 symbols / 8 occurrences / 4 definitions), include/exclude, external-node exclusion, missing-range throw
 - [x] Docs: `docs/scip-export.md` + README "Interop" section
-- [x] `lint`, `typecheck`, `test:run` (2789 pass), `build` (proto copied to dist; built CLI verified) all green
+- [x] `lint`, `typecheck`, `test:run` (2789 pass), `build` (proto copied to dist; built CLI verified) all green — incl. CI fix: exclude `src/core/scip/fixtures/**` from ESLint typed-linting (fixtures are excluded from tsconfig, so `parserOptions.project` couldn't resolve them)
 - [ ] `TODO(spec-04-followup): scip import`
 - [ ] `TODO(spec-04-followup): column ranges in analyzer`
 
