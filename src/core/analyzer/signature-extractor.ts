@@ -22,7 +22,8 @@ export interface ExtractedSignature {
 
 export interface FileSignatureMap {
   path: string;        // relative path
-  language: string;    // 'Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Swift', 'unknown'
+  language: string;    // 'Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Java', 'C++', 'Swift',
+                       // 'C#', 'Kotlin', 'PHP', 'C', 'Scala', 'Dart', 'Lua', 'Elixir', 'Bash', IaC tags, or 'unknown'
   entries: ExtractedSignature[];
 }
 
@@ -51,14 +52,28 @@ export function detectLanguage(filePath: string): string {
     case 'rs':           return 'Rust';
     case 'rb':           return 'Ruby';
     case 'java':         return 'Java';
-    case 'kt':           return 'Kotlin';
-    case 'php':          return 'PHP';
+    case 'kt': case 'kts': return 'Kotlin';
+    case 'php': case 'phtml': return 'PHP';
     case 'cs':           return 'C#';
     case 'cpp': case 'cc': case 'cxx': case 'h': case 'hpp': return 'C++';
     case 'c':            return 'C';
     case 'swift':        return 'Swift';
+    case 'scala': case 'sc': return 'Scala';
+    case 'dart':         return 'Dart';
+    case 'lua':          return 'Lua';
+    case 'ex': case 'exs': return 'Elixir';
+    case 'sh': case 'bash': return 'Bash';
     default:             return 'unknown';
   }
+}
+
+/**
+ * Resolve the language of a `.h` header (spec-08). `.h` is claimed by both C and
+ * C++. Rule: a project with `.c` files and no C++ sources → C; otherwise C++
+ * (the default / superset, which parses C headers acceptably).
+ */
+export function resolveHeaderLanguage(hasCSources: boolean, hasCppSources: boolean): 'C' | 'C++' {
+  return (!hasCppSources && hasCSources) ? 'C' : 'C++';
 }
 
 // ============================================================================

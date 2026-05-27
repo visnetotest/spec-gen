@@ -19,6 +19,7 @@ import type { ImportMap } from './import-resolver-bridge.js';
 import { inferTypesFromSource, resolveViaTypeInference } from './type-inference-engine.js';
 import { extractAllHttpEdges } from './http-route-parser.js';
 import { buildProjectedIac } from './iac/index.js';
+import { logger } from '../../utils/logger.js';
 
 // ============================================================================
 // TYPES
@@ -1480,6 +1481,360 @@ async function extractSwiftGraph(
 }
 
 // ============================================================================
+// ADDITIONAL GENERAL-PURPOSE LANGUAGES (spec-08)
+// ============================================================================
+//
+// C#, Kotlin, PHP, C, Scala, Dart, Lua, Elixir, Bash. Each follows the existing
+// extractor pattern (lazy soft-loaded grammar + FN/CALL queries + dispatch).
+// Grammars are native modules; loaders fail SOFT (graceful degradation): a
+// missing/ABI-incompatible grammar logs one warning and skips graphing for that
+// language without aborting analyze or any other language.
+
+const _grammarCache = new Map<string, { parser: Parser; lang: object } | null>();
+const _warnedUnavailable = new Set<string>();
+
+/** Lazy, cached, soft-failing grammar loader. Returns null when unavailable. */
+async function loadGrammarSoft(
+  language: string,
+  importer: () => Promise<unknown>,
+  pick: (m: Record<string, unknown>) => unknown,
+): Promise<{ parser: Parser; lang: object } | null> {
+  if (_grammarCache.has(language)) return _grammarCache.get(language)!;
+  try {
+    const mod = (await importer()) as Record<string, unknown>;
+    const lang = pick(mod) as object;
+    if (!lang) throw new Error('grammar export resolved to undefined');
+    const parser = new Parser();
+    parser.setLanguage(lang as unknown as Parser.Language);
+    const entry = { parser, lang };
+    _grammarCache.set(language, entry);
+    return entry;
+  } catch (err) {
+    if (!_warnedUnavailable.has(language)) {
+      _warnedUnavailable.add(language);
+      logger.warning(
+        `language ${language} grammar unavailable — files will be indexed for search but not graphed (${(err as Error).message})`,
+      );
+    }
+    _grammarCache.set(language, null);
+    return null;
+  }
+}
+
+/** Reset loader caches — test-only hook for the graceful-degradation test. */
+export function __resetGrammarCacheForTests(): void {
+  _grammarCache.clear();
+  _warnedUnavailable.clear();
+}
+
+const NAME_CHILD_TYPES = new Set(['identifier', 'name', 'type_identifier', 'simple_identifier', 'word']);
+
+/** Walk up from a node to the nearest grouping construct; return its declared name. */
+function enclosingGroupName(node: Parser.SyntaxNode, classTypes: Set<string>): string | undefined {
+  let cursor = node.parent;
+  while (cursor) {
+    if (classTypes.has(cursor.type)) {
+      const nameNode = cursor.namedChildren.find(c => NAME_CHILD_TYPES.has(c.type))
+        ?? cursor.childForFieldName?.('name') ?? undefined;
+      if (nameNode) return nameNode.text;
+    }
+    cursor = cursor.parent;
+  }
+  return undefined;
+}
+
+interface QueryLangSpec {
+  language: string;
+  loader: () => Promise<{ parser: Parser; lang: object } | null>;
+  fnQuery: string;
+  callQuery: string;
+  /** Node types that form a grouping (class/object/module). Empty = no classes. */
+  classTypes: Set<string>;
+  /** Optional per-language hook to compute an extra className (e.g. Kotlin receiver). */
+  extraClassName?: (fnNode: Parser.SyntaxNode) => string | undefined;
+  /** Optional filter: only emit a call edge when this returns true. */
+  callFilter?: (calleeName: string, definedNames: Set<string>) => boolean;
+}
+
+/**
+ * Generic query-driven extractor shared by the structurally-similar languages.
+ * Mirrors the Java extractor's shape; per-language differences are expressed
+ * via the QueryLangSpec rather than copy-pasted bodies.
+ */
+async function extractByQueries(
+  spec: QueryLangSpec,
+  filePath: string,
+  content: string,
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+  const loaded = await spec.loader();
+  if (!loaded) return { nodes: [], rawEdges: [] };
+  const { parser, lang } = loaded;
+  const tree = (parser as Parser).parse(content);
+
+  const nodes: FunctionNode[] = [];
+  for (const match of safeQuery(lang, spec.fnQuery, tree.rootNode)) {
+    const nameCapture = match.captures.find(c => c.name === 'fn.name');
+    const nodeCapture = match.captures.find(c => c.name === 'fn.node');
+    if (!nameCapture || !nodeCapture) continue;
+    const name = nameCapture.node.text;
+    const fnNode = nodeCapture.node;
+    const className = (spec.classTypes.size ? enclosingGroupName(fnNode, spec.classTypes) : undefined)
+      ?? spec.extraClassName?.(fnNode);
+    const id = className ? `${filePath}::${className}.${name}` : `${filePath}::${name}`;
+    if (nodes.some(n => n.id === id)) continue; // collapse multi-clause/overloads to one node
+    nodes.push({
+      id, name, filePath, className,
+      isAsync: false,
+      language: spec.language,
+      startIndex: fnNode.startIndex,
+      endIndex: fnNode.endIndex,
+      fanIn: 0, fanOut: 0,
+      signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, spec.language),
+    });
+  }
+
+  const definedNames = new Set(nodes.map(n => n.name));
+  const rawEdges: RawEdge[] = [];
+  const seen = new Set<string>();
+  for (const match of safeQuery(lang, spec.callQuery, tree.rootNode)) {
+    const nameCapture = match.captures.find(c => c.name === 'call.name');
+    const nodeCapture = match.captures.find(c => c.name === 'call.node');
+    const objectCapture = match.captures.find(c => c.name === 'call.object');
+    if (!nameCapture || !nodeCapture) continue;
+    const calleeName = nameCapture.node.text;
+    if (isIgnoredCallee(calleeName)) continue;
+    if (spec.callFilter && !spec.callFilter(calleeName, definedNames)) continue;
+    const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
+    if (!caller) continue;
+    const calleeObject = objectCapture?.node.text;
+    const key = `${caller.id}\0${calleeName}\0${calleeObject ?? ''}\0${nodeCapture.node.startIndex}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject });
+  }
+  return { nodes, rawEdges };
+}
+
+// ── C# ──────────────────────────────────────────────────────────────────────
+const CSHARP_SPEC: QueryLangSpec = {
+  language: 'C#',
+  loader: () => loadGrammarSoft('C#', () => import('tree-sitter-c-sharp'), m => m.default),
+  classTypes: new Set(['class_declaration', 'struct_declaration', 'record_declaration', 'interface_declaration', 'enum_declaration']),
+  fnQuery: `
+    (method_declaration name: (identifier) @fn.name) @fn.node
+    (constructor_declaration name: (identifier) @fn.name) @fn.node
+    (local_function_statement name: (identifier) @fn.name) @fn.node
+  `,
+  // Name-based resolution (matches the codebase's best-effort approach): capture
+  // the callee name only — the object isn't used for resolution in these langs.
+  callQuery: `
+    (invocation_expression function: (member_access_expression name: (identifier) @call.name)) @call.node
+    (invocation_expression function: (identifier) @call.name) @call.node
+  `,
+};
+
+// ── Kotlin ──────────────────────────────────────────────────────────────────
+const KOTLIN_SPEC: QueryLangSpec = {
+  language: 'Kotlin',
+  loader: () => loadGrammarSoft('Kotlin', () => import('tree-sitter-kotlin'), m => m.default),
+  classTypes: new Set(['class_declaration', 'object_declaration', 'interface_declaration', 'companion_object']),
+  // Extension functions: `fun Foo.bar()` — receiver user_type becomes the className.
+  extraClassName: (fnNode) => {
+    const receiver = fnNode.namedChildren.find(c => c.type === 'user_type');
+    return receiver?.text;
+  },
+  fnQuery: `
+    (function_declaration (simple_identifier) @fn.name) @fn.node
+  `,
+  callQuery: `
+    (call_expression (simple_identifier) @call.name) @call.node
+    (call_expression (navigation_expression (navigation_suffix (simple_identifier) @call.name))) @call.node
+  `,
+};
+
+// ── PHP ─────────────────────────────────────────────────────────────────────
+const PHP_SPEC: QueryLangSpec = {
+  language: 'PHP',
+  loader: () => loadGrammarSoft('PHP', () => import('tree-sitter-php'), m => (m.default as { php: object }).php),
+  classTypes: new Set(['class_declaration', 'trait_declaration', 'interface_declaration', 'enum_declaration']),
+  fnQuery: `
+    (function_definition name: (name) @fn.name) @fn.node
+    (method_declaration name: (name) @fn.name) @fn.node
+  `,
+  callQuery: `
+    (function_call_expression function: (name) @call.name) @call.node
+    (member_call_expression name: (name) @call.name) @call.node
+    (scoped_call_expression name: (name) @call.name) @call.node
+  `,
+};
+
+// ── C ───────────────────────────────────────────────────────────────────────
+const C_SPEC: QueryLangSpec = {
+  language: 'C',
+  loader: () => loadGrammarSoft('C', () => import('tree-sitter-c'), m => m.default),
+  classTypes: new Set(), // C has no classes — file scope is the implicit grouping
+  fnQuery: `
+    (function_definition declarator: (function_declarator declarator: (identifier) @fn.name)) @fn.node
+  `,
+  callQuery: `
+    (call_expression function: (identifier) @call.name) @call.node
+  `,
+};
+
+// ── Scala ───────────────────────────────────────────────────────────────────
+const SCALA_SPEC: QueryLangSpec = {
+  language: 'Scala',
+  loader: () => loadGrammarSoft('Scala', () => import('tree-sitter-scala'), m => m.default),
+  classTypes: new Set(['object_definition', 'class_definition', 'trait_definition']),
+  fnQuery: `
+    (function_definition name: (identifier) @fn.name) @fn.node
+  `,
+  callQuery: `
+    (call_expression function: (identifier) @call.name) @call.node
+    (call_expression function: (field_expression field: (identifier) @call.name)) @call.node
+  `,
+};
+
+// ── Dart ────────────────────────────────────────────────────────────────────
+const DART_SPEC: QueryLangSpec = {
+  language: 'Dart',
+  loader: () => loadGrammarSoft('Dart', () => import('tree-sitter-dart'), m => (m.default as { language?: object }).language ?? m.default),
+  classTypes: new Set(['class_definition', 'mixin_declaration', 'extension_declaration', 'enum_declaration']),
+  fnQuery: `
+    (function_signature name: (identifier) @fn.name) @fn.node
+    (method_signature (function_signature name: (identifier) @fn.name)) @fn.node
+  `,
+  callQuery: `
+    (selector (argument_part)) @call.node
+  `,
+};
+
+// ── Lua ─────────────────────────────────────────────────────────────────────
+const LUA_SPEC: QueryLangSpec = {
+  language: 'Lua',
+  loader: () => loadGrammarSoft('Lua', () => import('tree-sitter-lua'), m => (m.default as { language?: object }).language ?? m.default),
+  classTypes: new Set(),
+  fnQuery: `
+    (function_declaration name: (identifier) @fn.name) @fn.node
+    (function_declaration name: (dot_index_expression field: (identifier) @fn.name)) @fn.node
+    (function_declaration name: (method_index_expression method: (identifier) @fn.name)) @fn.node
+  `,
+  callQuery: `
+    (function_call name: (identifier) @call.name) @call.node
+    (function_call name: (dot_index_expression field: (identifier) @call.name)) @call.node
+    (function_call name: (method_index_expression method: (identifier) @call.name)) @call.node
+  `,
+};
+
+// ── Bash ────────────────────────────────────────────────────────────────────
+const BASH_SPEC: QueryLangSpec = {
+  language: 'Bash',
+  loader: () => loadGrammarSoft('Bash', () => import('tree-sitter-bash'), m => m.default),
+  classTypes: new Set(),
+  // Only edge to project-defined functions, never external binaries (grep/ls/…).
+  callFilter: (calleeName, definedNames) => definedNames.has(calleeName),
+  fnQuery: `
+    (function_definition name: (word) @fn.name) @fn.node
+  `,
+  callQuery: `
+    (command name: (command_name (word) @call.name)) @call.node
+  `,
+};
+
+const QUERY_LANG_SPECS: Record<string, QueryLangSpec> = {
+  'C#': CSHARP_SPEC, 'Kotlin': KOTLIN_SPEC, 'PHP': PHP_SPEC, 'C': C_SPEC,
+  'Scala': SCALA_SPEC, 'Dart': DART_SPEC, 'Lua': LUA_SPEC, 'Bash': BASH_SPEC,
+};
+
+// ── Elixir (custom walk — everything is a `call` node) ───────────────────────
+const ELIXIR_DEF_KEYWORDS = new Set(['def', 'defp', 'defmacro', 'defmacrop']);
+
+async function extractElixirGraph(
+  filePath: string,
+  content: string,
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+  const loaded = await loadGrammarSoft('Elixir', () => import('tree-sitter-elixir'), m => m.default);
+  if (!loaded) return { nodes: [], rawEdges: [] };
+  const tree = (loaded.parser as Parser).parse(content);
+
+  const nodes: FunctionNode[] = [];
+  const calls: Array<{ name: string; object?: string; pos: number; row: number }> = [];
+
+  const targetIdent = (call: Parser.SyntaxNode): Parser.SyntaxNode | undefined => {
+    const t = call.childForFieldName('target');
+    return t ?? call.namedChildren[0];
+  };
+
+  const walk = (node: Parser.SyntaxNode, moduleName: string | undefined) => {
+    if (node.type === 'call') {
+      const target = targetIdent(node);
+      const kw = target?.type === 'identifier' ? target.text : undefined;
+      const args = node.childForFieldName('arguments') ?? node.namedChildren.find(c => c.type === 'arguments');
+
+      if (kw === 'defmodule') {
+        const aliasNode = args?.namedChildren.find(c => c.type === 'alias');
+        const newModule = aliasNode?.text ?? moduleName;
+        for (const child of node.namedChildren) walk(child, newModule);
+        return;
+      }
+      if (kw && ELIXIR_DEF_KEYWORDS.has(kw)) {
+        // First argument is the function head: an identifier (no args) or a call (with args).
+        const head = args?.namedChildren[0];
+        let fnName: string | undefined;
+        let arity = 0;
+        if (head?.type === 'identifier') { fnName = head.text; }
+        else if (head?.type === 'call') {
+          const ht = head.childForFieldName('target') ?? head.namedChildren[0];
+          fnName = ht?.text;
+          const hargs = head.childForFieldName('arguments') ?? head.namedChildren.find(c => c.type === 'arguments');
+          arity = hargs?.namedChildren.length ?? 0;
+        }
+        if (fnName) {
+          const id = moduleName ? `${filePath}::${moduleName}.${fnName}` : `${filePath}::${fnName}`;
+          const existing = nodes.find(n => n.id === id);
+          if (existing) {
+            existing.signature = `${existing.signature} (+clause)`;
+          } else {
+            nodes.push({
+              id, name: fnName, filePath, className: moduleName, isAsync: false,
+              language: 'Elixir', startIndex: node.startIndex, endIndex: node.endIndex,
+              fanIn: 0, fanOut: 0, signature: `${kw} ${fnName}/${arity}`,
+            });
+          }
+        }
+        // Recurse into the body for nested calls.
+        for (const child of node.namedChildren) walk(child, moduleName);
+        return;
+      }
+
+      // Otherwise it's a call site: local `fun(...)` or remote `Mod.fun(...)`.
+      if (target?.type === 'identifier' && !ELIXIR_DEF_KEYWORDS.has(target.text)) {
+        calls.push({ name: target.text, pos: node.startIndex, row: node.startPosition.row });
+      } else if (target?.type === 'dot') {
+        const right = target.childForFieldName('right') ?? target.namedChildren[target.namedChildren.length - 1];
+        const left = target.childForFieldName('left') ?? target.namedChildren[0];
+        if (right) calls.push({ name: right.text, object: left?.text, pos: node.startIndex, row: node.startPosition.row });
+      }
+    }
+    for (const child of node.namedChildren) walk(child, moduleName);
+  };
+  walk(tree.rootNode, undefined);
+
+  const rawEdges: RawEdge[] = [];
+  const seen = new Set<string>();
+  for (const c of calls) {
+    if (isIgnoredCallee(c.name)) continue;
+    const caller = findEnclosingFunction(nodes, c.pos);
+    if (!caller) continue;
+    const key = `${caller.id}\0${c.name}\0${c.object ?? ''}\0${c.pos}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rawEdges.push({ callerId: caller.id, calleeName: c.name, line: c.row + 1, calleeObject: c.object });
+  }
+  return { nodes, rawEdges };
+}
+
+// ============================================================================
 // CLASS HIERARCHY EXTRACTION
 // ============================================================================
 
@@ -1901,6 +2256,11 @@ export class CallGraphBuilder {
           result = await extractCppGraph(file.path, file.content);
         } else if (file.language === 'Swift') {
           result = await extractSwiftGraph(file.path, file.content);
+        } else if (file.language === 'Elixir') {
+          result = await extractElixirGraph(file.path, file.content);
+        } else if (QUERY_LANG_SPECS[file.language]) {
+          // spec-08 additional languages (C#, Kotlin, PHP, C, Scala, Dart, Lua, Bash).
+          result = await extractByQueries(QUERY_LANG_SPECS[file.language], file.path, file.content);
         } else {
           continue;
         }
