@@ -1,280 +1,305 @@
 # OpenLore Spec 13 — The Context Substrate (True North)
 
 > This is a **strategy + architecture** spec, not a single-PR prompt. It defines the
-> direction every subsequent spec should serve, and seeds the concrete next specs
-> (14+) that implement it incrementally. Read it before proposing any large feature.
+> direction every subsequent spec should serve.
+>
+> **Revision note (2026-05-30):** the first draft of this spec overstated several things
+> (a built "code↔org join," "bidirectional SCIP," a published token-savings benchmark, a
+> Zed integration). A verification pass against the codebase and primary sources corrected
+> them. This revision is deliberately **honest about what exists vs. what is aspirational** —
+> because the entire bet depends on claims a reviewer can check in 60 seconds.
 
 ---
 
 ## Progress
 
-Branch: `openlore-spec-13-context-substrate`. Vision locked; roadmap defined; implementation specs to follow.
+Branch: `openlore-spec-13-context-substrate`. Direction locked; claims verified; roadmap is benchmark-first.
 
-- [x] Strategic direction chosen by owner (2026-05-29): **substrate/plumbing**, not breadth-product
-- [x] Competitive landscape mapped (Glean, Onyx, MCP connector zoo, coding-context maps, protocol precedents)
-- [x] Core thesis stated and stress-tested: the *deterministic substrate* bet
-- [x] Compounding roadmap defined (git/co-change → forge → tracker → docs → comms → semantic)
-- [x] Scope discipline written (what OpenLore must NEVER become)
-- [ ] `TODO(spec-14)`: Git / co-change layer — no OAuth, no LLM, ships to every coding agent
-- [ ] `TODO(spec-15)`: Connector write-contract v1 — the ~50-line plugin shape
-- [ ] `TODO(spec-16)`: Cross-source deterministic resolver (ID/URL/email join)
-- [ ] `TODO(spec-17)`: `orient()` over the merged graph — token-budgeted subgraph response
-- [ ] `TODO(future)`: Forge / tracker / docs / comms connectors (each rides existing MCP servers)
-
----
-
-## Context for you (the agent / the maintainer)
-
-OpenLore today is a **deterministic, local-first, token-cheap context engine for code**:
-tree-sitter call graph + clusters + McCabe (no API key), an optional LLM spec/decision
-layer, and a 45-tool MCP runtime fronted by `orient()`. Its measured value is replacing
-15,000–50,000 tokens of file-by-file rediscovery with a ~1–3k targeted orientation pass.
-
-The question this spec answers: **what does OpenLore become next, and what does it
-refuse to become?**
-
-The space is crowded and well-funded:
-
-- **Glean** — enterprise knowledge graph; the real moat is **real-time ACL mirroring**
-  across 100+ connectors, sold to IT. That mirroring is both its moat and its tarpit.
-- **Onyx (ex-Danswer)** — the OSS Glean: MIT, self-hostable, 40+ connectors, hybrid
-  vector+keyword RAG. But it is a **chat-over-your-docs product**, not an agent context layer.
-- **The MCP connector zoo** — Atlassian (official), Notion (official), Google Workspace,
-  Gmail. OAuth + fetching is **already solved**. But these are **dumb pipes**: query-time
-  tools that dump raw pages into the agent's context. Nobody *structures across them*.
-- **Coding-context maps** — Cursor's index, Sourcegraph (Cody/Amp + **SCIP/LSIF**),
-  Augment, Continue, Aider's repo-map. Most are embeddings-over-text or closed/cloud.
-- **Protocol precedents** — **tree-sitter, LSP, SCIP, LSIF, Kythe, GraphRAG.** The
-  durable winners in this space won by being a **contract**, not an app.
-
-### The decision
-
-> **OpenLore is plumbing, not a product.** Its job is to be the deterministic context
-> *substrate* that any agent or tool builds on — the "tree-sitter / SCIP for agent
-> context" — not a Glean-style breadth product with 40 connectors and a chat UI.
-
-This single decision cascades and resolves two otherwise-hard forks for free:
-
-1. **Whose permissions?** → Substrate + local-first ⟹ **token-scoped, not org-wide.**
-   The agent sees what *your* OAuth token sees. No ACL-mirroring engine to build, no
-   security-review nightmare to own. We deliberately cede Glean's enterprise-ACL moat
-   because it is also its tarpit; our user is the *developer and their agent*, not IT.
-2. **Build connectors or ride MCP?** → Substrate ⟹ **ride the existing MCP connectors.**
-   Official Atlassian/Notion/Google MCP servers already solved OAuth + fetch. OpenLore
-   sits **above** them as the layer that builds the deterministic, cross-joined graph.
-   We do not re-implement OAuth twelve times. We do not enter the connector graveyard.
+- [x] Strategic lens chosen by owner (2026-05-29): **substrate/plumbing**, not breadth-product
+- [x] Competitive + market reality verified against primary sources (2026-05-30)
+- [x] Repo ground-truth established (what actually ships vs. what was claimed)
+- [x] Theses adversarially stress-tested; positioning corrected to survive the strongest attack
+- [ ] `TODO(spec-14)`: **WITH-vs-WITHOUT token-savings benchmark** — the bleeding wound; do this FIRST
+- [ ] `TODO(spec-15)`: Dogfood the decision/drift governance in OpenLore's own repo
+- [ ] `TODO(spec-16)`: Promote `Decision` to a first-class graph node with `affects` edges
+- [ ] `TODO(spec-17)`: Cross-domain impact query (code → infra) as a headline `orient` capability
+- [ ] `TODO(spec-18)`: Local org-artifact join (git/PR metadata via local `gh`) — no OAuth
+- [ ] `TODO(horizon-3, optional, may never ship)`: cloud OAuth connectors as a fire-walled plugin
 
 ---
 
-## The core thesis (the load-bearing bet)
+## Context — the decision and what it cascades
 
-> **There is a large DETERMINISTIC substrate inside org data that competitors needlessly
-> pay an LLM / embeddings to rediscover.**
+OpenLore today is a **deterministic, local-first code context engine**: a tree-sitter call
+graph + clusters + McCabe (no API key), an optional LLM spec/decision layer, and a 45-tool
+MCP runtime fronted by `orient()`.
 
-Glean and Onyx treat everything as text → embed → retrieve. But an enormous amount of
-structure is **explicitly stated** and needs no inference:
+The owner chose the **substrate/plumbing** lens (be the layer others build on, like
+tree-sitter / SCIP / LSP), not the Glean-style breadth product. That single choice cascades:
 
-| Source | Deterministic structure (no LLM) |
-|--------|----------------------------------|
-| Jira / Linear | epics→stories→subtasks, blocks/blocked-by, assignees, sprints, status transitions |
-| Confluence / Notion | page trees, backlinks, @mentions, spaces |
-| Google Drive | folder tree, sharing/ownership edges, doc-to-doc links |
-| Gmail / Slack | thread structure (`References`/`In-Reply-To`), sender/recipient graph |
-| GitHub / forge | PR ↔ issue ↔ commit ↔ file, reviews, cross-refs |
-| Code (today) | call graph, imports, clusters — already OpenLore's core |
+1. **Whose permissions?** → local-first ⟹ **token-scoped, not org-wide.** No ACL-mirroring
+   engine (Glean's moat *and* its tarpit). Our user is the developer and their agent, not IT.
+2. **Build connectors or ride MCP?** → substrate ⟹ ride existing MCP connectors where org
+   data is ever needed; do not re-implement OAuth twelve times.
 
-And the gold nobody mines: **these systems cross-reference each other.** A Jira ticket
-pastes a Confluence URL that links a Google Doc implemented in a GitHub PR discussed in
-an email thread. **Every one of those edges is a deterministic join on an ID, URL, or
-email address** — no embeddings, no hallucinated relationships, fully auditable, offline.
-
-This is *exactly* OpenLore's existing philosophy (Layer 1 = deterministic; Layers 2/3 =
-optional semantic) applied to the org instead of the repo. Embeddings are reserved only
-for the genuinely fuzzy edge — "these two docs are *about* the same thing even though
-neither links the other" — which becomes an **optional** layer on top, same as for code.
-
-### The unique unlock — the join no competitor has
-
-OpenLore already owns the **code graph**. Glean and Onyx index code as *text*; they are
-blind to call topology. Coding-context maps own the code graph but have no org context.
-**Nobody joins the two.** Wire the call graph into the org graph in one structure and you
-get an edge chain that is genuine white space:
-
-```
-function exportToCsv()
-   → implements   → JIRA-412
-   → specced-in   → Confluence "Export v2"
-   → designed-in  → Drive design doc
-   → discussed-in → email thread
-```
-
-When an agent says *"implement OAuth for the export feature,"* one `orient()` call returns
-that whole subgraph — ranked, with ~200-token summaries and stable IDs — instead of six
-MCP calls dumping 50k tokens of raw pages. The agent then lazy-fetches only the one or two
-leaves it actually needs. **That is the token-saving, context-management story, and it is
-just `orient()` extended past the repo boundary.**
+The rest of this spec is about getting the *positioning* right, because the lens alone does
+not survive contact with the 2026 market without a sharper claim.
 
 ---
 
-## What "be plumbing" actually means
+## The verified market reality (2026)
 
-The precedent to copy is **tree-sitter / SCIP / LSP**: adopted because they are a
-*contract*, not an app. OpenLore-the-binary becomes the **reference implementation** of a
-contract that others can emit into, query, or reimplement. Three things must be nailed:
+**Several leading coding agents have de-emphasized embedding-based RAG for code *navigation*
+in favor of on-demand agentic search (grep/glob/file-reading).** This is real and primary-sourced,
+but "RAG is dead for coding agents" is commentator hype — state it precisely:
 
-### 1. The format (the actual deliverable)
+- **Confirmed (primary):** Claude Code deliberately moved *off* a local vector DB to agentic
+  search. Boris Cherny (Claude Code creator, Anthropic): *"Early versions of Claude Code used
+  RAG + a local vector db, but we found pretty quickly that agentic search generally works
+  better… It is also simpler and doesn't have the same issues around security, privacy,
+  staleness, and reliability."* and *"It outperformed everything. By a lot."* (Latent Space,
+  2025-05-07; HN item 43164253).
+- **Counter-example (do not ignore):** **Cursor invested in custom code embeddings** and reports
+  measurable gains (≈12.5% higher answer accuracy; better retention on 1,000+ file repos),
+  concluding the best results come from **grep + semantic search combined** (cursor.com/blog/semsearch,
+  2025-11-06).
+- **Consensus:** the winning pattern is **hybrid** — lexical/symbol search for source code,
+  semantic retrieval for large/unstructured corpora (Augment: *"don't throw away your retrieval
+  systems — expose them as tools"*, jxnl.co, 2025-09-11). The anti-RAG case is **scoped to
+  navigating structured source code**, not document Q&A.
 
-A versioned, **on-disk, git-diffable** node/edge schema with **provenance**. Deterministic
-means inspectable: you can `cat` the graph and see exactly *why* an edge exists — which URL,
-which ID, which commit produced it. No black-box embedding silently deciding a relationship.
-
-This already has seeds in-repo: **Spec 04 (SCIP export)** makes the code graph consumable by
-the SCIP/Glean ecosystem; **Spec 05 (federation manifest, `.well-known/openlore.json`)** is
-the "SBOM-of-cognition" self-description. Spec 13 generalizes these: the context graph is the
-union of code symbols + org nodes + the deterministic edges between them, persisted locally.
-
-Minimal node/edge contract (v1 sketch — to be pinned in Spec 15/16):
-
-```jsonc
-// Node — anything addressable across any source
-{
-  "id": "openlore://github/clay-good/openlore/pr/95",  // stable, source-qualified URI
-  "type": "pull_request",          // function | file | issue | doc | page | email | person | commit | pr ...
-  "source": "github",
-  "title": "fix: quiet install re-runs",
-  "ts": "2026-05-28T14:02:00Z",
-  "perms": "token-scoped",         // visible because YOUR token saw it; no ACL mirror
-  "summary": null                  // optional, lazily filled; NOT raw content
-}
-
-// Edge — every edge carries provenance so it is auditable
-{
-  "from": "openlore://github/.../pr/95",
-  "to":   "openlore://jira/PROJ/issue/412",
-  "type": "references",            // implements | references | mentions | parent_of | authored_by | co_changes_with | specced_in ...
-  "deterministic": true,
-  "provenance": { "kind": "url_in_body", "evidence": "https://.../browse/PROJ-412" }
-}
-```
-
-### 2. The read interface
-
-`orient()` over MCP — already shipped for code; extended to traverse the merged graph.
-"Go-to-definition" for *context*. Stable verb, agent-agnostic.
-
-### 3. The write contract
-
-A connector so small (~50 lines: "emit these nodes, these edges") that the community
-actually writes them. Heaviness is what killed prior connector ecosystems. Where possible,
-a connector is a **thin adapter over an existing MCP server**, not a fresh OAuth client.
+**Implication for OpenLore:** do not pitch a *better index*. The defensible lane is the
+**structural / relational** answer that grep is architecturally incapable of giving cheaply —
+reverse edges (callers), transitive blast radius, call paths, cross-file/infra dependency
+projection — answered in **one** MCP call instead of O(many) grep+read round-trips, and kept
+**fresh incrementally** so it never carries the staleness tax Cherny rejected.
 
 ---
 
-## The compounding roadmap (the part that adds up)
+## The competitive landscape (honest, as-of 2026-05-30)
 
-Every new source is the **same move**: ingest → extract its native deterministic graph →
-join to the existing graph on shared IDs/URLs/emails. Each join makes *every prior source
-more valuable*, because edges compose into multi-hop chains. Sequenced cheapest-and-highest-
-trust first:
+The pure "local code-graph MCP" lane is **crowded**, and two competitors have far more
+traction than OpenLore. Stated plainly so we never pretend otherwise:
 
-1. **Git / co-change layer — `TODO(spec-14)`.** *No OAuth, no LLM, already local.* Blame,
-   history, and the killer signal AST cannot see: **co-change edges** ("these files/functions
-   change together"). Bridges code → people → intent before touching a single connector.
-   Ships value to **every** coding agent on day one. **This is the wedge.**
-2. **Forge layer (your token).** PR ↔ issue ↔ commit ↔ file ↔ review. Explicit links =
-   deterministic. Code gets its first layer of *why*. Reuses Spec 04/05 plumbing.
-3. **Tracker layer (Jira / Linear via MCP).** Issue/epic graph + its explicit PR links.
-   code → PR → issue → epic.
-4. **Docs layer (Confluence / Notion / Drive via MCP).** Page trees, backlinks, and the
-   cross-source URLs that link docs to issues. The cross-source join lights up here.
-5. **Comms layer (Gmail / Slack).** Thread graph + the URLs inside messages. The
-   "discussed-in" edges that close the loop back to code.
-6. **Semantic layer (optional, last).** Embeddings *only* for the fuzzy "about the same
-   thing" edges the deterministic layers cannot produce. Exactly today's Layer-1/Layer-2 split.
+| Project | License | Tech | Stars* | Notable |
+|---------|---------|------|--------|---------|
+| **Serena** (`oraios/serena`) | MIT | **LSP-based** (not tree-sitter) | ~24,800 | Symbolic retrieval + editing; "the IDE for your agent." No published token benchmark. |
+| **CodeGraph** (`colbymchenry/codegraph`) | MIT | tree-sitter → SQLite/FTS5 | ~34,000 | ~10 MCP tools (`trace/callers/callees/impact`). **Publishes a WITH-vs-WITHOUT benchmark.** |
+| **tokensave** (`aovestdipaperino/tokensave`) | MIT | tree-sitter → libSQL/FTS5 | ~150 | 40+/48 MCP tools; self-reported "93% retrieval savings" (largely on its own repo). |
+| **code-graph-mcp** (`sdsrss/...`) | **unverifiable** (no LICENSE file) | tree-sitter | ~37 | Self-reported "5–20× fewer tokens." Low traction. |
 
-By step 5, a single `orient()` traverses `function → PR → issue → doc → email` in one chain
-no competitor can produce — reached by adding edge *types* to one graph, never rebuilding.
+\* GitHub API, 2026-05-30; stars move — cite with the as-of date.
 
-### Cross-cutting concerns each step inherits
+**CodeGraph already ships the benchmark we were claiming as our moat.** Its README reports
+(median of 4 runs, 7 OSS repos, Claude Opus 4.8 headless, with/without its MCP server):
+**"25% cheaper, 57% fewer tokens, 23% faster, 62% fewer tool calls"** (per-repo highs reach
+~70% fewer tokens / ~80% fewer tool calls). The "~35% / ~70%" figure seen elsewhere is a
+third-party blog tagline / per-repo best, not its headline average — do not misquote it.
 
-- **Identity resolution.** Stitch "Clay in Jira" = "clay-good on GitHub" = "hi@claygood.com"
-  deterministically on email/handle where possible; a small fuzzy layer only for the residual.
-  Persisted as `person` nodes with `same_as` edges carrying provenance.
-- **Freshness.** Today's file-watcher does incremental code sync. The analog is webhook/delta
-  pull per source. Real-time is *not* required for v1 — a manual/periodic refresh is fine; the
-  graph records `ts` so staleness is visible. Do not over-build sync before the graph is proven.
-- **Token-scoped permissions.** No ACL mirror. Every node is in the graph because *your* token
-  fetched it. This is a feature (zero security engine), documented as an explicit non-goal of
-  enterprise multi-tenant indexing.
+**The redundancy risk is therefore the #1 risk, and it lands hardest in the narrow lane.**
+If OpenLore ships "another local code-graph MCP," it loses a knife fight on traction and
+published evidence. The only escape is to compete where these tools **do not play at all**
+(see "True North" below) and to publish our own benchmark (see roadmap step 1).
 
 ---
 
-## Scope contract — what OpenLore must NEVER become
+## Ground truth — what OpenLore *is*, and what it is *not yet*
 
-To stay plumbing and not drift into a product:
+This section exists so no future claim outruns the code. All items verified against the repo
+on 2026-05-30.
 
-- **No chat UI.** We do not answer questions; we serve a graph the agent reasons over.
-- **No LLM hosting / no embedding service.** Semantic layer is optional and BYO (see Spec 06,
-  BM25-without-embeddings — deterministic retrieval must always work with zero network).
-- **No org-wide ACL mirroring / multi-tenant index.** Token-scoped only. Ceded to Glean on purpose.
-- **No re-implementing OAuth per service.** Ride existing MCP connectors; thin adapters only.
-- **No mirroring of raw content.** Store the **graph** (IDs, links, titles, small summaries,
-  provenance) and **lazy-fetch** content on demand. Token savings come from never pulling a full
-  doc until the agent picks it.
-- **No required network, ever, for the deterministic core.** Offline-first is identity, not a feature.
+### Confirmed assets (real, citable)
 
-The test, inherited from the project's surgical-change ethos: **every feature must make the
-graph more queryable or more deterministic. If it adds a surface the agent talks *to* instead
-of a graph the agent reasons *over*, it does not belong in OpenLore.**
+- **Deterministic code graph + fast orient.** `orient()` path (search + 5×callers + callees)
+  runs **~429µs p50** on the TypeScript compiler (~15k nodes), per
+  [scripts/BENCHMARKS.md](../../scripts/BENCHMARKS.md) (200 iters after warmup) and
+  [README.md:206](../../README.md#L206). High trust; repeatable.
+- **Typed edges, but only four kinds.** `EdgeKind = 'calls' | 'tested_by' | 'references' |
+  'depends_on'` — [src/core/analyzer/call-graph.ts:39](../../src/core/analyzer/call-graph.ts#L39).
+  `references`/`depends_on` are produced **only by the IaC parsers**; `tested_by` by test
+  detection. **No edge originates from git, PRs, or docs.**
+- **Code + infrastructure on one primitive.** The IaC subsystem (terraform/pulumi/k8s/
+  cloudformation/cdk/ansible/helm) projects resources onto the *same* `FunctionNode/CallEdge/
+  ClassNode` graph — [src/core/analyzer/iac/types.ts](../../src/core/analyzer/iac/types.ts),
+  [project.ts](../../src/core/analyzer/iac/project.ts). **This is a genuine differentiator no
+  code-only competitor has.**
+- **Decision store + spec-drift gate.** Decisions carry SHA-stable 8-char IDs and `affectedFiles`
+  ([src/core/decisions/store.ts:123](../../src/core/decisions/store.ts#L123),
+  [src/types/index.ts](../../src/types/index.ts)); the `record_decision → consolidate → commit
+  gate → spec sync → drift` workflow exists in code. **No navigation competitor ships decision
+  governance or a spec-drift gate.**
+- **SCIP export** with a correct human-readable string-moniker scheme
+  ([src/core/scip/moniker.ts](../../src/core/scip/moniker.ts)).
+
+### What does NOT exist yet (do not claim it)
+
+- **There is no "code↔org join via parsed edges."** Three of the four advertised org artifacts
+  are unbuilt: **PRs are never parsed; git is used only for changed-file drift diffing; in-repo
+  docs are explicitly *excluded* from drift** ([drift-detector.ts](../../src/core/services/drift-detector.ts)
+  skips `docs/`). The fourth (decisions) is **not a graph join** — `orient` surfaces decisions
+  by a plain string set-membership test on `affectedFiles`
+  ([orient.ts:367](../../src/core/services/mcp-handlers/orient.ts#L367)), not a traversable edge.
+- **SCIP is one-way export only** — [src/cli/export/scip.ts:6](../../src/cli/export/scip.ts#L6)
+  says so explicitly. There is no import path. **Do not brand "bidirectional SCIP."**
+- **The headline "~1–3k vs 15–50k tokens" claim is unmeasured.** It is a generic assertion in
+  [README.md:19](../../README.md#L19), not a benchmark. There is no end-to-end WITH-vs-WITHOUT
+  agent-run measurement in the repo; `BENCHMARKS.md` measures raw DB query latency only.
+- **No Zed integration exists.** Install targets are Claude Code, Cursor, Cline, Continue,
+  AGENTS.md. Earlier drafts' "Zed has no index" anchor was fabricated — drop it.
+- **Decision content is LLM-extracted**, so "deterministic" applies to the graph and the
+  ID/file addressing, **not** to the decision text.
+- **The governance gate is not even active in OpenLore's own repo** (its `.openlore/decisions/`
+  is empty). The flagship dogfood project does not yet run its own differentiator.
+
+---
+
+## The True North
+
+> **OpenLore is the always-fresh, deterministic *structural substrate beneath* agentic search —
+> it answers who-calls / what-breaks / call-path in one sub-millisecond MCP call against a typed
+> code graph that also spans infrastructure, and it uniquely pairs that graph with a governance
+> layer (recorded decisions + a spec-drift gate) that no navigation competitor ships.**
+
+The substrate is the **credibility proof**, not the pitch. The pitch is the two things the
+crowded cohort does not have: **cross-domain (code↔infra) impact** and **decision/drift
+governance coupled to the graph.**
+
+**Defense against the strongest attack** — the marginal-value / "Cherny killed the index"
+objection: Anthropic moved Claude Code off a *semantic RAG embeddings* index, a like-for-like
+substitution where lexical grep genuinely won. OpenLore is not a semantic retriever; it is a
+**typed relational graph** answering reverse-edge and transitive-impact queries that iterative
+grep+read can only reconstruct through many round-trips. The staleness tax Cherny rejected was a
+*batch re-index*; OpenLore answers it with **incremental** watcher updates, so the staleness
+surface is small. This survives — but only once the benchmark (step 1) proves the round-trip
+savings are real. Until then it is a hypothesis, not a result.
+
+---
+
+## How the org-context dream fits — the honest answer
+
+The owner's original excitement was bringing in **all** context (Jira/Notion/Drive/Gmail via
+OAuth) and joining it to code. Here is the truth, sequenced:
+
+- **It is a deferred horizon — closer to a separate product than to core.** The deterministic
+  code↔org *join* does not exist today (3 of 4 artifacts unbuilt; decisions are a filter).
+- **Cloud OAuth connectors would detonate OpenLore's one verified advantage.** The moment you
+  ingest Gmail/Drive/Jira over OAuth, you inherit exactly what Cherny listed as reasons to
+  *avoid* an index — security, privacy, staleness, "uploading sensitive context to a third
+  party." OpenLore's entire credibility rests on *local, deterministic, no cloud.* Cloud
+  connectors trade the moat for a feature Glean and every RAG vendor already sell.
+- **So the join enters LOCAL-first, with zero cloud surface:** git history + PR metadata via
+  local `gh`/git, and in-repo ADRs/docs as decision sources. That is the "code↔org join" made
+  real without OAuth.
+- **Cloud OAuth is horizon-3:** opt-in, clearly fire-walled, **never default, never the pitch**,
+  and only after the local join is proven and adopted. It may never ship — and that is fine.
+
+The vision is preserved. It is just correctly sequenced behind the things that make OpenLore
+defensible first.
+
+---
+
+## The compounding roadmap (benchmark-first, local throughout)
+
+Each step ships on what exists and makes the next cheaper.
+
+1. **Ship the WITH-vs-WITHOUT benchmark first.** Claude Code headless, N≥4 runs, ≥5 OSS repos,
+   with/without the MCP server, reporting tokens / tool-calls / cost / wall-clock in a per-repo
+   table — mirror CodeGraph's published methodology so it is apples-to-apples. Until it lands,
+   **demote the README "~1–3k vs 15–50k" line to a hypothesis.** *Verify:* a reproducible
+   `BENCHMARKS.md` end-to-end section. *This step decides which product OpenLore actually is.*
+2. **Dogfood the governance.** Turn the gate on in OpenLore's own repo; accumulate real
+   decisions; sync them into specs. *Verify:* non-empty decision store + synced spec sections.
+3. **Make `Decision` a first-class graph node** with `affects` edges to functions/files,
+   traversable by `analyze_impact`/`get_subgraph`. This converts the string-filter weakness into
+   the deterministic join we want. *Verify:* `analyze_impact(file)` returns decisions as graph
+   neighbors, not a post-hoc filter.
+4. **Land the cross-domain impact query** — route → handler → the Terraform/K8s resource that
+   deploys it. The IaC subsystem already shares primitives; wire the end-to-end traversal as a
+   headline capability. *Verify:* one published code→infra blast-radius example. No grep-agent
+   or code-only competitor can do this.
+5. **Local org-artifact join — no OAuth.** Parse git blame/history + PR metadata via local
+   `gh`/git into `authored_by`/`changed_in_pr` edges; ingest in-repo ADRs as decision sources.
+   *Verify:* orient surfaces "who last changed this, in which PR/decision" as graph edges.
+6. **Harden distribution on real anchor hosts.** Lead with **Claude Code** (verified: off RAG,
+   native grep, no index — the textbook complement). One-command install tested for Claude
+   Code + Cursor + Cline. (Only name Zed if/when it is actually wired.)
+7. **(Horizon-3, optional, may never ship) Cloud OAuth connectors** as a fire-walled, opt-in
+   plugin. Only after 1–5 prove the local join is adopted. The *only* step where cloud enters.
+
+---
+
+## What to explicitly NOT build
+
+- **No semantic/embedding RAG for code navigation.** The graph is relational, not semantic;
+  keep it that way. You lose to free built-in grep there.
+- **No "bidirectional SCIP" branding.** It is one-way export
+  ([src/cli/export/scip.ts:6](../../src/cli/export/scip.ts#L6)). Frame it honestly as "export
+  for Sourcegraph/Glean interop." Stop making it a headline noun.
+- **No cloud OAuth connectors as a core/default feature.** They detonate the local-deterministic
+  moat. Plugin-only, horizon-3, or not at all.
+- **No fighting bare code-navigation on traction.** Serena (~24.8k) and CodeGraph (~34k) win
+  that fight. Do not pitch "a better grep."
+- **No tool-count race.** tokensave ships 48 tools; that is surface area, not a moat. Keep
+  `orient` as the frozen single entry verb (the LSP lesson: standardize the thinnest contract).
+- **No chat UI, no LLM hosting, no agent loop.** Be the layer others build above.
+- **No claiming benchmarks or integrations you have not shipped.** A reviewer falsifies the
+  15–50k figure and the Zed claim in 60 seconds, and it taints everything else that is true.
 
 ---
 
 ## Positioning
 
-> **OpenLore: the deterministic context graph for AI agents — tree-sitter for your org,
-> not just your code.**
+> **OpenLore is the always-fresh code graph beneath your agent: one `orient()` call gives
+> who-calls, what-breaks, and call-path that grep would burn 20 round-trips to rebuild — plus
+> the only decision-and-drift governance layer that travels with the code.**
 
-Local-first. Token-cheap. Auditable edges. Rides the MCP ecosystem it sits above.
+Local-first. Token-scoped. Auditable edges. Code *and* infrastructure on one graph.
 
 ---
 
-## Risks and kill signals
+## Biggest risk + earliest kill signal
 
-| Risk | Earliest signal the bet is wrong |
-|------|----------------------------------|
-| **Redundancy with coding-context maps** (Cursor/SCIP/Augment already "good enough") | Spec 14 (co-change) lands and no agent workflow measurably improves over plain file reads |
-| **Deterministic substrate is too thin** — the useful edges turn out to need LLM inference after all | In the forge/tracker layers, >50% of valuable edges require fuzzy matching, not ID/URL joins |
-| **Connector contract too heavy** — community doesn't write connectors | After Spec 15, no external contributor ships a connector in <1 day |
-| **MCP servers can't bulk-crawl** — query-time tools won't enumerate for graph construction | Tracker/docs layers stall because official MCP servers expose no listing; forces direct-API fallback (raises maintenance back toward connector-graveyard levels) |
-| **No distribution** — substrate with no consumers | After 6 months, OpenLore is not the default context layer under any agent it didn't ship itself |
+- **Biggest risk: marginal-value collapse.** If, in real agent loops, "a few greps" get close
+  enough to one `orient()` call, the freshness/structure tax is not worth it and OpenLore is a
+  complement nobody installs — exactly the lane Cherny's data threatens.
+- **Earliest kill signal:** the step-1 benchmark comes back showing **<15% token/tool-call
+  reduction** vs. plain agentic grep on relational queries (meaningfully worse than CodeGraph's
+  published ~25%/~62%). If so, the substrate pitch is dead and the only surviving reason to
+  exist is the **governance layer** — at which point pivot hard to "decision-and-drift
+  governance for agents" and stop competing as a code graph at all.
 
-The single biggest risk is **redundancy**: if the coding-context incumbents are already
-good enough that the *deterministic + cross-domain join* doesn't change agent outcomes, the
-substrate has no reason to exist. The co-change layer (Spec 14) is deliberately first because
-it is the cheapest possible test of that risk — it needs no auth, no LLM, and either visibly
-improves orientation or it doesn't.
+**Run the benchmark before writing another line of feature code. It tells you which product you
+actually have.**
 
 ---
 
 ## Relationship to existing specs
 
-- **Spec 04 (SCIP export)** — interop format; the code half of the substrate, already shippable.
-- **Spec 05 (federation manifest)** — cross-repo self-description; the "SBOM of cognition." The
-  context graph is the natural superset (org nodes + cross-source edges added to the same idea).
+- **Spec 04 (SCIP export)** — one-way export for ecosystem interop. Honest framing only.
+- **Spec 05 (federation manifest)** — cross-repo self-description ("SBOM of cognition"); the
+  natural superset once the single-repo graph is proven.
 - **Spec 06 (BM25 without embeddings)** — guarantees deterministic retrieval with zero network;
-  the floor the semantic layer sits on top of, never replaces.
-
-Specs 14–17 (git/co-change, connector contract, cross-source resolver, merged `orient()`) are
-the concrete first implementations of this true north and should be written next.
+  the floor any optional semantic layer sits on, never replaces.
 
 ---
 
-## Appendix — the reasoning trail (brainstorm of 2026-05-29)
+## Sources & verification provenance
 
-This spec is the durable output of a brainstorming session. The reasoning, the rejected
-alternatives, and the multi-agent stress-test synthesis are appended below so a future
-session can re-derive *why* without repeating the exploration.
+External (primary unless noted):
+- Cherny on Claude Code off RAG — Latent Space, *"Claude Code: Anthropic's Agent in Your Terminal,"* 2025-05-07; HN item 43164253.
+- Augment / grep vs embeddings — jxnl.co, *"Why Grep Beat Embeddings in Our SWE-Bench Agent,"* 2025-09-11.
+- Cursor semantic search — cursor.com/blog/semsearch, 2025-11-06.
+- Glean knowledge graph / Onyx — glean.com, github.com/onyx-dot-app/onyx (earlier landscape pass).
+- Competitor stars/licenses — GitHub API, 2026-05-30 (point-in-time).
+- **Unverified secondary (do not cite as fact):** an Amazon Science paper (~Feb 2026) reportedly
+  finding agentic search reaches >90% of RAG performance without a vector DB — not independently
+  opened; treat as rumor until the paper is read.
 
-> The multi-agent "true north" workflow synthesis is appended in a follow-up commit to this
-> same PR (research of coding-context-map competitors, protocol-precedent lessons, adversarial
-> stress-tests of the three core theses, and the judged candidate true-norths).
+Repo facts: file:line references inline above, verified 2026-05-30.
+
+## Appendix — the reasoning trail
+
+This spec is the durable output of a brainstorming session plus two multi-agent research
+workflows (landscape + candidate true-norths; then verification + adversarial stress-test +
+synthesis). The verification pass is what corrected the first draft's overstatements. A future
+session can re-run the same shape to re-validate as the market moves.
