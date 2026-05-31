@@ -74,6 +74,40 @@ This PR must:
 - Tests: a declared "domain must not import infra" rule flags an existing violation and correctly
   answers an allowed vs. disallowed pre-edit query.
 
+## Implementation approach (where it lives)
+
+- **Reuse the existing detector.** Layer violations are already computed by
+  `detectLayerViolations(edges, nodes, layers)` in
+  [call-graph.ts](../../src/core/analyzer/call-graph.ts) (≈lines 2876–2917), where
+  `layers: Record<layerName, pathPrefixes[]>` and key order defines the hierarchy. Generalize the
+  rule input to a small declarative config (forbidden dependency directions, module boundaries)
+  that compiles down to this check, plus the file-level dependency graph
+  ([dependency-graph.ts](../../src/core/analyzer/dependency-graph.ts)).
+- **Pre-edit query:** given `(fromFile, toFileOrSymbol)`, resolve layers/modules and answer
+  allowed/denied + the governing rule + reason, writing nothing.
+- **Optional decision-sourced rules:** read invariants from **synced ADR files**
+  (`openspec/decisions/adr-*.md`) and/or active decisions — *not* from `pending.json` fields, which
+  are purged on sync (see Edge cases). Keeps Spec 16's "why" and this "may I?" on one source.
+- **Surface:** a new read-only handler (pre-edit verdict + a full violation scan reusing
+  `detectLayerViolations`).
+
+## Compatibility verification (grounded 2026-05-30)
+
+- **Opt-in and inert** with no rules declared; the existing layer-violation reporting is unchanged.
+- Reuses `detectLayerViolations` + the dependency graph; new handler returns `unknown`.
+- **Decision integration reads ADR files / active decisions** and does not alter the decision file
+  format or the gate — specifically avoiding the purge-on-sync pitfall below.
+
+## Edge cases & failure modes
+
+- **No rules declared** → fully inert: no output, no behavior change.
+- **Purge-on-sync hazard:** `INACTIVE_STATUSES` (`synced`/`rejected`/`phantom`) decisions are
+  removed from `pending.json` ([store.ts](../../src/core/decisions/store.ts)), so invariants must
+  live in the synced ADR files, not in pending decision fields.
+- **Rules referencing non-existent paths** → reported as config warnings, never a crash.
+- **Keep the vocabulary deterministic** (dependency / layer / module-boundary). Reject fuzzy
+  "semantic" rules a graph cannot decide.
+
 ## Acceptance
 
 - With a declared rule, the checker flags existing violations and answers a pre-edit import query

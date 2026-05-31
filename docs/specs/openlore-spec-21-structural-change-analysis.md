@@ -62,6 +62,31 @@ This PR must:
 - MCP surfacing aimed at review/refactor flows, additive to current tools.
 - Tests: a fixture change produces the correct structural delta, including the stale-caller set.
 
+## Implementation approach (where it lives)
+
+- **Two snapshots, one diff.** Produce a graph for each state (working tree vs a ref, or two refs)
+  via the existing analyzer, then diff node sets (by stable id), edge sets, and `FunctionNode.signature`.
+- **Stale callers** = `bfsFromDB(changedCallee, 'backward', 1)` for any callee whose signature
+  changed ([graph.ts](../../src/core/services/mcp-handlers/graph.ts)).
+- **Resolve the two states** with `resolveBaseRef()` / `validateGitRef()`
+  ([git-diff.ts](../../src/core/drift/git-diff.ts)); operate on snapshots so the canonical graph is
+  never mutated.
+- **Surface:** a new read-only handler returning `Promise<unknown>`, aimed at review/refactor flows.
+
+## Compatibility verification (grounded 2026-05-30)
+
+- **No schema change**; operates on analyzer output for two states and never mutates the canonical
+  graph.
+- Reuses the analyzer, `bfsFromDB`, and `git-diff.ts`; additive handler.
+
+## Edge cases & failure modes
+
+- **Rename / move** looks like delete + add. Report both interpretations (heuristic match on
+  name/signature/file proximity); never silently guess one.
+- **Two-state analysis cost** is bounded by the incremental analyzer — document it.
+- **Cross-language signatures differ:** restrict signature-change detection to what
+  `FunctionNode.signature` reliably captures per language.
+
 ## Acceptance
 
 - A known fixture change yields the correct added/removed/changed sets and the correct stale-caller

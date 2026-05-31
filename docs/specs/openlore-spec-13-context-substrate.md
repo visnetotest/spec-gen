@@ -85,6 +85,42 @@ adds to it; it does not change or break it.** Concretely:
 strictly better or strictly broader, while leaving every current behavior intact?* If not, it
 does not belong here.
 
+### Compatibility verification (grounded against the code, 2026-05-30)
+
+A read-only pass over the subsystems specs 14–23 touch confirms the additions are additive, and
+names the *specific mechanism* that makes each safe — so this is evidence, not assertion:
+
+- **New edge kinds are safe.** Nothing in the codebase switches *exhaustively* on `EdgeKind`. The
+  only pattern that inspects it is the defensive filter `e => !e.kind || e.kind === 'calls'`
+  ([call-graph.ts](../../src/core/analyzer/call-graph.ts#L39) and the analysis handlers), so a new
+  kind is simply *excluded* from call-only logic by default — it cannot break existing traversal.
+  A filter opts a new kind in explicitly only where wanted. This is exactly how the IaC
+  `references`/`depends_on` kinds already coexist with `calls`.
+- **New node types are safe.** Nodes live in dedicated tables (`nodes`, `classes`); a new type
+  (e.g. decision nodes, Spec 16) adds a table and bumps `SCHEMA_VERSION`. On a bump the edge store
+  **drops and rebuilds from source** ([edge-store.ts](../../src/core/services/edge-store.ts),
+  `SCHEMA_VERSION = 2`) — no migration, no data loss, one re-analyze.
+- **Retrieval cannot break, because tool responses are additive by contract.** `orient`,
+  `analyze_impact`, and `get_subgraph` return `unknown`; consumers *cast* (`as OrientResult`), they
+  do not schema-validate. Adding optional fields is invisible to them. The only discipline is:
+  *never remove or retype an existing field.*
+- **The analysis instruments reuse existing traversal.** `bfs()` / `bfsFromDB()` /
+  `buildAdjacency()` ([graph.ts](../../src/core/services/mcp-handlers/graph.ts)) already power
+  `analyze_impact` and `get_subgraph`; test selection, reachability, and structural diff are new
+  *callers* of these primitives, not changes to them.
+- **Decisions, drift, and git are untouched in shape.** The decision file format
+  (`.openlore/decisions/pending.json`, `version: '1'`) and the gate are unchanged by Spec 16
+  (the graph projection is derived and optional). The drift detector already excludes `docs/`
+  ([drift-detector.ts](../../src/core/drift/drift-detector.ts)). Git is read locally via
+  [git-diff.ts](../../src/core/drift/git-diff.ts) (`execFile('git', …)`; no `gh` today); Specs
+  18/22 add new read functions beside the existing ones.
+- **Benchmarks are added, not modified.** `scripts/bench.ts` and `scripts/bench-mcp.ts` measure
+  query/handler latency; Spec 14 adds a new end-to-end script beside them.
+
+**Net:** every instrument is a new *reader* of existing data, plus at most an additive edge kind
+or node table behind a `SCHEMA_VERSION` bump. Retrieval is a hard dependency of analysis, so it is
+preserved *by construction* — we build **on** it, never around it.
+
 ## How the shape of the product changes
 
 This is growth along the axis OpenLore already chose, not a turn onto a new one:
@@ -195,7 +231,7 @@ on 2026-05-30.
 
 - **There is no "code↔org join via parsed edges."** Three of the four advertised org artifacts
   are unbuilt: **PRs are never parsed; git is used only for changed-file drift diffing; in-repo
-  docs are explicitly *excluded* from drift** ([drift-detector.ts](../../src/core/services/drift-detector.ts)
+  docs are explicitly *excluded* from drift** ([drift-detector.ts](../../src/core/drift/drift-detector.ts)
   skips `docs/`). The fourth (decisions) is **not a graph join** — `orient` surfaces decisions
   by a plain string set-membership test on `affectedFiles`
   ([orient.ts:367](../../src/core/services/mcp-handlers/orient.ts#L367)), not a traversable edge.

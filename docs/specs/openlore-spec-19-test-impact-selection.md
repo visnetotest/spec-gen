@@ -80,6 +80,47 @@ This PR must:
   banner (approximation posture + coverage caveats for the languages involved).
 - **Surface**: through the existing MCP handler layer, additive to current tools.
 
+## Implementation approach (where it lives)
+
+- **Reuse, do not rebuild.** The backward walk is `bfsFromDB(seeds, 'backward', maxDepth, edgeStore)`
+  ([graph.ts](../../src/core/services/mcp-handlers/graph.ts)) — the same primitive `analyze_impact`
+  already uses for upstream chains. Seeds = the changed functions; hits = nodes with `isTest`
+  ([FunctionNode](../../src/core/analyzer/call-graph.ts)) reached on the walk.
+- **`tested_by` is already a first-class edge** (`EdgeKind` includes it,
+  [call-graph.ts:39](../../src/core/analyzer/call-graph.ts#L39)). Use it directly and/or the
+  inverse of `calls` from test nodes; decide and document which during build.
+- **Changed-set input reuses the drift git layer.** `getChangedFiles()` / `resolveBaseRef()`
+  ([git-diff.ts](../../src/core/drift/git-diff.ts)) turn a diff into changed files; map those to
+  changed functions via the node table, then run the backward walk.
+- **Inheritance is followed for free.** `buildAdjacency()` already propagates across inheritance
+  edges, so overridden/parent methods widen selection (a safety win for dynamic dispatch).
+
+## Tool contract (additive)
+
+- **Input:** `{ dir, changedSymbols?: string[], diffRef?: string, maxDepth?: number }` (one of
+  `changedSymbols` / `diffRef` required).
+- **Output:** `{ changed: string[], selectedTests: [{ test, file, viaPath: string[], confidence }],
+  soundness: { posture: 'over-approximate', caveats: string[] },
+  coverage: { languages: string[], testDetection: 'full' | 'partial' | 'none' } }`.
+
+## Compatibility verification (grounded 2026-05-30)
+
+- **No schema change**: `tested_by` edges and `isTest` nodes already exist.
+- **New read-only handler returning `unknown`** — existing tool responses are untouched (the
+  additive-by-cast contract from Spec 13).
+- Reuses `bfsFromDB`; no change to traversal primitives or to `analyze_impact`.
+- Offline, deterministic, no API key.
+
+## Edge cases & failure modes
+
+- **Sparse `tested_by` coverage** (test detection varies by language): return
+  `coverage.testDetection: 'partial' | 'none'` rather than a falsely-confident empty set.
+- **Dynamic dispatch / DI / reflection** may under-select: documented in `soundness.caveats`;
+  prefer widening via inheritance edges. Posture is *over-approximate* by design.
+- **A test reaches code via `calls` but has no `tested_by` edge**: include via the inverse-`calls`
+  path and dedupe.
+- **Newly-added function with no edges yet**: fall back to file-level test association.
+
 ## Acceptance
 
 - Changing a function in a fixture returns exactly the tests that reach it, with paths.

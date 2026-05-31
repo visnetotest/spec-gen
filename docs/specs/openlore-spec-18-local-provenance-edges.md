@@ -62,6 +62,33 @@ This PR must:
 - Tests over a fixture repository with commit history, covering both the `gh`-present and
   git-only paths.
 
+## Implementation approach (where it lives)
+
+- **Extend the existing local git wrapper.** Add `getGitLog()` / `getCommitBlame()` beside the
+  current helpers in [git-diff.ts](../../src/core/drift/git-diff.ts) (already `execFile('git', …)`,
+  no `gh`, no network) for `authored_by` and last-touch. PR metadata comes from local `gh` **only
+  if it is present and authenticated**, with a graceful git-only fallback.
+- **Projector** (parser→projector pattern, like IaC) maps to `authored_by` (code → person) and
+  `changed_in_pr` (code → PR) edges on existing function/file nodes; derived and regenerable.
+- **New `EdgeKind`s** `authored_by` / `changed_in_pr` (additive). `orient` surfaces last-author /
+  PR additively.
+
+## Compatibility verification (grounded 2026-05-30)
+
+- **Local-only:** `execFile` git + optional local `gh`; no network upload. `gh` is optional and
+  never on the core path.
+- **New `EdgeKind`s are additive** (defensive `calls`-only filters ignore them). If persisted,
+  behind a `SCHEMA_VERSION` bump.
+- `orient` gains **optional** fields only.
+
+## Edge cases & failure modes
+
+- **Shallow / no history** → degrade to no provenance and say so; never block `analyze`.
+- **`gh` absent / unauthenticated** → git-only path (`authored_by` works; `changed_in_pr` may be
+  empty).
+- **Bound graph growth:** cap provenance (last-touch + top-N recent authors per node) and document
+  the cap.
+
 ## Acceptance
 
 - `orient` / impact surfaces last-author and originating PR for a function as graph edges.

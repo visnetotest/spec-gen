@@ -59,6 +59,31 @@ This PR must:
   relevant), with node typing so consumers can distinguish domains.
 - A committed example + tests over the existing `iac/fixtures`.
 
+## Implementation approach (where it lives)
+
+- **The graph is already unified.** `buildProjectedIac()`
+  ([iac/index.ts](../../src/core/analyzer/iac/index.ts)) merges IaC nodes (distinguished by
+  `node.language` ∈ the IaC languages, id prefix `iac-external::…`) and IaC edges (`EdgeKind`
+  `references` / `depends_on`) into the same call graph the analyzer builds.
+- **Cross-domain traversal** = `bfsFromDB` over the existing edges, **opting `references` /
+  `depends_on` into the impact walk** (they are excluded by default by the `calls`-only filter),
+  partitioned/typed by `node.language` so results separate code from infrastructure.
+- **Surface** through `analyze_impact` (infra neighbors become additional, typed blast-radius
+  entries) and/or an `orient` capability.
+
+## Compatibility verification (grounded 2026-05-30)
+
+- **No schema change** — IaC already shares the graph primitives. The only change is *opting* the
+  `references` / `depends_on` kinds into the impact traversal when requested; default code-only
+  behavior is preserved because the existing `calls`-only filter still excludes them.
+- `analyze_impact` gains typed infra neighbors as an **optional / additive** result.
+
+## Edge cases & failure modes
+
+- **Repos with no IaC** behave exactly as today (no infra nodes exist).
+- **Strictly distinguish infra from code by `node.language`**, so existing code-only impact is
+  byte-for-byte unchanged unless infrastructure is explicitly requested.
+
 ## Acceptance
 
 - A query of the form "what infrastructure does this handler reach / what code breaks if I change

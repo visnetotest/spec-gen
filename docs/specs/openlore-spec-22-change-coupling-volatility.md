@@ -68,6 +68,36 @@ This PR must:
 - Tests over a fixture repo with crafted history (coupled pairs, a volatile file, a bulk commit
   that must be filtered out).
 
+## Implementation approach (where it lives)
+
+- **New read functions on the existing git wrapper.** Add `getGitLog()` (e.g.
+  `--pretty=format:… --name-only`) beside the current helpers in
+  [git-diff.ts](../../src/core/drift/git-diff.ts) (which already uses `execFile('git', …)`, no
+  `gh`, no network). Derive per-commit changed-file sets.
+- **Coupling** = pairwise support/confidence over those sets (file A and B in the same commit,
+  above thresholds). **Volatility/churn** = commit count per file/function over a window.
+- **Bulk-commit filter:** drop commits touching more than a configured number of files so
+  formatting sweeps / mass renames / vendored drops do not manufacture coupling.
+- **Granularity:** map file-level coupling to a function when a commit touches only that function's
+  line range; otherwise report at file level.
+- **Surface:** additive `orient` metadata (`frequentlyChangesWith[]`, `volatility`) — caution
+  signals, not blockers.
+
+## Compatibility verification (grounded 2026-05-30)
+
+- **Local git only** (`execFile`, no `gh`, no network); reuses the `git-diff.ts` patterns with new
+  functions beside the existing ones.
+- `orient` gains **optional** fields (additive-by-cast); existing behavior unchanged.
+- **No schema change required** — computable on demand / cached; if ever persisted, behind a
+  `SCHEMA_VERSION` bump.
+
+## Edge cases & failure modes
+
+- **Shallow / short history** → degrade and report low confidence; never block.
+- **Bulk commits** → filtered by the documented size threshold.
+- **Correlation, not causation** → presented as a signal, never a rule.
+- **Monorepo mega-commits** → same bulk filter applies.
+
 ## Acceptance
 
 - The fixture's intended coupled pairs and volatile units are reported; the bulk commit does not

@@ -71,6 +71,37 @@ This PR must:
 - Tests: a fixture decision store projects into nodes/edges; `analyze_impact(file)` returns the
   intersecting decision as a neighbor (not a post-hoc filter); legacy stores project cleanly.
 
+## Implementation approach (where it lives)
+
+- **Project decisions exactly like IaC.** A projector (mirroring
+  [iac/project.ts](../../src/core/analyzer/iac/project.ts)) maps the loaded decision store onto
+  decision nodes + `affects` edges at analyze/load time. Decisions remain authored in
+  `.openlore/decisions/pending.json` (the source of truth); the graph copy is derived and
+  regenerable — the IaC pattern, applied to a second data source.
+- **Storage:** a new `decisions` table in
+  [edge-store.ts](../../src/core/services/edge-store.ts) + a `SCHEMA_VERSION` bump (rebuild from
+  source). A new `affects` `EdgeKind` ([call-graph.ts:39](../../src/core/analyzer/call-graph.ts#L39)).
+- **Traversal:** `analyze_impact` / `get_subgraph` include decision neighbors via
+  `buildAdjacency()`, which already merges inheritance edges the same way — typed so callers can
+  tell a decision from a function.
+- **`orient`:** keep the existing `pendingDecisions` set-membership output
+  ([orient.ts ~362–382](../../src/core/services/mcp-handlers/orient.ts#L362)); **add** graph-derived
+  decisions as an optional field.
+
+## Compatibility verification (grounded 2026-05-30)
+
+- **Decision file format unchanged**; the gate is unaffected (it only reads decision statuses).
+- **`affects` is additive** — no code switches exhaustively on `EdgeKind`, and `calls`-only filters
+  exclude it by default.
+- The new `decisions` table sits behind a `SCHEMA_VERSION` bump → rebuild from source, no migration.
+- `orient` / `analyze_impact` responses gain **optional** fields only (additive-by-cast).
+
+## Edge cases & failure modes
+
+- **Inactive decisions** (`synced` / `rejected` / `phantom`) are excluded from projection, matching
+  orient's `INACTIVE_STATUSES`.
+- **Empty / legacy store** → zero decision nodes; everything else is unchanged.
+
 ## Acceptance
 
 - `analyze_impact(file)` and `get_subgraph` surface governing decisions as typed graph neighbors.

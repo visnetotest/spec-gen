@@ -68,6 +68,28 @@ This PR must:
 - **Results** — a per-repo table plus aggregate, mirroring the competitor's published format so
   comparison is fair. Include variance, not just medians.
 
+## Implementation approach (where it lives)
+
+- **A new script beside the existing benches, not a change to them.** `scripts/bench.ts` and
+  `scripts/bench-mcp.ts` measure *query/handler latency* (e.g. the ~429µs p50 orient path) — not
+  end-to-end agent tokens. Add `scripts/bench-agent.ts` (`npm run bench:agent`) for the
+  WITH-vs-WITHOUT agent runs; leave the latency benches untouched.
+- **Toggle the MCP server in the agent config**, run the fixed task suite headless over pinned
+  repos, and capture tokens / tool-calls / cost / wall-clock from the agent's telemetry.
+- **Reuse the clean-repo dogfooding approach** from the `first-run-hardening` skill for setup.
+
+## Compatibility verification (grounded 2026-05-30)
+
+- **Pure addition:** a new script + `docs/AGENT-BENCHMARKS.md`. No runtime, library, or API change.
+  The existing benches and their `npm run bench` / `bench:mcp` entry points are unmodified.
+
+## Notes
+
+- Keep both stories: the micro-benches are the *latency* story; this is the *token / round-trip*
+  story. They answer different questions.
+- Mirror CodeGraph's methodology (median of N≥4 runs, ≥5 repos, headless, with/without) so the
+  comparison is apples-to-apples and not dismissible.
+
 ## Acceptance
 
 - A reviewer runs one documented command and reproduces the table.

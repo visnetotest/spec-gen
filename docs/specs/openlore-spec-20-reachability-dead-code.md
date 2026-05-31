@@ -64,6 +64,32 @@ This PR must:
 - A "delete impact" query: nodes whose only path to a root runs through the target.
 - MCP surfacing, additive; results typed and confidence-tagged.
 
+## Implementation approach (where it lives)
+
+- **Roots** = the entry points the analyzer already computes (functions with no internal caller —
+  see [CODEBASE.md](../../.openlore/analysis/CODEBASE.md) and the call graph) **plus** exported /
+  public-API symbols and detected framework entry points.
+- **Reachability** = `bfs` / `bfsFromDB(roots, 'forward', maxDepth)`
+  ([graph.ts](../../src/core/services/mcp-handlers/graph.ts)); candidate-dead = nodes not in the
+  reached set. External nodes are already filtered at the DB boundary.
+- **"Dead if I delete X"** = nodes whose every root-path runs through X — recompute reachability
+  with X removed and diff against the baseline reached set.
+- **Surface:** a new read-only handler returning `Promise<unknown>`.
+
+## Compatibility verification (grounded 2026-05-30)
+
+- **No schema change**; a pure read over the existing graph + entry-point data.
+- Reuses `bfs` / `bfsFromDB`; external-node filtering already exists.
+- New handler returns `unknown` → existing tools untouched.
+
+## Edge cases & failure modes
+
+- **Dynamic / framework entry points** (routes, DI, plugin registries), reflection, and
+  externally-consumed exports cause false "dead" positives. Treat exported/public symbols and
+  detected entry points as roots; tag confidence; **never auto-delete**.
+- **Libraries / monorepos:** public-API symbols are roots even with no internal caller.
+- **Weaker per-language symbol resolution** → lower confidence, stated in the output.
+
 ## Acceptance
 
 - A fixture with known live and dead regions yields the correct candidate-dead set, with caveats

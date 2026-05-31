@@ -63,6 +63,25 @@ This PR must:
 - The gate wired into this repo's hooks, with a short `docs/` note describing the dogfood run
   and the decision IDs/domains produced.
 
+## Implementation approach (where it lives)
+
+- **Install the idempotent pre-commit hook** (template + marker `# openlore-decisions-hook` in
+  [decisions.ts](../../src/cli/commands/decisions.ts)) via `openlore decisions --install-hook`.
+  Today this repo has only `pre-commit.sample` and no `.openlore/decisions/` — a clean slate.
+- **Record the real architectural decisions already embedded in the code** via `record_decision`:
+  SCIP as one-way export; IaC projecting onto the shared graph primitives; the edge-store
+  `SCHEMA_VERSION` rebuild-on-bump strategy; BM25-without-embeddings as the zero-network floor;
+  and the analysis-layer direction itself (Spec 13).
+- **Run the full workflow** — consolidate → verify → approve → sync into `openspec/specs/` (and
+  ADR files under `openspec/decisions/` for cross-domain/system scope).
+
+## Compatibility verification (grounded 2026-05-30)
+
+- Affects **only this repo's configuration and its self-authored specs/decisions** — zero change
+  to the shipped product's behavior for users.
+- The hook is **idempotent** (marker-guarded) and **skippable** (`git commit --no-verify`); the
+  decision store schema (`version: '1'`) is unchanged.
+
 ## Acceptance
 
 - `openlore decisions` lists real, consolidated decisions for this repo.
