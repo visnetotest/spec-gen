@@ -26,7 +26,8 @@ Branch: `openlore-spec-13-context-substrate`. Direction locked; claims verified;
 - [x] Competitive + market reality verified against primary sources (2026-05-30)
 - [x] Repo ground-truth established (what actually ships vs. what was claimed)
 - [x] Theses adversarially stress-tested; positioning corrected to survive the strongest attack
-- [ ] **Spec 14** — Agent Token-Efficiency Benchmark Harness (WITH vs WITHOUT). *Do this first.* → [openlore-spec-14-agent-benchmark-harness.md](openlore-spec-14-agent-benchmark-harness.md)
+- [ ] **Spec 13.1** — Make Incremental Freshness Cheap (Watch-Mode Performance). *Urgent regression fix — do this before 14; the watcher that backs this spec's "always-fresh" promise currently taxes every dogfooding session.* → [openlore-spec-13.1-watch-mode-performance.md](openlore-spec-13.1-watch-mode-performance.md)
+- [ ] **Spec 14** — Agent Token-Efficiency Benchmark Harness (WITH vs WITHOUT). *Do this first (after 13.1).* → [openlore-spec-14-agent-benchmark-harness.md](openlore-spec-14-agent-benchmark-harness.md)
 - [ ] **Spec 15** — Decision & Drift Governance Dogfooding (turn the gate on in our own repo). → [openlore-spec-15-governance-dogfooding.md](openlore-spec-15-governance-dogfooding.md)
 - [ ] **Spec 16** — Architectural Decisions as First-Class Graph Nodes (`affects` edges). → [openlore-spec-16-decisions-as-graph-nodes.md](openlore-spec-16-decisions-as-graph-nodes.md)
 - [ ] **Spec 17** — Cross-Domain Impact Analysis (Code ↔ Infrastructure). → [openlore-spec-17-cross-domain-impact.md](openlore-spec-17-cross-domain-impact.md)
