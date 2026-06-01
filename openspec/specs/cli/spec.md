@@ -268,7 +268,41 @@ The system SHALL enables or disables interactive mode.
 - **GIVEN** The application is running
 - **WHEN** setInteractiveMode is called
 - **THEN** Sets the interactive mode to the specified value
+### Requirement: ScipIsAOnewayExportNotARoundtripFormat
+
+The system SHALL export call-graph data in SCIP format as a one-way snapshot without importing or depending on external SCIP indices.
+
+> Decision recorded: 540e8fa7
+> Date: 2026-06-01
+### Requirement: McpExposesACuratedNavigationToolPresetNotAll45Tools
+
+The system SHALL support a --preset navigation flag on the MCP server that exposes only the curated graph-traversal tool surface (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton).
+
+> Decision recorded: c04f2b0c
+> Date: 2026-06-01
 
 ## Technical Notes
 
 - **Dependencies**: ora, logger, ProgressIndicator, showNextSteps, @inquirer/prompts
+
+## Decisions
+
+### SCIP is a one-way export, not a round-trip format
+
+**Status:** Approved
+**Date:** 2026-06-01
+**ID:** 540e8fa7
+
+openlore emits SCIP for interop with external indexers but never imports it; the internal EdgeStore call graph stays the single source of truth, avoiding a second graph representation to keep in sync.
+
+**Consequences:** SCIP consumers get a snapshot; openlore never depends on SCIP being read back.
+
+### MCP exposes a curated navigation tool preset, not all 45 tools
+
+**Status:** Approved
+**Date:** 2026-06-01
+**ID:** c04f2b0c
+
+The spec-14 agent benchmark showed that loading all ~45 MCP tool definitions is per-request overhead that erased openlore latency wins, while the lean --minimal preset omitted the graph-traversal tools deep questions need. A dedicated --preset navigation (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton) is the measured sweet spot — it flipped the benchmark to a net win (-7% cost, -26% tool-calls on deep tasks).
+
+**Consequences:** Agents configuring openlore for code navigation should use --preset navigation; the full surface remains available but is not the default recommendation for navigation.
