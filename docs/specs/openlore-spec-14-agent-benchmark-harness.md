@@ -7,14 +7,25 @@
 
 ## Progress
 
-Branch: `openlore-spec-14-agent-benchmark-harness`. Not started.
+Branch: `openlore-spec-14-agent-benchmark-harness`. **Foundation built; paid run gated on owner opt-in.**
 
-- [ ] Task suite (relational queries where a graph beats grep) + a control task
-- [ ] Harness: drive a headless agent WITH and WITHOUT the openlore MCP server
-- [ ] Metric capture: tokens, tool-calls, cost, wall-clock — per repo and aggregate
-- [ ] Pinned repo set (fixed commit SHAs) for reproducibility
-- [ ] Committed results doc with a one-command reproduce path
-- [ ] Demote the unmeasured README token claim to a hypothesis until results land
+- [x] Task suite (relational queries where a graph beats grep) + a control task — starter set in
+      `scripts/bench-agent.tasks.ts` (callers / blast-radius + a `locate` control); every task has a
+      grep-verifiable expected answer; all pass `--verify-oracle` across all 5 repos.
+- [x] Harness: drive a headless agent WITH and WITHOUT the openlore MCP server —
+      `scripts/bench-agent.ts` (`npm run bench:agent`), `claude -p --output-format json`, MCP toggled
+      via `--mcp-config` (`openlore mcp --no-watch-auto`).
+- [x] Metric capture: tokens, cost, round-trips (`num_turns`), wall-clock — per task + aggregate.
+- [x] Pinned repo set (fixed commit SHAs) — chalk/express/flask/gin/zod, SHAs resolved via `git ls-remote`.
+- [x] Committed results doc with a one-command reproduce path — `docs/AGENT-BENCHMARKS.md`
+      (methodology + `npm run bench:agent` reproduce path; **results section marked PENDING**).
+- [x] Demote the unmeasured README token claim to a hypothesis until results land — done (3 sites,
+      linked to AGENT-BENCHMARKS.md).
+- [ ] **Run the real paid measurement** (`npm run bench:agent -- --runs 4`) — needs agent auth +
+      spends real money; intentionally NOT run yet. Writes the measured table into AGENT-BENCHMARKS.md
+      and lets the README cite real numbers. **Gated on owner opt-in.**
+- [ ] Validated the whole pipeline at $0 via `--dry-run --verify-oracle` (clone → analyze →
+      oracle-grep → mock agent → score → aggregate → report). ✓ green on all 5 repos.
 
 ---
 
