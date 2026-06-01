@@ -21,11 +21,17 @@ Branch: `openlore-spec-14-agent-benchmark-harness`. **Foundation built; paid run
       (methodology + `npm run bench:agent` reproduce path; **results section marked PENDING**).
 - [x] Demote the unmeasured README token claim to a hypothesis until results land — done (3 sites,
       linked to AGENT-BENCHMARKS.md).
-- [ ] **Run the real paid measurement** (`npm run bench:agent -- --runs 4`) — needs agent auth +
-      spends real money; intentionally NOT run yet. Writes the measured table into AGENT-BENCHMARKS.md
-      and lets the README cite real numbers. **Gated on owner opt-in.**
-- [ ] Validated the whole pipeline at $0 via `--dry-run --verify-oracle` (clone → analyze →
+- [x] **Ran the real paid measurement** (2026-06-01, `--runs 4 --model sonnet`, 56 calls) — results +
+      analysis in `docs/AGENT-BENCHMARKS.md`. **Result: openlore did NOT save tokens on this repo set —
+      +43% cost / +79% fresh tokens / +38% round-trips, 100% correct in both conditions.** The pinned
+      repos are small/famous (the baseline never hit the 15–50k-token orientation tax the claim
+      assumes), so this is the wrong arena for the claim, not a refutation. README claim corrected to
+      "unproven / not supported by the first benchmark."
+- [x] Validated the whole pipeline at $0 via `--dry-run --verify-oracle` (clone → analyze →
       oracle-grep → mock agent → score → aggregate → report). ✓ green on all 5 repos.
+- [ ] **Follow-up (kill-signal):** add large/unfamiliar (ideally post-cutoff/private) repos with
+      deeper multi-hop relational tasks — the setting openlore is designed for — before the
+      token-savings claim can be made or retired, or re-weight toward the governance layer (specs 15+).
 
 ---
 

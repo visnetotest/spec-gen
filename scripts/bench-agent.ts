@@ -60,10 +60,15 @@ function parseArgs(argv: string[]): Opts {
 }
 
 // ── Metrics ─────────────────────────────────────────────────────────────────
+// Tokens are broken out because the WITH condition loads ~45 MCP tool
+// definitions into the system prompt every call: that shows up as a large but
+// CHEAP cached-read component, so a single lumped "tokens" number flatters
+// WITHOUT and is misleading. `costUsd` is the honest bottom line (it prices
+// fresh vs cached correctly); the token breakdown is for transparency.
 interface Metrics {
-  inputTokens: number;
+  freshInputTokens: number;  // input_tokens + cache_creation — processed fresh by the model
+  cacheReadTokens: number;   // cache_read_input_tokens — amortized, ~10× cheaper
   outputTokens: number;
-  totalTokens: number;
   costUsd: number;
   numTurns: number;     // round-trip proxy for tool-call count (json output exposes turns, not raw tool calls)
   durationMs: number;
@@ -73,6 +78,10 @@ interface Metrics {
 }
 
 type Condition = 'without' | 'with';
+
+/** Everything below this line in the results doc is regenerated each run; the
+ *  hand-written findings/interpretation live above it and are preserved. */
+const AUTOGEN_MARKER = '<!-- BENCH-AGENT:AUTOGEN BELOW — regenerated each run; edit findings ABOVE this line -->';
 
 // ── Repo setup (clone @ pinned SHA, analyze for the WITH index) ──────────────
 function sh(cmd: string, args: string[], cwd?: string): string {
@@ -156,10 +165,10 @@ function runAgent(task: BenchTask, repoDir: string, condition: Condition, opts: 
       ? `[mock] ${task.expect.mustInclude.join(', ')}`
       : `[mock] partial — ${task.expect.mustInclude.slice(0, 1).join(', ')}`;
     return {
-      inputTokens: withCond ? 4000 + base * 100 : 14000 + base * 400,
+      freshInputTokens: withCond ? 4000 + base * 100 : 14000 + base * 400,
+      cacheReadTokens: withCond ? 30000 + base * 500 : 6000 + base * 200,
       outputTokens: withCond ? 300 + base * 10 : 900 + base * 30,
-      totalTokens: withCond ? 4300 + base * 110 : 14900 + base * 430,
-      costUsd: withCond ? 0.012 + base * 0.001 : 0.045 + base * 0.003,
+      costUsd: withCond ? 0.040 + base * 0.001 : 0.045 + base * 0.003,
       numTurns: withCond ? 2 + (base % 2) : 6 + base,
       durationMs: withCond ? 9000 + base * 300 : 26000 + base * 900,
       answer,
@@ -173,8 +182,29 @@ function runAgent(task: BenchTask, repoDir: string, condition: Condition, opts: 
     '--model', opts.model,
     '--max-budget-usd', String(opts.maxBudgetUsd),
     '--no-session-persistence',
+    // Read-only orientation tasks in throwaway clones: let the agent use its
+    // tools without prompts, identically in both conditions, so the only
+    // difference is whether the openlore MCP is configured.
+    '--permission-mode', 'bypassPermissions',
+    // Keep both conditions grounded in the repo — neither may "cheat" by
+    // googling the library's internals.
+    '--disallowedTools', 'WebSearch', 'WebFetch',
   ];
-  if (condition === 'with') args.push('--mcp-config', mcpConfigPath);
+  if (condition === 'with') {
+    args.push('--mcp-config', mcpConfigPath);
+    // WITH = openlore AS INSTALLED: the shipped orient skill instructs the agent
+    // to call orient() before reading files. Without this the agent may ignore
+    // the tools and grep anyway (paying the MCP overhead for nothing), which
+    // tests "tools present" rather than the actual product claim. This is a
+    // faithful, minimal mirror of skills/openlore-orient/SKILL.md — not a nudge
+    // beyond what a real openlore install gives the agent.
+    args.push('--append-system-prompt',
+      'This project uses OpenLore for architectural memory. BEFORE reading source ' +
+      'files, call the openlore `orient` tool (mcp__openlore__orient) with your task — ' +
+      'it returns the relevant functions, their callers, matching specs, and insertion ' +
+      'points in one call. If you are reading source files without having called orient ' +
+      'first, you are probably wasting tokens.');
+  }
 
   const t0 = Date.now();
   let raw: string;
@@ -184,20 +214,21 @@ function runAgent(task: BenchTask, repoDir: string, condition: Condition, opts: 
     const e = err as { stdout?: Buffer | string; message?: string };
     const out = e.stdout ? e.stdout.toString() : '';
     if (!out) {
-      return { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, numTurns: 0, durationMs: Date.now() - t0, answer: '', correct: false, error: e.message ?? 'agent failed' };
+      return { freshInputTokens: 0, cacheReadTokens: 0, outputTokens: 0, costUsd: 0, numTurns: 0, durationMs: Date.now() - t0, answer: '', correct: false, error: e.message ?? 'agent failed' };
     }
     raw = out; // some non-zero exits still emit the result json
   }
 
   const j = JSON.parse(raw) as Record<string, unknown>;
   const usage = (j.usage ?? {}) as Record<string, number>;
-  const input = (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+  const fresh = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+  const cacheRead = usage.cache_read_input_tokens ?? 0;
   const output = usage.output_tokens ?? 0;
   const answer = String(j.result ?? '');
   return {
-    inputTokens: input,
+    freshInputTokens: fresh,
+    cacheReadTokens: cacheRead,
     outputTokens: output,
-    totalTokens: input + output,
     costUsd: Number(j.total_cost_usd ?? 0),
     numTurns: Number(j.num_turns ?? 0),
     durationMs: Number(j.duration_ms ?? Date.now() - t0),
@@ -214,11 +245,20 @@ const median = (xs: number[]): number => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
-interface Cell { totalTokens: number; costUsd: number; numTurns: number; durationMs: number; correctRate: number; n: number; }
+interface Cell {
+  costUsd: number; costMin: number; costMax: number;   // bottom line + variance
+  freshInputTokens: number; cacheReadTokens: number; outputTokens: number;
+  numTurns: number; durationMs: number; correctRate: number; n: number;
+}
 function summarize(runs: Metrics[]): Cell {
+  const costs = runs.map((r) => r.costUsd);
   return {
-    totalTokens: median(runs.map((r) => r.totalTokens)),
-    costUsd: median(runs.map((r) => r.costUsd)),
+    costUsd: median(costs),
+    costMin: costs.length ? Math.min(...costs) : 0,
+    costMax: costs.length ? Math.max(...costs) : 0,
+    freshInputTokens: median(runs.map((r) => r.freshInputTokens)),
+    cacheReadTokens: median(runs.map((r) => r.cacheReadTokens)),
+    outputTokens: median(runs.map((r) => r.outputTokens)),
     numTurns: median(runs.map((r) => r.numTurns)),
     durationMs: median(runs.map((r) => r.durationMs)),
     correctRate: runs.length ? runs.filter((r) => r.correct).length / runs.length : 0,
@@ -238,17 +278,17 @@ function renderReport(
   perTask: Array<{ task: BenchTask; without: Cell; with: Cell }>,
 ): string {
   const L: string[] = [];
-  L.push('# Agent Token-Efficiency Benchmark (WITH vs WITHOUT openlore)');
+  L.push('## Measured run — auto-generated by `npm run bench:agent` (Spec 14)');
   L.push('');
-  L.push('> Generated by `npm run bench:agent`. Spec 14.');
   L.push(opts.dryRun ? '> **DRY RUN — synthetic mock numbers, not a real measurement.**' : '');
   L.push('');
-  L.push('## Methodology');
+  L.push('### Methodology');
   L.push('');
   L.push(`- **Agent:** \`claude -p --output-format json\`, model \`${opts.model}\`, ${opts.runs} run(s)/task, median reported.`);
-  L.push('- **Conditions:** WITHOUT = agent with no openlore MCP (grep/read baseline). WITH = `--mcp-config` registering the openlore MCP server (`--no-watch-auto`), repo pre-analyzed via `openlore analyze --no-embed`.');
+  L.push('- **Conditions:** WITHOUT = the unmodified agent (its grep/read tools only) — the baseline. WITH = openlore **as installed**: the MCP server via `--mcp-config` (`openlore mcp --no-watch-auto`, repo pre-analyzed with `openlore analyze --no-embed`) **plus** a system-prompt instruction to call `orient()` before reading files — a faithful mirror of the shipped `openlore-orient` skill. This measures the product a user actually gets, not tools the agent might ignore.');
   L.push('- **Scoring:** correct = the agent\'s final answer contains every independently-verifiable expected substring (`expect.mustInclude` in `bench-agent.tasks.ts`), confirmed against the pinned source by grep — not derived from openlore\'s own graph.');
-  L.push('- **Metrics:** total tokens (input incl. cache + output), cost (USD), round-trips (`num_turns`), wall-clock (ms).');
+  L.push('- **Metrics:** **cost (USD)** is the bottom line (it prices fresh vs cached tokens correctly). Tokens are broken into *fresh* input (`input_tokens` + cache creation — what the model processed fresh) and *cached* reads (`cache_read_input_tokens` — ~10× cheaper); plus output, round-trips (`num_turns`), wall-clock.');
+  L.push('- **Cache caveat:** the WITH condition loads ~45 openlore MCP tool definitions into the system prompt every call, which inflates *cached-read* tokens but costs little. A single lumped token count would therefore mislead; we lead with cost and show the breakdown.');
   L.push('');
   L.push('### Pinned repos');
   L.push('');
@@ -256,30 +296,35 @@ function renderReport(
   L.push('|------|------|-----|-----|');
   for (const r of REPOS) L.push(`| ${r.id} | ${r.language} | ${r.tag} | \`${r.sha.slice(0, 12)}\` |`);
   L.push('');
-  L.push('## Per-task results (median)');
+  L.push('### Per-task results (median; cost [min–max] across runs)');
   L.push('');
-  L.push('| Task | Kind | Correct (wo/w) | Tokens wo | Tokens w | Δtok | Cost wo | Cost w | Turns wo | Turns w |');
-  L.push('|------|------|----------------|-----------|----------|------|---------|--------|----------|---------|');
-  for (const { task, without, with: w } of perTask) {
+  L.push('| Task | Kind | Correct wo/w | Cost wo | Cost w | Δcost | Fresh-in wo/w | Cached wo/w | Out wo/w | Turns wo/w |');
+  L.push('|------|------|--------------|---------|--------|-------|---------------|-------------|----------|------------|');
+  for (const { task, without: o, with: w } of perTask) {
     L.push(
-      `| ${task.id} | ${task.kind} | ${(without.correctRate * 100).toFixed(0)}% / ${(w.correctRate * 100).toFixed(0)}% ` +
-      `| ${without.totalTokens.toFixed(0)} | ${w.totalTokens.toFixed(0)} | ${pct(w.totalTokens, without.totalTokens)} ` +
-      `| $${without.costUsd.toFixed(3)} | $${w.costUsd.toFixed(3)} | ${without.numTurns.toFixed(0)} | ${w.numTurns.toFixed(0)} |`,
+      `| ${task.id} | ${task.kind} | ${(o.correctRate * 100).toFixed(0)}%/${(w.correctRate * 100).toFixed(0)}% ` +
+      `| $${o.costUsd.toFixed(3)} [${o.costMin.toFixed(3)}–${o.costMax.toFixed(3)}] | $${w.costUsd.toFixed(3)} [${w.costMin.toFixed(3)}–${w.costMax.toFixed(3)}] | ${pct(w.costUsd, o.costUsd)} ` +
+      `| ${o.freshInputTokens.toFixed(0)}/${w.freshInputTokens.toFixed(0)} | ${o.cacheReadTokens.toFixed(0)}/${w.cacheReadTokens.toFixed(0)} | ${o.outputTokens.toFixed(0)}/${w.outputTokens.toFixed(0)} | ${o.numTurns.toFixed(0)}/${w.numTurns.toFixed(0)} |`,
     );
   }
   L.push('');
+  L.push('_wo = WITHOUT openlore, w = WITH. Δcost negative = WITH is cheaper. Cost cells show median [min–max]._');
+  L.push('');
   // Aggregate (relational tasks only — the control 'locate' task is where grep already wins).
   const relational = perTask.filter((p) => p.task.kind !== 'locate');
-  const aggWoTok = median(relational.map((p) => p.without.totalTokens));
-  const aggWTok = median(relational.map((p) => p.with.totalTokens));
+  const aggWoCost = median(relational.map((p) => p.without.costUsd));
+  const aggWCost = median(relational.map((p) => p.with.costUsd));
+  const aggWoFresh = median(relational.map((p) => p.without.freshInputTokens));
+  const aggWFresh = median(relational.map((p) => p.with.freshInputTokens));
   const aggWoTurns = median(relational.map((p) => p.without.numTurns));
   const aggWTurns = median(relational.map((p) => p.with.numTurns));
-  L.push('## Aggregate — relational tasks (graph-favourable)');
+  L.push('### Aggregate — relational tasks (graph-favourable)');
   L.push('');
-  L.push(`- **Tokens:** ${aggWoTok.toFixed(0)} → ${aggWTok.toFixed(0)} (${pct(aggWTok, aggWoTok)})`);
+  L.push(`- **Cost (bottom line):** $${aggWoCost.toFixed(3)} → $${aggWCost.toFixed(3)} (${pct(aggWCost, aggWoCost)})`);
+  L.push(`- **Fresh input tokens:** ${aggWoFresh.toFixed(0)} → ${aggWFresh.toFixed(0)} (${pct(aggWFresh, aggWoFresh)})`);
   L.push(`- **Round-trips:** ${aggWoTurns.toFixed(0)} → ${aggWTurns.toFixed(0)} (${pct(aggWTurns, aggWoTurns)})`);
   L.push('');
-  L.push('> Spec 13 kill-signal: if the relational-task reduction is small, that is the earliest signal to re-weight toward the governance layer (specs 15+). Report losses honestly; do not bury this number.');
+  L.push('> Spec 13 kill-signal: if the relational-task reduction is small or negative, that is the earliest signal to re-weight toward the governance layer (specs 15+). Report losses honestly; do not bury this number.');
   L.push('');
   return L.join('\n');
 }
@@ -340,8 +385,16 @@ async function main(): Promise<void> {
     process.stdout.write(report + '\n');
     console.error('[bench-agent] dry run complete — report printed to stdout (committed doc untouched).');
   } else {
-    writeFileSync(opts.out, report, 'utf-8');
-    console.error(`[bench-agent] wrote ${opts.out}`);
+    // Preserve any hand-written interpretation above the marker — only the
+    // mechanical methodology+table below it is regenerated on each run.
+    let prefix = '';
+    if (existsSync(opts.out)) {
+      const cur = readFileSync(opts.out, 'utf-8');
+      const i = cur.indexOf(AUTOGEN_MARKER);
+      if (i >= 0) prefix = cur.slice(0, i);
+    }
+    writeFileSync(opts.out, prefix + AUTOGEN_MARKER + '\n\n' + report, 'utf-8');
+    console.error(`[bench-agent] wrote ${opts.out}${prefix ? ' (preserved hand-written findings above the marker)' : ''}`);
   }
 }
 

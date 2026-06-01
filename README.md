@@ -16,7 +16,7 @@ AI agents are powerful but amnesiac. On every new task:
 - They re-read the same source files to understand structure
 - They forget architectural decisions made two sessions ago
 - They have no link between specs and code — drift is invisible
-- File-by-file navigation often burns an estimated **15,000–50,000 tokens** per orientation pass, before a single line of useful code is written (a hypothesis pending the Spec 14 benchmark — see the † note below)
+- File-by-file navigation often burns an estimated **15,000–50,000 tokens** per orientation pass, before a single line of useful code is written (an unproven estimate — the first Spec 14 benchmark did not observe it on popular repos; see the † note below)
 - In long sessions, they drift from authoritative retrieval toward internally cached reasoning — producing subtly wrong architectural assumptions that compound silently until a refactor breaks
 
 openlore closes this loop. Run a full analysis once, then keep the graph incrementally updated as the codebase evolves. Even greenfield projects become cognitively "brownfield" after only a few agent sessions — architectural context fragments, decisions disappear, and agents repeatedly reconstruct the same understanding from scratch.
@@ -51,12 +51,17 @@ You can use layer 1 alone to give agents structural context. Add layer 2 for sem
 | Living spec generation | ❌ | ❌ | ✓ |
 | Persistent cross-session architectural memory | ❌ | Partial | ✓ |
 
-† **Hypothesis, not yet a measured result.** The token figures above are an
-estimate pending the Spec 14 agent benchmark (`npm run bench:agent`, WITH vs
-WITHOUT openlore across pinned OSS repos). Until that lands in
-[docs/AGENT-BENCHMARKS.md](docs/AGENT-BENCHMARKS.md), treat them as a claim to be
-verified, not a published number. The measured plumbing latency (orient ~430µs
-p50) is separate and real — see [scripts/BENCHMARKS.md](scripts/BENCHMARKS.md).
+† **Unverified — and not supported by the first benchmark.** The token figures
+above are an estimate. The Spec 14 agent benchmark (`npm run bench:agent`, WITH
+vs WITHOUT openlore) was run across 5 pinned OSS repos and **did not show a
+saving — openlore added ~43% cost / ~79% fresh tokens** with no accuracy gain.
+That run used small, famous libraries the model already knows, where there is no
+orientation tax to remove — the wrong arena for the claim, not proof against it;
+the decisive test on large/unfamiliar codebases has not been run. Full results
+and analysis: [docs/AGENT-BENCHMARKS.md](docs/AGENT-BENCHMARKS.md). **Treat the
+token-savings figure as unproven** until a large-repo benchmark lands. The
+measured plumbing latency (orient ~430µs p50) is separate and real — see
+[scripts/BENCHMARKS.md](scripts/BENCHMARKS.md).
 | Long-session confidence decay (Epistemic Lease) | ❌ | ❌ | ✓ |
 
 Traditional coding agents reconstruct architecture from repeated file reads every session. openlore persists it as a queryable graph.
@@ -89,7 +94,7 @@ See [docs/install.md](docs/install.md). The MCP server keeps the index fresh as 
 
 Then ask your agent: **`orient("add a new payment method")`**
 
-That single call returns the relevant functions, their call neighbours, matching spec sections, and insertion-point candidates — preserving architectural continuity across sessions instead of forcing the agent to repeatedly reconstruct context from raw file reads. The token reduction this implies (roughly ~30,000 exploratory tokens down to ~1,000 targeted) is a hypothesis pending the Spec 14 benchmark ([docs/AGENT-BENCHMARKS.md](docs/AGENT-BENCHMARKS.md)), not yet a measured result.
+That single call returns the relevant functions, their call neighbours, matching spec sections, and insertion-point candidates — preserving architectural continuity across sessions instead of forcing the agent to repeatedly reconstruct context from raw file reads. The token reduction this implies remains **unproven**: the first Spec 14 benchmark ([docs/AGENT-BENCHMARKS.md](docs/AGENT-BENCHMARKS.md)) found openlore *added* overhead on small, well-known repos (no orientation tax to remove there); whether it pays off on large, unfamiliar codebases — its actual target — has not yet been measured.
 
 **Full pipeline** (specs + decisions — optional and additive):
 
