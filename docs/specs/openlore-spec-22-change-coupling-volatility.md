@@ -8,7 +8,7 @@
 
 ## Progress
 
-Branch: `openlore-spec-22-change-coupling-volatility`. **DONE** (PR pending).
+Branch: `openlore-spec-22-change-coupling-volatility`. **DONE** — [PR #117](https://github.com/clay-good/OpenLore/pull/117).
 
 - [x] Co-change coupling from local git history — one bounded `git log --no-merges --name-only`
       pass (the Spec 18 pattern), pairwise co-occurrence above support/confidence thresholds.
