@@ -81,16 +81,25 @@ infra neighbors are surfaced separately, clearly typed and ecosystem-tagged:
 ### Reverse — `analyze_impact("Bucket:logs")`
 
 "What code breaks if I change this bucket?" The provisioning code shows up as the
-resource's upstream chain:
+resource's upstream chain, and the dependent infrastructure (the bucket policy that
+references it) shows up as a typed upstream `crossDomain` neighbor:
 
 ```jsonc
 {
   "symbol": "Bucket:logs",
   "language": "Pulumi",
+  "blastRadius": { "total": 3, "upstream": 2, "downstream": 0, "infrastructure": 1 },
   "upstreamChain": [
     { "name": "deployBucket",           "file": "src/app.ts", "depth": 1 },
     { "name": "handleProvisionRequest", "file": "src/app.ts", "depth": 2 }
-  ]
+  ],
+  "crossDomain": {
+    "reachesInfrastructure": true,
+    "ecosystems": ["Pulumi"],
+    "infrastructure": [
+      { "nodeType": "infrastructure", "name": "BucketPolicy:logs-policy", "ecosystem": "Pulumi", "direction": "upstream", "depth": 1 }
+    ]
+  }
 }
 ```
 
