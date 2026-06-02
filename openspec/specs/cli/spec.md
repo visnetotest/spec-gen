@@ -286,6 +286,12 @@ The system SHALL serialize concurrent decision consolidation processes using a c
 
 > Decision recorded: 412817d2
 > Date: 2026-06-01
+### Requirement: AddSelecttestsMcpToolForCallgraphbasedTestImpactSelection
+
+The system SHALL expose a select_tests MCP tool that walks the call graph backward from changed symbols or a git diff ref to identify transitively reachable test files, returning reaching paths and confidence metadata.
+
+> Decision recorded: 0859edf6
+> Date: 2026-06-02
 
 ## Technical Notes
 
@@ -322,3 +328,13 @@ The spec-14 agent benchmark showed that loading all ~45 MCP tool definitions is 
 record_decision spawns a detached decisions --consolidate per call; concurrent consolidations did load-mutate-save of pending.json and clobbered each other, silently losing decisions. A cross-process advisory lock (acquireDecisionsLock) serializes consolidation and re-reads the store inside the lock so no draft is lost.
 
 **Consequences:** Consolidations queue rather than race; a stale lock from a crashed holder is stolen after a timeout; the read-modify-write of pending.json is safe under concurrency.
+
+### Add select_tests MCP tool for call-graph-based test impact selection
+
+**Status:** Approved
+**Date:** 2026-06-02
+**ID:** 0859edf6
+
+Enables agents to determine which tests to run after a code change by walking the call graph backward from changed symbols to test files, providing a deterministic offline prioritization without executing tests
+
+**Consequences:** New read-only MCP tool registered; accepts changedSymbols or diffRef as input; explicitly documented as over-approximate prioritizer, not a sound replacement for the full suite; requires analyze_codebase to have been run first

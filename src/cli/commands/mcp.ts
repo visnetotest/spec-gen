@@ -55,6 +55,7 @@ import {
   handleUnifiedSearch,
 } from '../../core/services/mcp-handlers/semantic.js';
 import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
+import { handleSelectTests } from '../../core/services/mcp-handlers/test-impact.js';
 import { handleGenerateChangeProposal, handleAnnotateStory } from '../../core/services/mcp-handlers/change.js';
 import {
   handleRecordDecision,
@@ -442,6 +443,33 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ['directory', 'symbol'],
+    },
+  },
+  {
+    name: 'select_tests',
+    description:
+      'USE THIS WHEN: you changed code and want to know which tests to run — ' +
+      '"which tests cover parseConfig?", "what should I run for this diff?". ' +
+      'Walks the call graph BACKWARD from the change to every test that transitively reaches it, ' +
+      'with the reaching path per test. Deterministic, offline, no test run. ' +
+      'It is an over-approximate PRIORITIZER (run these first), not a sound replacement for the full ' +
+      'suite — the response states its confidence and coverage. Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        changedSymbols: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Changed function/method names. Provide this OR diffRef.',
+        },
+        diffRef: {
+          type: 'string',
+          description: 'Git ref to diff the working tree against (e.g. "HEAD", "main"). Provide this OR changedSymbols.',
+        },
+        maxDepth: { type: 'number', description: 'Backward reachability depth (default 12)' },
+      },
+      required: ['directory'],
     },
   },
   {
@@ -1264,7 +1292,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   orient: _RO, analyze_codebase: _RWI, get_architecture_overview: _RO,
   get_refactor_report: _RO, get_call_graph: _RO, get_duplicate_report: _RO,
   get_signatures: _RO, get_subgraph: _RO, trace_execution_path: _RO,
-  get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO,
+  get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO, select_tests: _RO,
   get_low_risk_refactor_candidates: _RO, get_leaf_functions: _RO,
   get_critical_hubs: _RO, get_function_skeleton: _RO, get_god_functions: _RO,
   suggest_insertion_points: _RO, search_code: _RO, list_spec_domains: _RO,
@@ -1458,6 +1486,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         const { directory, symbol, depth = 2 } =
           args as { directory: string; symbol: string; depth?: number };
         result = await handleAnalyzeImpact(directory, symbol, depth);
+      } else if (name === 'select_tests') {
+        const { directory, changedSymbols, diffRef, maxDepth } =
+          args as { directory: string; changedSymbols?: string[]; diffRef?: string; maxDepth?: number };
+        result = await handleSelectTests({ directory, changedSymbols, diffRef, maxDepth });
       } else if (name === 'get_low_risk_refactor_candidates') {
         const { directory, limit = 5, filePattern } =
           args as { directory: string; limit?: number; filePattern?: string };

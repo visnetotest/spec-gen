@@ -1,0 +1,82 @@
+# Deterministic Test Impact Selection
+
+> Spec 19. The headline Layer-3 instrument. Deterministic, offline, no API key.
+
+You changed `parseConfig()`. Which tests should you run? `select_tests` answers it by walking
+the call graph **backward** from the change to every test that transitively reaches it — and
+returns each test with the path that connects it to the change.
+
+This is **static, call-graph-based regression test selection (RTS)** — established CS (Ryder &
+Tip change-impact analysis; RTS++), not novelty — but served to the *agent at edit time* rather
+than to CI after the fact. The same algorithm, a different consumer.
+
+Why it matters:
+
+- **grep can't do it** — tests reach the code through indirect call paths, not text matches.
+- **the model is slow and unreliable at it** — it would have to read the whole suite and guess.
+- **a deterministic graph does it instantly** — backward reachability over edges already stored.
+- **it saves real money** — agents running full suites or guessing wrong is a major time sink.
+
+## Honest soundness — read this
+
+Static call-graph RTS is an **approximation**, and the tool says so in every response:
+
+- For direct/static dispatch it is a safe **over-approximation** — it may select a few extra
+  tests (you run slightly more; harmless).
+- Dynamic dispatch, reflection, dependency injection, and runtime wiring can cause
+  **under-approximation** — a relevant test may be missed. This is the classic RTS hazard.
+
+So `select_tests` is a **prioritizer** — "run these first, they're almost certainly the relevant
+ones" — **not a guarantee and not a replacement for the full suite.** The response carries:
+
+- `soundness.posture: "over-approximate"` and explicit `soundness.caveats`.
+- `coverage.testDetection: "full" | "partial" | "none"` — when test detection is incomplete for
+  the changed languages, it says so rather than returning a falsely-confident empty set.
+
+## Tool contract
+
+```jsonc
+// Input — one of changedSymbols / diffRef required
+{ "directory": "/abs/path", "changedSymbols": ["parseConfig"], "maxDepth": 12 }
+{ "directory": "/abs/path", "diffRef": "HEAD" }   // diff the working tree
+
+// Output
+{
+  "changed": ["parseConfig"],
+  "seeds": [{ "name": "parseConfig", "file": "src/config.ts" }],
+  "selectedTests": [
+    { "test": "config.test", "file": "src/config.test.ts",
+      "viaPath": ["config.test", "loadConfig", "parseConfig"], "confidence": "high" }
+  ],
+  "soundness": { "posture": "over-approximate", "caveats": ["…dynamic dispatch may under-select…"] },
+  "coverage": { "languages": ["TypeScript"], "testDetection": "full" }
+}
+```
+
+`confidence`: `high` for a direct caller or a direct `tested_by` association on the changed
+function; `medium` for a transitive reach; `low` for sibling-file fallback (newly-added /
+untested functions). Tests are deduped across discovery paths, keeping the highest confidence and
+shortest path.
+
+## How it works
+
+Pure reuse of edges and traversal OpenLore already has — **no schema change**:
+
+- **Backward reachability** — a path-tracked BFS over [`buildAdjacency`](../src/core/services/mcp-handlers/graph.ts)'s
+  backward map (`calls` **plus inheritance** edges, so overridden/parent methods widen selection —
+  a safety win for dynamic dispatch). Seeds = the changed functions; hits = nodes with `isTest`.
+- **`tested_by` harvest** — for any reached production node, its `tested_by` edges add tests whose
+  association is import-based (the test imports but doesn't directly call), which the call-walk
+  alone might miss.
+- **Inputs** — a symbol set, or a git diff resolved through the drift subsystem's
+  [`getChangedFiles`](../src/core/drift/git-diff.ts) (the same changed-file logic drift uses),
+  mapped to function nodes.
+
+Implementation: [`test-impact.ts`](../src/core/services/mcp-handlers/test-impact.ts). Tested over
+a fixture with known test→code reachability (paths, over-approximation posture, sparse-coverage
+honesty, seed resolution) in
+[`test-impact.test.ts`](../src/core/services/mcp-handlers/test-impact.test.ts).
+
+> Requires a current `analyze_codebase` that included test files — `tested_by` edges and `isTest`
+> nodes come from analysis. If the cached graph predates test inclusion, `select_tests` reports
+> `testDetection: "none"` rather than pretending no tests are needed.
