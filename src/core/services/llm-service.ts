@@ -30,6 +30,18 @@ import {
   OPENLORE_LOGS_SUBDIR,
 } from '../../constants.js';
 
+/**
+ * Strip NUL bytes from a CLI prompt. Node's `child_process` rejects arguments
+ * that contain a NUL ("must be a string without null bytes"), and a prompt built
+ * from a git diff or file content can carry one (binary-ish content, a stray
+ * control byte in source). Every CLI-based provider applies this before spawning,
+ * so one bad byte never aborts an otherwise-valid call (e.g. the decisions
+ * extractor consolidating a diff).
+ */
+export function sanitizeCliPrompt(prompt: string): string {
+  return prompt.includes('\0') ? prompt.replace(/\0/g, '') : prompt;
+}
+
 // ============================================================================
 // CLAUDE CODE PROVIDER (uses local `claude` CLI, no API key required)
 // ============================================================================
@@ -62,7 +74,7 @@ export class ClaudeCodeProvider implements LLMProvider {
       ? `${request.systemPrompt}\n\n---\n\n${request.userPrompt}`
       : request.userPrompt;
 
-    const args = ['-p', fullPrompt, '--output-format', 'json'];
+    const args = ['-p', sanitizeCliPrompt(fullPrompt), '--output-format', 'json'];
     if (this.model) args.push('--model', this.model);
 
     // Remove Claude Code session env vars so the CLI can run inside an existing session
@@ -145,7 +157,7 @@ export class MistralVibeProvider implements LLMProvider {
       : request.userPrompt;
 
     // vibe CLI: -p for prompt, --output json for JSON, --agent for model/agent name
-    const args = ['-p', fullPrompt, '--output', 'json'];
+    const args = ['-p', sanitizeCliPrompt(fullPrompt), '--output', 'json'];
     if (this.model) args.push('--agent', this.model);
 
     // Use MISTRAL_VIBE_CLI if set (standalone install not on PATH), else 'vibe'
@@ -1153,7 +1165,7 @@ export class GeminiCLIProvider implements LLMProvider {
       : request.userPrompt;
 
     // gemini CLI: -p for prompt, --output-format json, -m for model
-    const args = ['-p', fullPrompt, '--output-format', 'json'];
+    const args = ['-p', sanitizeCliPrompt(fullPrompt), '--output-format', 'json'];
     if (this.model) args.push('-m', this.model);
 
     const geminiCLIBin = process.env.GEMINI_CLI ?? 'gemini';
@@ -1244,7 +1256,7 @@ export class CursorAgentProvider implements LLMProvider {
       ? `${request.systemPrompt}\n\n---\n\n${request.userPrompt}`
       : request.userPrompt;
 
-    const args = ['-p', fullPrompt, '--output-format', 'json'];
+    const args = ['-p', sanitizeCliPrompt(fullPrompt), '--output-format', 'json'];
     if (this.model) args.push('--model', this.model);
 
     const bin = process.env.CURSOR_AGENT_CLI ?? 'cursor-agent';
