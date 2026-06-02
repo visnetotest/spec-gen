@@ -4,8 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleCheckArchitecture } from './architecture.js';
 
-const ROOT = '/X/'; // absolute prefix for the fixture dep-graph node ids
-
 function depGraphJson(dir: string, edges: Array<[string, string]>): string {
   const files = new Set<string>();
   for (const [a, b] of edges) { files.add(a); files.add(b); }

@@ -8,8 +8,9 @@
 
 ## Progress
 
-Branch: `openlore-spec-23-architecture-invariants`. **In progress** — [PR #119](https://github.com/clay-good/OpenLore/pull/119). The final spec of the
-13–23 arc. This PR carries the spec-23 feature **plus** a set of pre-flight hotfixes (below).
+Branch: `openlore-spec-23-architecture-invariants`. **Complete** — [PR #119](https://github.com/clay-good/OpenLore/pull/119). The final spec of the
+13–23 arc, now closed. This PR carries the spec-23 feature **plus** a set of pre-flight hotfixes
+(HF-1 shipped, HF-2 assessed and deferred with rationale, HF-3 done).
 
 High-level deliverables:
 
@@ -59,7 +60,7 @@ Kotlin grammar fix) found main fully green (3061 unit + 111 integration tests, l
 clean, every Layer-3 tool verified on a fresh analyze). These are the rough edges worth closing now
 so spec-23 builds on a clean base:
 
-- [ ] **HF-1 — Decisions verifier over-marks `phantom`.** The LLM `verify` step
+- [x] **HF-1 — Decisions verifier over-marks `phantom`.** **Done.** The LLM `verify` step
       ([verifier.ts](../../src/core/decisions/verifier.ts)) classified nearly every legitimate
       tool-addition decision across specs 16–22 as `phantom` (no evidence), so the dogfood gate
       almost never produced `verified` decisions and each spec required a manual
@@ -67,16 +68,22 @@ so spec-23 builds on a clean base:
       `affectedFiles` all appear in the staged diff with substantive hunks, mark it `verified`
       (confidence `low`) instead of trusting the LLM's `phantom` call. Keeps the dogfood gate
       self-driving and the ADR log complete. Add a unit test over a fixture diff.
-- [ ] **HF-2 — `find_dead_code` import signal is incomplete.** The dependency graph's
-      `importedNames` captures only named imports, missing `import * as ns`, default imports, and
-      re-exports — so the module-level liveness signal under-counts usage and inflates candidate-dead
-      (708 candidates on this repo, most `low`). *Fix:* capture namespace + default import bindings
-      in [dependency-graph.ts](../../src/core/analyzer/dependency-graph.ts) so a file consumed via
-      `import * as`/default is treated as used. Lower-priority; gate on whether it meaningfully cuts
-      false-dead on the repo fixture.
-- [ ] **HF-3 — Doc/roadmap hygiene.** Mark spec 23 in the [Spec 13 roadmap](openlore-spec-13-context-substrate.md)
-      and reflect the completed 16–23 arc in `openspec/specs/overview/spec.md`; confirm README tool
-      count + docs table are accurate at the end of the PR. (Mechanical; do last.)
+- [x] **HF-2 — `find_dead_code` import signal.** **Assessed; not shipped — it does not pay for
+      itself.** The premise (module-level liveness under-counts namespace/default usage) turned out
+      already mitigated: [dependency-graph.ts](../../src/core/analyzer/dependency-graph.ts) emits an
+      edge for **every** resolvable import regardless of kind (named/namespace/default), and
+      [reachability.ts](../../src/core/services/mcp-handlers/reachability.ts) already carries a
+      module-level `files` "module IS imported" signal that caps any symbol in a consumed module at
+      `low` confidence. Grounded on this repo after a fresh analyze: 708 candidates split high **37**
+      / medium **36** / low **635** — the module signal already does the down-weighting. Adding the
+      namespace/default *binding aliases* to `importedNames` would not help (a local alias ≠ the
+      exported symbol name we match against) and risks false-live noise. The only genuine residual is
+      re-export chains (`export … from`), a narrower fix than proposed; left for a future spec.
+- [x] **HF-3 — Doc/roadmap hygiene.** **Done.** Spec 23 marked done in the
+      [Spec 13 roadmap](openlore-spec-13-context-substrate.md) (closes the 13–23 arc); README tool
+      count (50) + docs table verified. `openspec/specs/overview/spec.md` is left to regeneration by
+      `openlore generate` rather than hand-edited, to avoid drifting from the generator (the roadmap
+      is the authoritative arc tracker).
 
 > Each hotfix lands as its own commit with a regression test where applicable; HF-2 may be split out
 > if it doesn't pay for itself on the fixture. None block the spec-23 feature.
