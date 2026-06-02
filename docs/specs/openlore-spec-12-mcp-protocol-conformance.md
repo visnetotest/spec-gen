@@ -6,7 +6,15 @@
 
 ## Progress
 
-Branch: `openlore-spec-12-mcp-protocol-conformance`. Status: not started.
+Branch: `openlore-spec-12-mcp-protocol-conformance`. **DONE** (in PR #117).
+
+> The `Initialize` handler in [mcp.ts](../../src/cli/commands/mcp.ts) now negotiates protocol version
+> against the SDK's pinned `SUPPORTED_PROTOCOL_VERSIONS` (echo the client's version when supported,
+> else offer `LATEST_PROTOCOL_VERSION` = `2025-11-25`). `capabilities` is honest (`{ tools: {} }`
+> only — no `listChanged`, which we do not implement). `serverInfo` carries the real package name +
+> version (single source). Argument/validation failures now map to JSON-RPC **-32602** via spec-10's
+> input validation throwing `McpError(ErrorCode.InvalidParams)`; tool-execution failures stay
+> `isError: true` results.
 
 - [ ] Pin the MCP protocol version the installed SDK targets and document it in the spec / PR.
 - [ ] Conformance audit of the `Initialize` / `ListTools` / `CallTool` handlers against that protocol version.

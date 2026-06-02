@@ -444,6 +444,32 @@ export async function handleOrient(
     // non-fatal — provenance is additive and local-only
   }
 
+  // ── Change coupling & volatility (local git, spec-22) ──────────────────────
+  // Caution signals mined from git history: "frequently changes with …" surfaces
+  // invisible coupling (no import/call edge), "volatility: high" flags risky churn.
+  // Additive, advisory — correlation, not a rule.
+  let changeCoupling:
+    | Array<{ file: string; volatility: 'high' | 'medium' | 'low'; changes: number; frequentlyChangesWith: Array<{ file: string; confidence: number }> }>
+    | undefined;
+  try {
+    const es = llmCtx?.edgeStore;
+    if (es && relevantFiles.length > 0) {
+      const { volatilityLevel } = await import('../../provenance/change-coupling.js');
+      const records = es.getChangeCouplingForFiles(relevantFiles)
+        .filter((r) => r.churn > 0 && (volatilityLevel(r.churn) !== 'low' || r.coupledWith.length > 0));
+      if (records.length > 0) {
+        changeCoupling = records.slice(0, 10).map((r) => ({
+          file: r.filePath,
+          volatility: volatilityLevel(r.churn),
+          changes: r.churn,
+          frequentlyChangesWith: r.coupledWith.slice(0, 5).map((c) => ({ file: c.file, confidence: c.confidence })),
+        }));
+      }
+    }
+  } catch {
+    // non-fatal — change coupling is additive and local-only
+  }
+
   // ── Suggested tools (portable discovery for non-Claude Code clients) ─────
   // Derived from what orient already knows — no extra I/O.
   const _suggested: string[] = ['record_decision'];
@@ -479,11 +505,19 @@ export async function handleOrient(
   }
   nextSteps.push('After implementing, run check_spec_drift to verify the code matches the spec');
 
+  // Signal when the graph index is unavailable (e.g. wiped by a version upgrade and
+  // not yet re-analyzed): call paths, provenance, decisions, and change-coupling all
+  // depend on it, so flag it rather than silently returning a thinner result.
+  const graphIndexStale = relevantFunctions.length > 0 && !llmCtx?.edgeStore;
+
   return {
     task,
     searchMode,
     ...(searchMode === 'bm25_fallback'
       ? { note: 'Embedding server unavailable — results use keyword matching. Run "openlore analyze --embed" for semantic search.' }
+      : {}),
+    ...(graphIndexStale
+      ? { graphIndexNote: 'Graph index unavailable — call paths, provenance, decisions, and change-coupling are omitted. Run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).' }
       : {}),
     relevantFiles,
     relevantFunctions,
@@ -496,6 +530,7 @@ export async function handleOrient(
     ...(pendingDecisions !== undefined ? { pendingDecisions } : {}),
     ...(governingDecisions !== undefined ? { governingDecisions } : {}),
     ...(provenance !== undefined ? { provenance } : {}),
+    ...(changeCoupling !== undefined ? { changeCoupling } : {}),
     suggestedTools,
     nextSteps,
   };

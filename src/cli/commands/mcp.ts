@@ -28,13 +28,23 @@ import {
   CallToolRequestSchema,
   InitializeRequestSchema,
   ListToolsRequestSchema,
+  McpError,
+  ErrorCode,
+  LATEST_PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
 } from '@modelcontextprotocol/sdk/types.js';
+import {
+  validateToolArgs,
+  withToolTimeout,
+  capOutput,
+  classifyToolError,
+} from '../../core/services/mcp-handlers/tool-guard.js';
 
 import { sanitizeMcpError, validateDirectory } from '../../core/services/mcp-handlers/utils.js';
 import { createTracker, updateTracker, getFreshnessSignal } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import type { EpistemicTracker } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import { emit } from '../../core/services/telemetry.js';
-import { DEFAULT_DRIFT_MAX_FILES } from '../../constants.js';
+import { DEFAULT_DRIFT_MAX_FILES, MCP_TOOL_MAX_BYTES } from '../../constants.js';
 import {
   handleGetCallGraph,
   handleGetSubgraph,
@@ -58,6 +68,7 @@ import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { handleSelectTests } from '../../core/services/mcp-handlers/test-impact.js';
 import { handleFindDeadCode } from '../../core/services/mcp-handlers/reachability.js';
 import { handleStructuralDiff } from '../../core/services/mcp-handlers/structural-diff.js';
+import { handleGetChangeCoupling } from '../../core/services/mcp-handlers/change-coupling.js';
 import { handleGenerateChangeProposal, handleAnnotateStory } from '../../core/services/mcp-handlers/change.js';
 import {
   handleRecordDecision,
@@ -510,6 +521,25 @@ export const TOOL_DEFINITIONS = [
         baseRef: { type: 'string', description: 'Old state to diff against (default "HEAD")' },
         headRef: { type: 'string', description: 'New state (a git ref). Omit to use the working tree.' },
         maxResults: { type: 'number', description: 'Cap reported items per category (default 200)' },
+      },
+      required: ['directory'],
+    },
+  },
+  {
+    name: 'get_change_coupling',
+    description:
+      'USE THIS WHEN: "what changes together with this file?" or "what is the most volatile code?". ' +
+      'Mined from local git history (not the call graph): co-change coupling surfaces invisible ' +
+      'coupling with no import/call edge (the config + parser that move in lockstep), and ' +
+      'volatility/churn flags risky high-change code. Pass a file for its coupling, or omit for the ' +
+      'most-volatile overview. Advisory signal (correlation, not causation); bulk commits filtered. ' +
+      'Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        file: { type: 'string', description: 'A file to query its coupling/volatility. Omit for the most-volatile overview.' },
+        limit: { type: 'number', description: 'Cap results (default 20)' },
       },
       required: ['directory'],
     },
@@ -1334,7 +1364,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   orient: _RO, analyze_codebase: _RWI, get_architecture_overview: _RO,
   get_refactor_report: _RO, get_call_graph: _RO, get_duplicate_report: _RO,
   get_signatures: _RO, get_subgraph: _RO, trace_execution_path: _RO,
-  get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO, select_tests: _RO, find_dead_code: _RO, structural_diff: _RO,
+  get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO, select_tests: _RO, find_dead_code: _RO, structural_diff: _RO, get_change_coupling: _RO,
   get_low_risk_refactor_candidates: _RO, get_leaf_functions: _RO,
   get_critical_hubs: _RO, get_function_skeleton: _RO, get_god_functions: _RO,
   suggest_insertion_points: _RO, search_code: _RO, list_spec_domains: _RO,
@@ -1347,6 +1377,24 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   detect_changes: _RO, record_decision: _RW, list_decisions: _RO,
   approve_decision: _RWI, reject_decision: _RWI, sync_decisions: _RWI,
 };
+
+// Tools that touch external entities (LLM / network) → openWorldHint: true.
+// Everything else is local, deterministic, closed-world analysis.
+const OPEN_WORLD_TOOLS = new Set<string>(['generate_tests', 'generate_change_proposal', 'annotate_story']);
+
+/** Human-readable title from a snake_case tool name (spec-11 annotations). */
+function toolTitle(name: string): string {
+  return name.split('_').map(w => (w ? w[0].toUpperCase() + w.slice(1) : w)).join(' ');
+}
+
+/** Full MCP `annotations` for a tool: read/write hints + title + openWorldHint (spec-11). */
+export function toolAnnotations(name: string): Record<string, unknown> {
+  return {
+    title: toolTitle(name),
+    ...(TOOL_ANNOTATIONS[name] ?? _RO),
+    openWorldHint: OPEN_WORLD_TOOLS.has(name),
+  };
+}
 
 const MINIMAL_TOOLS = new Set([
   'orient', 'search_code', 'record_decision', 'detect_changes', 'check_spec_drift',
@@ -1423,7 +1471,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: activeTools.map(t => ({ ...t, annotations: TOOL_ANNOTATIONS[t.name] })),
+    tools: activeTools.map(t => ({ ...t, annotations: toolAnnotations(t.name) })),
   }));
 
   // Per-session epistemic lease tracker — re-initialized when directory changes.
@@ -1439,8 +1487,16 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   server.setRequestHandler(InitializeRequestSchema, async (request) => {
     agentName = request.params.clientInfo?.name ?? 'unknown';
     agentVersion = request.params.clientInfo?.version ?? 'unknown';
+    // Protocol negotiation (spec-12): echo the client's requested version when we
+    // support it (per the SDK's pinned set), else offer our latest supported one.
+    const requested = request.params.protocolVersion;
+    const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
+      ? requested
+      : LATEST_PROTOCOL_VERSION;
     return {
-      protocolVersion: request.params.protocolVersion,
+      protocolVersion,
+      // Honest capabilities: only `tools`. No `listChanged` — the tool list is
+      // static per session, so we don't advertise a capability we don't implement.
       capabilities: { tools: {} },
       serverInfo: { name: 'openlore', version: _pkgVersion },
     };
@@ -1471,6 +1527,18 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
     const directory = typeof _dir === 'string' ? _dir : '';
     const _t0 = Date.now();
 
+    // Input validation (spec-10) against the tool's own declared inputSchema, before
+    // dispatch. Invalid args become a JSON-RPC -32602 error (spec-12), not an
+    // isError tool result — a malformed request is a protocol error, not a tool failure.
+    {
+      const toolDef = TOOL_DEFINITIONS.find(t => t.name === name);
+      const argError = toolDef ? validateToolArgs(args, toolDef.inputSchema) : null;
+      if (argError) {
+        emit(directory, 'mcp', { event: 'tool_error', tool: name, ms: Date.now() - _t0, agent: agentName, code: 'INVALID_ARGS', error: argError });
+        throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for "${name}": ${argError}`);
+      }
+    }
+
     try {
       const filePath = (args as Record<string, unknown>).filePath;
 
@@ -1483,7 +1551,12 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       if (tracker && directory) updateTracker(tracker, name, directory, typeof filePath === 'string' ? filePath : undefined);
 
       let result: unknown;
+      let _unknownTool = false;
 
+      // Per-tool timeout (spec-10): race the dispatch against the tool's budget so a
+      // pathological hang can never wedge the server. Slow tools (analysis, LLM) have
+      // generous overrides in MCP_TOOL_TIMEOUT_OVERRIDES.
+      await withToolTimeout((async () => {
       if (name === 'orient') {
         const { task, limit = 5 } = args as { task: string; limit?: number };
         result = await handleOrient(directory, task, limit);
@@ -1540,6 +1613,9 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         const { directory, baseRef, headRef, maxResults } =
           args as { directory: string; baseRef?: string; headRef?: string; maxResults?: number };
         result = await handleStructuralDiff({ directory, baseRef, headRef, maxResults });
+      } else if (name === 'get_change_coupling') {
+        const { directory, file, limit } = args as { directory: string; file?: string; limit?: number };
+        result = await handleGetChangeCoupling({ directory, file, limit });
       } else if (name === 'get_low_risk_refactor_candidates') {
         const { directory, limit = 5, filePattern } =
           args as { directory: string; limit?: number; filePattern?: string };
@@ -1670,16 +1746,28 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         const { directory, dryRun = false, id } = args as { directory: string; dryRun?: boolean; id?: string };
         result = await handleSyncDecisions(directory, dryRun, id);
       } else {
+        _unknownTool = true;
+      }
+      })(), name);
+
+      if (_unknownTool) {
         return {
           content: [{ type: 'text', text: `Unknown tool: ${name}` }],
           isError: true,
         };
       }
 
-      emit(directory, 'mcp', { event: 'tool_call', tool: name, ms: Date.now() - _t0, agent: agentName, agent_version: agentVersion });
-
-      const text =
+      const rawText =
         typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+      // Output cap (spec-10): truncate deterministically with a how-to-narrow note
+      // rather than silently dropping data or blowing the agent's context.
+      const { text, truncated } = capOutput(rawText, MCP_TOOL_MAX_BYTES);
+
+      emit(directory, 'mcp', {
+        event: 'tool_call', tool: name, ms: Date.now() - _t0, agent: agentName, agent_version: agentVersion,
+        bytes: Buffer.byteLength(text, 'utf8'), outcome: truncated ? 'truncated' : 'ok',
+      });
+
       const signal = tracker ? getFreshnessSignal(tracker) : null;
 
       // Freshness signal is a separate content item — never concatenated into
@@ -1692,9 +1780,16 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
 
       return { content };
     } catch (err) {
-      emit(directory, 'mcp', { event: 'tool_error', tool: name, ms: Date.now() - _t0, agent: agentName, error: sanitizeMcpError(err) });
+      // A thrown McpError is a protocol-level error (e.g. -32602) — let the SDK
+      // serialize it as a JSON-RPC error response, not a tool isError result.
+      if (err instanceof McpError) throw err;
+      // Error normalization (spec-10): a stable code taxonomy, distinguishing
+      // "repo not analyzed yet" (actionable) from real failures and timeouts.
+      const code = classifyToolError(err);
+      const message = sanitizeMcpError(err);
+      emit(directory, 'mcp', { event: 'tool_error', tool: name, ms: Date.now() - _t0, agent: agentName, code, outcome: 'error', error: message });
       return {
-        content: [{ type: 'text', text: `Tool error: ${sanitizeMcpError(err)}` }],
+        content: [{ type: 'text', text: `Tool error [${code}]: ${message}` }],
         isError: true,
       };
     }

@@ -8,13 +8,27 @@
 
 ## Progress
 
-Branch: `openlore-spec-22-change-coupling-volatility`. Not started.
+Branch: `openlore-spec-22-change-coupling-volatility`. **DONE** — [PR #117](https://github.com/clay-good/OpenLore/pull/117).
 
-- [ ] Co-change coupling (files/functions that change together) from local git history
-- [ ] Volatility/churn metrics (how often a unit changes)
-- [ ] Surfaced in `orient` as a caution signal; deterministic for a fixed git state
-- [ ] Documented thresholds + bulk-commit noise filtering
-- [ ] Tests over a fixture repo with crafted history
+- [x] Co-change coupling from local git history — one bounded `git log --no-merges --name-only`
+      pass (the Spec 18 pattern), pairwise co-occurrence above support/confidence thresholds.
+      [change-coupling.ts](../../src/core/provenance/change-coupling.ts).
+- [x] Volatility/churn per file (commit count over the window) → documented `high/medium/low`.
+- [x] Surfaced in `orient` as additive caution signals (`changeCoupling[]` with `volatility` +
+      `frequentlyChangesWith`); new read-only `get_change_coupling` tool (49 total) for direct
+      queries / most-volatile overview. Deterministic for a fixed git state.
+- [x] Documented thresholds (`COUPLING_*`, volatility levels) + bulk-commit filter
+      (`COUPLING_BULK_THRESHOLD = 25`, so formatting sweeps / mass renames manufacture no
+      coupling). Persisted in a `change_coupling` edge-store table (`SCHEMA_VERSION` 4 → 5,
+      rebuild-on-bump). Doc: [docs/change-coupling.md](../change-coupling.md).
+- [x] Tests over a crafted-history fixture (coupled pair, threshold-filtered weak pair, a bulk
+      commit that manufactures no coupling, churn→volatility, determinism, non-git degradation) +
+      edge-store round-trip + handler. Validated on this repo's real history (497 commits, 3 bulk
+      filtered; most-volatile = README/package-lock/package/decisions/mcp). Full suite green
+      (3038 passing / 139 files).
+
+> Granularity is file-level; function-level coupling (attributing a co-change to a function when a
+> commit touches only its line range) is a documented future enhancement.
 
 ---
 

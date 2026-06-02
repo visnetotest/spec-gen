@@ -6,7 +6,18 @@
 
 ## Progress
 
-Branch: `openlore-spec-10-mcp-tool-response-hardening`. Status: not started.
+Branch: `openlore-spec-10-mcp-tool-response-hardening`. **DONE** (in PR #117).
+
+> Implemented as [tool-guard.ts](../../src/core/services/mcp-handlers/tool-guard.ts), applied in the
+> `CallToolRequestSchema` handler in [mcp.ts](../../src/cli/commands/mcp.ts) so every one of the 49
+> tools runs the same path: **input validation** before dispatch against each tool's own
+> `inputSchema` (reusing spec-05's `validateAgainstSchema`, no Ajv; invalid args → JSON-RPC -32602);
+> **per-tool timeout** via `Promise.race` (`MCP_TOOL_TIMEOUT_MS` + slow-tool overrides);
+> **output cap** (`MCP_TOOL_MAX_BYTES`, deterministic truncation + how-to-narrow note, never a silent
+> drop); **error normalization** to a stable taxonomy (`INVALID_ARGS`/`NOT_ANALYZED`/`TIMEOUT`/
+> `INTERNAL`), distinguishing "not analyzed yet" from real failures; and **structured telemetry**
+> (`tool`/`ms`/`bytes`/`outcome`/`code`) via the existing `emit`. Tested in
+> [tool-guard.test.ts](../../src/core/services/mcp-handlers/tool-guard.test.ts).
 
 - [ ] `src/core/services/mcp-handlers/tool-guard.ts` — a single `withToolGuards` wrapper applied in the `CallToolRequestSchema` handler in `mcp.ts`, so every one of the ~45 tools runs through the same input-validation, timeout, output-cap, error-normalization, and telemetry path
 - [ ] Input validation BEFORE the handler runs: validate `args` against the called tool's own `inputSchema` (the JSON Schema already declared on each entry of `TOOL_DEFINITIONS`), reusing the hand-written JSON-Schema-subset validator pattern from spec-05 (`schemas/` + `schema-validator.ts`) — do NOT add Ajv

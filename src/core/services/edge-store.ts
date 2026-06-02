@@ -4,6 +4,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { CallEdge, FunctionNode, ClassNode, InheritanceEdge } from '../analyzer/call-graph.js';
 import type { DecisionNode, DecisionAffectsEdge } from '../decisions/project.js';
 import type { FileProvenance } from '../provenance/git-provenance.js';
+import type { FileChangeCoupling, CoupledFile, ChangeCouplingResult } from '../provenance/change-coupling.js';
 import type { DecisionStatus } from '../../types/index.js';
 import { ARTIFACT_CALL_GRAPH_DB } from '../../constants.js';
 
@@ -47,9 +48,18 @@ function runTransaction(db: DatabaseSync, fn: () => void): void {
 }
 
 /** Bump when schema changes. Old DBs are dropped and rebuilt on next analyze --force. */
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export class EdgeStore {
+  /**
+   * True when opening this DB found a stale SCHEMA_VERSION and wiped it (rebuild-on-bump).
+   * The data is gone until the next analyze repopulates it — callers that READ
+   * (vs. analyze, which repopulates) should treat the store as unavailable so they
+   * can tell the user to re-run analyze instead of serving an empty graph.
+   */
+  private _wasReset = false;
+  get wasReset(): boolean { return this._wasReset; }
+
   private constructor(private readonly db: DatabaseSync) {
     this.initSchema();
   }
@@ -61,6 +71,7 @@ export class EdgeStore {
     if (row === undefined) {
       this.db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(SCHEMA_VERSION);
     } else if (row.version !== SCHEMA_VERSION) {
+      this._wasReset = true;
       this.db.exec(`
         DROP TABLE IF EXISTS edges;
         DROP TABLE IF EXISTS inheritance_edges;
@@ -70,6 +81,7 @@ export class EdgeStore {
         DROP TABLE IF EXISTS decisions;
         DROP TABLE IF EXISTS decision_edges;
         DROP TABLE IF EXISTS provenance;
+        DROP TABLE IF EXISTS change_coupling;
         DROP TABLE IF EXISTS schema_version;
         CREATE TABLE schema_version (version INTEGER NOT NULL);
       `);
@@ -180,6 +192,14 @@ export class EdgeStore {
         last_subject   TEXT,
         recent_authors TEXT NOT NULL DEFAULT '[]', -- JSON Author[]
         prs            TEXT NOT NULL DEFAULT '[]'   -- JSON PullRequest[]
+      );
+
+      -- Change coupling & volatility (spec-22): per-file churn + co-change pairs,
+      -- mined from local git history. One row per file; advisory caution signals.
+      CREATE TABLE IF NOT EXISTS change_coupling (
+        file_path    TEXT PRIMARY KEY,
+        churn        INTEGER NOT NULL DEFAULT 0,
+        coupled_with TEXT NOT NULL DEFAULT '[]'  -- JSON CoupledFile[]
       );
     `);
   }
@@ -568,6 +588,48 @@ export class EdgeStore {
       .map(rawToProvenance);
   }
 
+  // ── Change coupling & volatility (spec-22) ─────────────────────────────────────
+
+  /** Replace the per-file change-coupling snapshot wholesale (idempotent re-mine). */
+  insertChangeCoupling(result: ChangeCouplingResult): void {
+    const stmt: StatementSync = this.db.prepare(
+      'INSERT OR REPLACE INTO change_coupling (file_path, churn, coupled_with) VALUES (@filePath, @churn, @coupledWith)'
+    );
+    runTransaction(this.db, () => {
+      this.db.exec('DELETE FROM change_coupling;');
+      // Persist every file that has churn (coupling may be empty for some).
+      for (const [filePath, churn] of result.churn) {
+        stmt.run({
+          '@filePath':    filePath,
+          '@churn':       churn,
+          '@coupledWith': JSON.stringify(result.coupling.get(filePath) ?? []),
+        });
+      }
+    });
+  }
+
+  countChangeCoupling(): number {
+    const row = this.db.prepare('SELECT COUNT(*) as n FROM change_coupling').get() as { n: number };
+    return row.n;
+  }
+
+  /** Change-coupling records for a set of files (tolerant path match, spec-22). */
+  getChangeCouplingForFiles(files: string[]): FileChangeCoupling[] {
+    if (files.length === 0) return [];
+    const rows = this.db.prepare('SELECT * FROM change_coupling').all() as unknown as RawCoupling[];
+    if (rows.length === 0) return [];
+    const wanted = files.filter(Boolean);
+    return rows.filter(r => wanted.some(f => pathsMatch(f, r.file_path))).map(rawToCoupling);
+  }
+
+  /** Top-churn (most volatile) files, descending. */
+  getTopVolatile(limit = 20): FileChangeCoupling[] {
+    return (
+      this.db.prepare('SELECT * FROM change_coupling ORDER BY churn DESC, file_path ASC LIMIT ?')
+        .all(limit) as unknown as RawCoupling[]
+    ).map(rawToCoupling);
+  }
+
   // ── Content-hash cache ────────────────────────────────────────────────────────
 
   getFileHash(filePath: string): string | null {
@@ -587,7 +649,7 @@ export class EdgeStore {
 
   /** Drop all graph data — used by full analyze rebuild. */
   clearAll(): void {
-    this.db.exec('DELETE FROM edges; DELETE FROM inheritance_edges; DELETE FROM nodes; DELETE FROM classes; DELETE FROM nodes_fts; DELETE FROM file_hashes; DELETE FROM decisions; DELETE FROM decision_edges; DELETE FROM provenance;');
+    this.db.exec('DELETE FROM edges; DELETE FROM inheritance_edges; DELETE FROM nodes; DELETE FROM classes; DELETE FROM nodes_fts; DELETE FROM file_hashes; DELETE FROM decisions; DELETE FROM decision_edges; DELETE FROM provenance; DELETE FROM change_coupling;');
   }
 
   /** Run fn inside a single SQLite transaction. */
@@ -681,6 +743,20 @@ interface RawProvenance {
   last_subject:   string | null;
   recent_authors: string;
   prs:            string;
+}
+
+interface RawCoupling {
+  file_path:    string;
+  churn:        number;
+  coupled_with: string;
+}
+
+function rawToCoupling(r: RawCoupling): FileChangeCoupling {
+  return {
+    filePath:    r.file_path,
+    churn:       r.churn,
+    coupledWith: JSON.parse(r.coupled_with) as CoupledFile[],
+  };
 }
 
 function rawToProvenance(r: RawProvenance): FileProvenance {

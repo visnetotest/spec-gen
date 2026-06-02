@@ -474,7 +474,7 @@ describe('McpWatcher coalescing queue', () => {
   it('coalesces rapid changes to the same file into a single batch flush', async () => {
     const { McpWatcher } = await import('./mcp-watcher.js');
     const watcher = new McpWatcher({ rootPath: '/tmp/proj', debounceMs: 200, embed: false });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const spy = vi.spyOn(watcher as any, 'handleBatch').mockResolvedValue(undefined);
     const enqueue = (watcher as unknown as { enqueue(p: string): void }).enqueue.bind(watcher);
 
@@ -487,7 +487,7 @@ describe('McpWatcher coalescing queue', () => {
   it('coalesces changes across DIFFERENT files into ONE batch (G2)', async () => {
     const { McpWatcher } = await import('./mcp-watcher.js');
     const watcher = new McpWatcher({ rootPath: '/tmp/proj', debounceMs: 200, embed: false });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const spy = vi.spyOn(watcher as any, 'handleBatch').mockResolvedValue(undefined);
     const enqueue = (watcher as unknown as { enqueue(p: string): void }).enqueue.bind(watcher);
 
@@ -508,7 +508,7 @@ describe('McpWatcher coalescing queue', () => {
     let resolveFirst!: () => void;
     const firstCall = new Promise<void>(r => { resolveFirst = r; });
     let calls = 0;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     vi.spyOn(watcher as any, 'handleBatch').mockImplementation(async () => {
       calls++;
       if (calls === 1) await firstCall;

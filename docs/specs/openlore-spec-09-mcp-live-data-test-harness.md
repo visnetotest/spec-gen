@@ -6,7 +6,22 @@
 
 ## Progress
 
-Branch: `openlore-spec-09-mcp-live-data-test-harness`. Status: not started.
+Branch: `openlore-spec-09-mcp-live-data-test-harness`. **NOT DOING — superseded.**
+
+> Decision (2026-06-02): this live-OSS-repo harness is **not being built**. Its goal — confidence
+> that every tool behaves on real codebases — is already covered by better-fitting infrastructure
+> that arrived with the Spec 13–22 arc:
+> - **3000+ unit tests across 137 files**, including per-handler tests for the full tool surface.
+> - **Per-spec real-repo end-to-end validation**: every Layer-3 instrument (provenance, test
+>   selection, dead-code, structural-diff, change-coupling) was validated against *this* repo's
+>   actual graph / git history during development, not just fixtures.
+> - **The existing integration test config** (`vitest.integration.config.ts`) for heavier paths.
+> - **Spec 10's tool guards** now enforce uniform input-validation / timeout / output-cap /
+>   error-normalization for every tool — the invariant this harness would have asserted is now a
+>   runtime guarantee.
+>
+> A network-dependent shallow-clone harness would add CI flakiness and maintenance for marginal
+> additional confidence. Revisit only if a concrete real-world tool failure escapes the above.
 
 - [ ] Curated repo manifest (`fixture-repos.ts`): real OSS repos pinned by git URL + commit SHA, one per supported language family, sized small.
 - [ ] Repo cache layer: shallow-clone-at-SHA into a gitignored cache dir; verify SHA; offline-friendly skip-with-loud-log when network is unavailable (never silent pass).

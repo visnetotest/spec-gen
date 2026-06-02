@@ -51,3 +51,41 @@ describe('MCP tool presets', () => {
     expect(() => selectActiveTools(TOOL_DEFINITIONS, { preset: 'nope' })).toThrow(/Unknown --preset "nope".*minimal.*navigation/s);
   });
 });
+
+// ============================================================================
+// Spec 11 — tool annotations: every tool has complete MCP annotations
+// ============================================================================
+import { toolAnnotations } from './mcp.js';
+
+describe('tool annotations (spec-11)', () => {
+  it('every tool has a title, the three read/write hints, and openWorldHint', () => {
+    for (const t of TOOL_DEFINITIONS) {
+      const a = toolAnnotations(t.name);
+      expect(typeof a.title).toBe('string');
+      expect((a.title as string).length).toBeGreaterThan(0);
+      expect(typeof a.readOnlyHint).toBe('boolean');
+      expect(typeof a.destructiveHint).toBe('boolean');
+      expect(typeof a.idempotentHint).toBe('boolean');
+      expect(typeof a.openWorldHint).toBe('boolean');
+    }
+  });
+
+  it('derives a human-readable title from the snake_case name', () => {
+    expect(toolAnnotations('get_change_coupling').title).toBe('Get Change Coupling');
+    expect(toolAnnotations('orient').title).toBe('Orient');
+  });
+
+  it('marks LLM-backed tools open-world and local analysis tools closed-world', () => {
+    expect(toolAnnotations('generate_tests').openWorldHint).toBe(true);
+    expect(toolAnnotations('orient').openWorldHint).toBe(false);
+    expect(toolAnnotations('find_dead_code').openWorldHint).toBe(false);
+  });
+
+  it('read-only analysis tools are marked readOnly + non-destructive', () => {
+    for (const name of ['orient', 'analyze_impact', 'find_dead_code', 'structural_diff', 'get_change_coupling']) {
+      const a = toolAnnotations(name);
+      expect(a.readOnlyHint).toBe(true);
+      expect(a.destructiveHint).toBe(false);
+    }
+  });
+});

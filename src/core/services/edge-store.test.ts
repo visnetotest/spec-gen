@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { EdgeStore } from './edge-store.js';
 import type { CallEdge, FunctionNode, ClassNode } from '../analyzer/call-graph.js';
 
@@ -39,6 +40,33 @@ describe('EdgeStore', () => {
   afterEach(async () => {
     store.close();
     await rm(dir, { recursive: true, force: true });
+  });
+
+  describe('schema-bump wipe (wasReset)', () => {
+    it('a current-version store reports wasReset === false', () => {
+      expect(store.wasReset).toBe(false);
+    });
+
+    it('opening a stale-version DB wipes it and reports wasReset === true', async () => {
+      const d = await makeTmpDir();
+      const p = join(d, 'cg.db');
+      // Simulate a pre-upgrade store: an old SCHEMA_VERSION with a node already in it.
+      const old = new DatabaseSync(p);
+      old.exec('CREATE TABLE schema_version (version INTEGER NOT NULL)');
+      old.prepare('INSERT INTO schema_version (version) VALUES (1)').run();
+      old.exec('CREATE TABLE nodes (id TEXT PRIMARY KEY, name TEXT, file_path TEXT, is_external INTEGER NOT NULL DEFAULT 0)');
+      old.prepare("INSERT INTO nodes (id, name, file_path) VALUES ('a::foo','foo','a')").run();
+      old.close();
+
+      const es = EdgeStore.open(p);
+      try {
+        expect(es.wasReset).toBe(true);      // detected the stale version
+        expect(es.countNodes()).toBe(0);     // and wiped the data (rebuild-on-bump)
+      } finally {
+        es.close();
+        await rm(d, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('exists / dbPath helpers', () => {
@@ -324,6 +352,48 @@ describe('EdgeStore', () => {
     it('clearAll wipes provenance too', () => {
       store.clearAll();
       expect(store.countProvenance()).toBe(0);
+    });
+  });
+
+  // ── Change coupling & volatility (spec-22) ─────────────────────────────────────
+  describe('change coupling', () => {
+    const result = {
+      churn: new Map([['src/a.ts', 4], ['src/b.ts', 4], ['src/c.ts', 1]]),
+      coupling: new Map([
+        ['src/a.ts', [{ file: 'src/b.ts', support: 4, confidence: 1 }]],
+        ['src/b.ts', [{ file: 'src/a.ts', support: 4, confidence: 1 }]],
+      ]),
+      stats: { commitsScanned: 5, bulkCommitsFiltered: 1, filesTracked: 3 },
+    };
+
+    beforeEach(() => store.insertChangeCoupling(result));
+
+    it('persists churn for every tracked file (coupling may be empty)', () => {
+      expect(store.countChangeCoupling()).toBe(3);
+      const c = store.getChangeCouplingForFiles(['src/c.ts']);
+      expect(c[0]).toMatchObject({ filePath: 'src/c.ts', churn: 1, coupledWith: [] });
+    });
+
+    it('round-trips coupling for a file', () => {
+      const a = store.getChangeCouplingForFiles(['src/a.ts']);
+      expect(a[0]).toMatchObject({ filePath: 'src/a.ts', churn: 4, coupledWith: [{ file: 'src/b.ts', support: 4, confidence: 1 }] });
+    });
+
+    it('matches across relative/absolute path forms', () => {
+      expect(store.getChangeCouplingForFiles(['/abs/proj/src/a.ts']).map(r => r.filePath)).toEqual(['src/a.ts']);
+    });
+
+    it('getTopVolatile returns highest-churn files first', () => {
+      const top = store.getTopVolatile(2);
+      expect(top.map(r => r.churn)).toEqual([4, 4]);
+    });
+
+    it('insertChangeCoupling replaces the prior snapshot; clearAll wipes it', () => {
+      store.insertChangeCoupling({ churn: new Map([['src/z.ts', 2]]), coupling: new Map(), stats: { commitsScanned: 1, bulkCommitsFiltered: 0, filesTracked: 1 } });
+      expect(store.countChangeCoupling()).toBe(1);
+      expect(store.getChangeCouplingForFiles(['src/a.ts'])).toEqual([]);
+      store.clearAll();
+      expect(store.countChangeCoupling()).toBe(0);
     });
   });
 

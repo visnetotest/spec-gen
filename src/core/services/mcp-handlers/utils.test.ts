@@ -266,6 +266,31 @@ describe('readCachedContext', () => {
     expect(result).not.toBeNull();
     expect(result!.edgeStore).toBeUndefined();
   });
+
+  it('refuses to attach an EMPTY edge store when the JSON has production nodes (schema-bump guard)', async () => {
+    // Reproduces the upgrade footgun: the JSON analysis still has graph nodes, but the
+    // edge store DB was wiped by a SCHEMA_VERSION bump. Serving the empty store would
+    // give silent empty results from analyze_impact/get_subgraph/get_change_coupling;
+    // instead it must be withheld so those tools say "re-run analyze_codebase".
+    const dir = join(tmpDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(dir, { recursive: true });
+    const ctx = {
+      phase1_survey: { purpose: '', files: [], totalTokens: 0 },
+      phase2_deep: { purpose: '', files: [], totalTokens: 0 },
+      phase3_validation: { purpose: '', files: [], totalTokens: 0 },
+      callGraph: {
+        nodes: [{ id: 'src/a.ts::foo', name: 'foo', filePath: 'src/a.ts', isExternal: false, isTest: false }],
+        edges: [], classes: [], inheritanceEdges: [], hubFunctions: [], entryPoints: [], layerViolations: [],
+        stats: { totalNodes: 1, totalEdges: 0, avgFanIn: 0, avgFanOut: 0 },
+      },
+    };
+    await writeFile(join(dir, ARTIFACT_LLM_CONTEXT), JSON.stringify(ctx), 'utf-8');
+    EdgeStore.open(EdgeStore.dbPath(dir)).close(); // empty (current-version) store
+
+    const result = await readCachedContext(tmpDir);
+    expect(result).not.toBeNull();
+    expect(result!.edgeStore).toBeUndefined(); // withheld: empty store + JSON has prod nodes
+  });
 });
 
 // ============================================================================

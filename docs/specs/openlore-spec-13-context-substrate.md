@@ -35,7 +35,7 @@ Branch: `openlore-spec-13-context-substrate`. Direction locked; claims verified;
 - [x] **Spec 19** — Deterministic Test Impact Selection (headline Layer-3 instrument). **Done** — `select_tests` walks the graph backward (calls + tested_by + inheritance) to the reaching tests, honest over-approximate posture. → [openlore-spec-19-test-impact-selection.md](openlore-spec-19-test-impact-selection.md)
 - [x] **Spec 20** — Reachability & Dead-Code Analysis. **Done** — `find_dead_code` cross-language mark-and-sweep, confidence-tagged candidates, "what dies if I delete X". → [openlore-spec-20-reachability-dead-code.md](openlore-spec-20-reachability-dead-code.md)
 - [x] **Spec 21** — Structural Change Analysis (Graph Diff). **Done** — `structural_diff`: added/removed/signature-changed functions, stale callers, rename flags. → [openlore-spec-21-structural-change-analysis.md](openlore-spec-21-structural-change-analysis.md)
-- [ ] **Spec 22** — Change-Coupling & Volatility Analysis. → [openlore-spec-22-change-coupling-volatility.md](openlore-spec-22-change-coupling-volatility.md)
+- [x] **Spec 22** — Change-Coupling & Volatility Analysis. **Done** — `get_change_coupling`: co-change + churn mined from git, surfaced in `orient`; advisory signal, bulk commits filtered. → [openlore-spec-22-change-coupling-volatility.md](openlore-spec-22-change-coupling-volatility.md)
 - [ ] **Spec 23** — Architecture Invariant Guardrails. → [openlore-spec-23-architecture-invariants.md](openlore-spec-23-architecture-invariants.md)
 - [ ] **Horizon 3 (optional, may never ship)** — cloud OAuth connectors as a fire-walled plugin. Deliberately *not* a numbered spec until 14–23 land and prove the local-first thesis.
 

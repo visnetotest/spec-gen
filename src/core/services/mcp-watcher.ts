@@ -357,7 +357,17 @@ export class McpWatcher {
     if (EdgeStore.exists(this.outputPath)) {
       const store = EdgeStore.open(EdgeStore.dbPath(this.outputPath));
       try {
+        // Schema-bump guard: opening a stale-version DB wipes it (rebuild-on-bump).
+        // An incremental per-file update on a wiped store would leave a PARTIAL graph
+        // (only the changed file's nodes). Skip it — a full `analyze` must rebuild.
+        if (store.wasReset) {
+          process.stderr.write(
+            '[mcp-watcher] graph index was reset by a schema-version upgrade — run "openlore analyze" to rebuild. ' +
+            'Skipping incremental update to avoid a partial graph.\n'
+          );
+        }
         for (const f of files) {
+          if (store.wasReset) break;
           const newHash = createHash('sha256').update(f.content).digest('hex');
           if (store.getFileHash(f.rel) === newHash) continue; // no-op autosave
 
