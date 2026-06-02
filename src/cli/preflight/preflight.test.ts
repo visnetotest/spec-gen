@@ -24,6 +24,22 @@ import { renderJson, renderHuman, renderGithubAnnotations, buildSummary } from '
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
+// When this suite runs inside CI, GITHUB_ACTIONS=true makes runPreflight() write
+// GitHub workflow-command annotations (::error::/::warning::) to stdout for the
+// STALE fixtures below — GitHub then renders those as spurious annotations on a
+// green job (spec 24, F2). Neutralize it for the whole file; the one test that
+// verifies GHA rendering re-enables it locally and calls the *pure*
+// renderGithubAnnotations(), which returns a string and writes nothing.
+let savedGithubActions: string | undefined;
+beforeEach(() => {
+  savedGithubActions = process.env.GITHUB_ACTIONS;
+  delete process.env.GITHUB_ACTIONS;
+});
+afterEach(() => {
+  if (savedGithubActions === undefined) delete process.env.GITHUB_ACTIONS;
+  else process.env.GITHUB_ACTIONS = savedGithubActions;
+});
+
 interface FixtureNode {
   id: string;
   name: string;

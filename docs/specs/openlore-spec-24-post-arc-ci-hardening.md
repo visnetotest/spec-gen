@@ -8,12 +8,12 @@
 
 ## Progress
 
-Branch: `chore/post-arc-ci-hardening`. **In progress** — PR pending. CI/test/workflow hygiene only;
+Branch: `chore/post-arc-ci-hardening`. **Complete** — [PR #120](https://github.com/clay-good/OpenLore/pull/120). CI/test/workflow hygiene only;
 **no product code change and nothing user-facing**, so this does not warrant a version bump or npm
 publish.
 
 - [x] **F1** — Bump GitHub Actions off the deprecated Node 20 runtime — checkout@v6, setup-node@v6, upload-artifact@v7 in `ci.yml` + `release.yml`
-- [ ] **F2** — Stop `preflight.test.ts` leaking GitHub workflow-command annotations into the CI log
+- [x] **F2** — Stop `preflight.test.ts` leaking GitHub workflow-command annotations into the CI log — file-scope `beforeEach`/`afterEach` neutralizes `GITHUB_ACTIONS`. Reproduced (17 leaked lines under `GITHUB_ACTIONS=true`) → fixed (0), all 18 preflight tests still pass.
 
 ---
 
