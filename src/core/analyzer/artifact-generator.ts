@@ -1160,9 +1160,12 @@ export class AnalysisArtifactGenerator {
           }
         }
 
-        // Call graph — all supported languages, include test files so tested_by edges are derived
+        // Call graph — all supported languages, INCLUDING test files: the call-graph
+        // builder marks test nodes `isTest` (excluded from hubs/entry-points/stats) and
+        // derives `tested_by` edges from them, which the test-impact tools (spec-19) need.
+        // Test nodes/edges are filtered out again when writing the production edge store.
         const lang = resolveLang(file.path, content);
-        if (!isTest && CALL_GRAPH_LANGS.has(lang)) {
+        if (CALL_GRAPH_LANGS.has(lang)) {
           callGraphFiles.push({ path: file.path, content, language: lang });
         }
       } catch {
@@ -1270,8 +1273,17 @@ export async function writeEdgesToSQLite(
     const hubIds   = new Set(callGraph.hubFunctions.map(n => norm(n.id)));
     const entryIds = new Set(callGraph.entryPoints.map(n => norm(n.id)));
 
-    store.insertNodes(nodes, hubIds, entryIds);
-    store.insertEdges(edges);
+    // The edge store is the PRODUCTION call graph: test nodes + their edges (and the
+    // derived `tested_by` edges) live only in llm-context.json for the test-impact
+    // tools. Filtering them here keeps analyze_impact / search / blast-radius — which
+    // read the edge store — production-only and unchanged by test inclusion.
+    const testNodeIds = new Set(nodes.filter(n => n.isTest).map(n => n.id));
+    const prodNodes = nodes.filter(n => !n.isTest);
+    const prodEdges = edges.filter(e =>
+      e.kind !== 'tested_by' && !testNodeIds.has(e.callerId) && !testNodeIds.has(e.calleeId));
+
+    store.insertNodes(prodNodes, hubIds, entryIds);
+    store.insertEdges(prodEdges);
     store.insertInheritanceEdges(inheritanceEdges);
     store.insertClasses(classes);
 

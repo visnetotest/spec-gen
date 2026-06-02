@@ -12,7 +12,7 @@
  *  - Layer violations — cross-layer calls in the wrong direction
  */
 
-import { dirname, resolve as resolvePath } from 'node:path';
+import { dirname, join as joinPath } from 'node:path';
 import Parser from 'tree-sitter';
 import { FunctionRegistryTrie } from './function-registry-trie.js';
 import type { ImportMap } from './import-resolver-bridge.js';
@@ -2778,7 +2778,10 @@ export class CallGraphBuilder {
       const resolveSource = (rel: string): string | undefined => {
         // Strip .js extension: TS ESM imports use './foo.js' to refer to './foo.ts'
         const stripped = rel.replace(/\.js$/, '');
-        const base = resolvePath(dir, stripped);
+        // Form-preserving join (NOT resolve): the analyze pipeline passes repo-relative
+        // paths, so resolve() would force an absolute path that never matches the
+        // relative allFilePaths — silently zeroing out import-based tested_by edges.
+        const base = joinPath(dir, stripped);
         return allFilePaths.find(p =>
           p === base || p === `${base}.ts` || p === `${base}.tsx` ||
           p === `${base}.js` || p === `${base}.jsx` || p === `${base}/index.ts`,

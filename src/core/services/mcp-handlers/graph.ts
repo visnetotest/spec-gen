@@ -588,7 +588,7 @@ export async function handleGetLowRiskRefactorCandidates(
   let candidates = cg.nodes.filter(n => {
     const fanIn  = n.fanIn  ?? 0;
     const fanOut = n.fanOut ?? 0;
-    return fanIn <= LOW_RISK_MAX_FAN_IN && fanOut <= LOW_RISK_MAX_FAN_OUT && !hubIds.has(n.id) && !entryIds.has(n.id);
+    return !n.isExternal && !n.isTest && fanIn <= LOW_RISK_MAX_FAN_IN && fanOut <= LOW_RISK_MAX_FAN_OUT && !hubIds.has(n.id) && !entryIds.has(n.id);
   });
 
   if (filePattern) candidates = candidates.filter(n => n.filePath.includes(filePattern));
@@ -872,8 +872,8 @@ export async function handleTraceExecutionPath(
 
   const entryLower  = entryFunction.toLowerCase();
   const targetLower = targetFunction.toLowerCase();
-  const entryNodes  = cg.nodes.filter(n => n.name.toLowerCase().includes(entryLower));
-  const targetNodes = cg.nodes.filter(n => n.name.toLowerCase().includes(targetLower));
+  const entryNodes  = cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(entryLower));
+  const targetNodes = cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(targetLower));
 
   if (entryNodes.length === 0)  return { error: `No function matching "${entryFunction}" found in call graph.` };
   if (targetNodes.length === 0) return { error: `No function matching "${targetFunction}" found in call graph.` };
