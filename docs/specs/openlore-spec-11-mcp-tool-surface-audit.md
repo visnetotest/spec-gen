@@ -6,7 +6,16 @@
 
 ## Progress
 
-Branch: `openlore-spec-11-mcp-tool-surface-audit`. Status: not started.
+Branch: `openlore-spec-11-mcp-tool-surface-audit`. **DONE** (in PR #117).
+
+> M1 audit matrix committed: [docs/specs/mcp-tool-audit.md](mcp-tool-audit.md) covering all 49 tools
+> (purpose, overlap, recommendation). M2/M5: names already follow a consistent `verb_noun`/`get_<noun>`
+> convention and every overlap is an intentional scope/granularity variant → **no renames or merges**
+> (no alias map needed). M3: every tool now carries complete MCP `annotations`
+> (`title` + `readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint`) via `toolAnnotations`
+> in [mcp.ts](../../src/cli/commands/mcp.ts), tested in mcp-presets.test.ts. M4: descriptions follow
+> the WHEN-to-use / WHEN-NOT pattern. M6: [docs/mcp-tools.md](../mcp-tools.md) and the project
+> `CLAUDE.md` tool table synced to the 49-tool surface.
 
 - [ ] M1 — Audit matrix committed: `docs/specs/mcp-tool-audit.md` covering all ~45 tools (purpose, inputs, overlap-with, recommendation).
 - [ ] M2 — Naming normalization rules pinned + every rename wired through a non-breaking alias map (old name -> new handler + one-time deprecation marker).

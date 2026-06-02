@@ -241,7 +241,7 @@ Compares git changes against spec mappings in milliseconds. Detects: Gap (code c
 **MCP** (no API key)
 
 49 graph-native tools exposed over stdio. Together they act as a persistent architectural runtime for coding agents: orientation, graph traversal, semantic retrieval, drift awareness, decision context, and structural risk analysis.
-`orient()` is the main entry point — one call replaces 10+ file reads. `detect_changes` risk-scores changed functions using call graph centrality × change type multiplier. See [docs/mcp-tools.md](docs/mcp-tools.md).
+`orient()` is the main entry point — one call replaces 10+ file reads. `detect_changes` risk-scores changed functions using call graph centrality × change type multiplier. Every tool call runs the same guards — input validation against its schema (bad args → JSON-RPC `-32602`), a per-tool timeout, a deterministic output-size cap, and normalized error codes — and the surface carries complete MCP `annotations`. See [docs/mcp-tools.md](docs/mcp-tools.md).
 
 `orient()` runs in **~430µs p50** against a 15k-node codebase (TypeScript compiler, ~79k edges). Full benchmark results: [scripts/BENCHMARKS.md](scripts/BENCHMARKS.md).
 

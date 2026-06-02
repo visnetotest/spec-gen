@@ -8,6 +8,10 @@
 | Starting any new task | `orient` — returns functions, files, specs, call paths, and insertion points in one call |
 | Don't know which file/function handles a concept | `search_code` |
 | Need call topology across many files | `get_subgraph` / `analyze_impact` |
+| "Which tests must I run for this change?" | `select_tests` — backward reachability to the reaching tests |
+| "What's unreachable / what dies if I delete X?" | `find_dead_code` — cross-language reachability (candidates) |
+| Reviewing a change: structural delta + stale callers | `structural_diff` |
+| "What changes together with this / what's volatile?" | `get_change_coupling` — co-change + churn from git |
 | Planning where to add a feature | `suggest_insertion_points` |
 | Reading a spec before writing code | `get_spec` |
 | Checking if code still matches spec | `check_spec_drift` |

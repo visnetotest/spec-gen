@@ -178,6 +178,21 @@ export const DEFAULT_VIEWER_HOST = '127.0.0.1';
 /** Maximum allowed chat request body size (bytes) — 512 KB */
 export const MAX_CHAT_BODY_BYTES = 512 * 1024;
 
+// ── MCP tool response hardening (spec-10) ───────────────────────────────────────
+/** Default per-tool MCP execution timeout (ms) — generous for graph queries. */
+export const MCP_TOOL_TIMEOUT_MS = 60_000;
+/** Per-tool timeout overrides for inherently slow tools (full analysis / LLM). */
+export const MCP_TOOL_TIMEOUT_OVERRIDES: Record<string, number> = {
+  analyze_codebase: 1_800_000,        // full static analysis — minutes on large repos
+  generate_tests: 600_000,            // LLM-backed
+  generate_change_proposal: 600_000,  // LLM-backed
+  annotate_story: 600_000,            // LLM-backed
+  audit_spec_coverage: 300_000,
+  sync_decisions: 300_000,
+};
+/** Byte budget for a single MCP tool result before deterministic truncation. */
+export const MCP_TOOL_MAX_BYTES = 256 * 1024;
+
 /** Maximum search query length (characters) */
 export const MAX_QUERY_LENGTH = 1_000;
 
