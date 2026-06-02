@@ -23,6 +23,7 @@ import {
   estimateTokens,
   lookupPricing,
   parseRetryAfterMs,
+  sanitizeCliPrompt,
   type CompletionRequest,
 } from './llm-service.js';
 
@@ -691,6 +692,31 @@ describe('Integration Tests (skipped without API keys)', () => {
       expect(claudeProvider).toBeDefined();
       expect(mistralProvider).toBeDefined();
     });
+
+    it('strips NUL bytes from the prompt before spawning the CLI (regression)', async () => {
+      // A prompt built from a git diff can contain a NUL byte; Node's child_process
+      // rejects args with NUL. The provider must sanitize before spawning.
+      vi.mocked(execFileSync).mockReturnValue(JSON.stringify({ result: 'ok' }));
+      const provider = new ClaudeCodeProvider();
+      await provider.generateCompletion({ systemPrompt: 'sys', userPrompt: 'before\x00after' });
+      const args = vi.mocked(execFileSync).mock.calls.at(-1)![1] as string[];
+      expect(args.some(a => typeof a === 'string' && a.includes('\x00'))).toBe(false);
+      expect(args.find(a => a.includes('before'))).toContain('beforeafter');
+    });
+  });
+});
+
+// ============================================================================
+// sanitizeCliPrompt
+// ============================================================================
+
+describe('sanitizeCliPrompt', () => {
+  it('removes NUL bytes', () => {
+    expect(sanitizeCliPrompt('a\x00b\x00c')).toBe('abc');
+  });
+  it('leaves NUL-free prompts untouched (same reference)', () => {
+    const s = 'normal prompt with\nnewlines\tand tabs';
+    expect(sanitizeCliPrompt(s)).toBe(s);
   });
 });
 

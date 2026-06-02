@@ -182,7 +182,7 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
   }
 
   // ── Edge delta (calls among / out of the changed files) ─────────────────────
-  const edgeKey = (e: { callerId: string; calleeName: string }) => `${e.callerId} ${e.calleeName}`;
+  const edgeKey = (e: { callerId: string; calleeName: string }) => `${e.callerId}\0${e.calleeName}`;
   const oldEdges = new Map(oldGraph.edges.filter(isCallEdge).map(e => [edgeKey(e), e]));
   const newEdges = new Map(newGraph.edges.filter(isCallEdge).map(e => [edgeKey(e), e]));
   const addedEdges = [...newEdges].filter(([k]) => !oldEdges.has(k)).map(([, e]) => edgePair(e, newGraph));
