@@ -7,7 +7,7 @@
 
 ## Progress
 
-Branch: `openlore-spec-18-local-provenance-edges`. **DONE** (PR pending).
+Branch: `openlore-spec-18-local-provenance-edges`. **DONE** — [PR #113](https://github.com/clay-good/OpenLore/pull/113).
 
 - [x] `authored_by` and `changed_in_pr` edges sourced from local git / `gh` — new
       `EdgeKind`s; extractor [git-provenance.ts](../../src/core/provenance/git-provenance.ts)
