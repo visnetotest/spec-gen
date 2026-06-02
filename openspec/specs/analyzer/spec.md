@@ -4827,6 +4827,12 @@ The system SHALL store per-file git provenance (last author, recent authors, pul
 
 > Decision recorded: f8778883
 > Date: 2026-06-02
+### Requirement: EdgestoreExposesWasresetFlagAfterSchemaMigrationWipe
+
+The system SHALL expose whether the edge store was reset due to a schema version bump so that read-only callers can detect stale data and prompt for re-analysis.
+
+> Decision recorded: 8365f6f8
+> Date: 2026-06-02
 
 ## Technical Notes
 
@@ -4894,3 +4900,13 @@ Embedded IaC frameworks (Pulumi/CDK/CDKTF) declare infrastructure resources insi
 Spec-18 requires local provenance (last author, recent authors, associated PRs) to be available for orient and other MCP queries. Storing one row per file in a dedicated `provenance` table keeps the data bounded, avoids inflating the graph edges table, and allows idempotent full-replace on each analyze run.
 
 **Consequences:** Schema version bumped to 4; existing DBs are dropped and rebuilt. Provenance extraction is best-effort and swallowed on failure, so non-git or shallow repos silently produce no provenance. All provenance is local-only — nothing is uploaded.
+
+### EdgeStore exposes wasReset flag after schema migration wipe
+
+**Status:** Approved
+**Date:** 2026-06-02
+**ID:** 8365f6f8
+
+When the schema version bumps, EdgeStore drops all tables and rebuilds. Read-only callers (MCP handlers) need to distinguish an empty-but-valid store from a wiped store so they can prompt the user to re-run analyze rather than silently returning empty results.
+
+**Consequences:** All read-path consumers of EdgeStore should check wasReset before serving results; the flag is set once at open time and is not resettable.

@@ -30,7 +30,7 @@ export async function handleGetChangeCoupling(input: GetChangeCouplingInput): Pr
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
   if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
-  if (!ctx.edgeStore) return { error: 'Call graph DB not available. Re-run analyze_codebase.' };
+  if (!ctx.edgeStore) return { error: 'Call graph index is empty or unavailable — run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).' };
 
   if (ctx.edgeStore.countChangeCoupling() === 0) {
     return {

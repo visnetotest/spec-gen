@@ -51,6 +51,15 @@ function runTransaction(db: DatabaseSync, fn: () => void): void {
 const SCHEMA_VERSION = 5;
 
 export class EdgeStore {
+  /**
+   * True when opening this DB found a stale SCHEMA_VERSION and wiped it (rebuild-on-bump).
+   * The data is gone until the next analyze repopulates it — callers that READ
+   * (vs. analyze, which repopulates) should treat the store as unavailable so they
+   * can tell the user to re-run analyze instead of serving an empty graph.
+   */
+  private _wasReset = false;
+  get wasReset(): boolean { return this._wasReset; }
+
   private constructor(private readonly db: DatabaseSync) {
     this.initSchema();
   }
@@ -62,6 +71,7 @@ export class EdgeStore {
     if (row === undefined) {
       this.db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(SCHEMA_VERSION);
     } else if (row.version !== SCHEMA_VERSION) {
+      this._wasReset = true;
       this.db.exec(`
         DROP TABLE IF EXISTS edges;
         DROP TABLE IF EXISTS inheritance_edges;

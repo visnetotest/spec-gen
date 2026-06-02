@@ -311,7 +311,7 @@ export async function handleGetSubgraph(
   const ctx = await readCachedContext(absDir);
 
   if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
-  if (!ctx.edgeStore) return { error: 'Call graph DB not available. Re-run analyze_codebase.' };
+  if (!ctx.edgeStore) return { error: 'Call graph index is empty or unavailable — run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).' };
 
   const lower = functionName.toLowerCase();
   let seeds = ctx.edgeStore.searchNodes(lower);
@@ -446,7 +446,7 @@ export async function handleAnalyzeImpact(
   const ctx = await readCachedContext(absDir);
 
   if (!ctx)            return { error: 'No analysis found. Run analyze_codebase first.' };
-  if (!ctx.edgeStore)  return { error: 'Call graph DB not available. Re-run analyze_codebase.' };
+  if (!ctx.edgeStore)  return { error: 'Call graph index is empty or unavailable — run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).' };
 
   const lower = symbol.toLowerCase();
   let seeds = ctx.edgeStore.searchNodes(lower);

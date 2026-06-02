@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { EdgeStore } from './edge-store.js';
 import type { CallEdge, FunctionNode, ClassNode } from '../analyzer/call-graph.js';
 
@@ -39,6 +40,33 @@ describe('EdgeStore', () => {
   afterEach(async () => {
     store.close();
     await rm(dir, { recursive: true, force: true });
+  });
+
+  describe('schema-bump wipe (wasReset)', () => {
+    it('a current-version store reports wasReset === false', () => {
+      expect(store.wasReset).toBe(false);
+    });
+
+    it('opening a stale-version DB wipes it and reports wasReset === true', async () => {
+      const d = await makeTmpDir();
+      const p = join(d, 'cg.db');
+      // Simulate a pre-upgrade store: an old SCHEMA_VERSION with a node already in it.
+      const old = new DatabaseSync(p);
+      old.exec('CREATE TABLE schema_version (version INTEGER NOT NULL)');
+      old.prepare('INSERT INTO schema_version (version) VALUES (1)').run();
+      old.exec('CREATE TABLE nodes (id TEXT PRIMARY KEY, name TEXT, file_path TEXT, is_external INTEGER NOT NULL DEFAULT 0)');
+      old.prepare("INSERT INTO nodes (id, name, file_path) VALUES ('a::foo','foo','a')").run();
+      old.close();
+
+      const es = EdgeStore.open(p);
+      try {
+        expect(es.wasReset).toBe(true);      // detected the stale version
+        expect(es.countNodes()).toBe(0);     // and wiped the data (rebuild-on-bump)
+      } finally {
+        es.close();
+        await rm(d, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('exists / dbPath helpers', () => {

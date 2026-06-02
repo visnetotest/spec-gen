@@ -169,7 +169,20 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
       const raw = await readFile(filePath, 'utf-8');
       const ctx = JSON.parse(raw) as CachedContext;
       if (EdgeStore.exists(analysisDir)) {
-        ctx.edgeStore = EdgeStore.open(EdgeStore.dbPath(analysisDir));
+        const es = EdgeStore.open(EdgeStore.dbPath(analysisDir));
+        // Schema-bump guard: opening a DB whose SCHEMA_VERSION is stale wipes it
+        // (rebuild-on-bump). If the DB is now empty but the JSON analysis still has
+        // production nodes, the two are out of sync after an upgrade — do NOT serve
+        // the empty store. Edge-store tools then return "Re-run analyze_codebase"
+        // instead of silent empty results; the next analyze repopulates and re-attaches.
+        const jsonProdNodes = Array.isArray(ctx.callGraph?.nodes)
+          ? ctx.callGraph.nodes.filter(n => !n.isExternal && !n.isTest).length
+          : 0;
+        if ((es.wasReset || jsonProdNodes > 0) && es.countNodes() === 0 && jsonProdNodes > 0) {
+          es.close();
+        } else {
+          ctx.edgeStore = es;
+        }
       }
       _contextCache.set(directory, { ctx, mtime });
       emit(directory, 'cache', { event: 'cache_read', hit: true });

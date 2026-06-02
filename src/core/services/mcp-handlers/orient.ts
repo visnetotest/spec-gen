@@ -505,11 +505,19 @@ export async function handleOrient(
   }
   nextSteps.push('After implementing, run check_spec_drift to verify the code matches the spec');
 
+  // Signal when the graph index is unavailable (e.g. wiped by a version upgrade and
+  // not yet re-analyzed): call paths, provenance, decisions, and change-coupling all
+  // depend on it, so flag it rather than silently returning a thinner result.
+  const graphIndexStale = relevantFunctions.length > 0 && !llmCtx?.edgeStore;
+
   return {
     task,
     searchMode,
     ...(searchMode === 'bm25_fallback'
       ? { note: 'Embedding server unavailable — results use keyword matching. Run "openlore analyze --embed" for semantic search.' }
+      : {}),
+    ...(graphIndexStale
+      ? { graphIndexNote: 'Graph index unavailable — call paths, provenance, decisions, and change-coupling are omitted. Run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).' }
       : {}),
     relevantFiles,
     relevantFunctions,
