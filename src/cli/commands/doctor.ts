@@ -15,6 +15,7 @@ import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { createLLMService, ProviderName } from '../../core/services/llm-service.js';
 import {
   MIN_NODE_MAJOR_VERSION,
+  MIN_NODE_MINOR_VERSION,
   ANALYSIS_AGE_WARNING_HOURS,
   MIN_DISK_SPACE_FAIL_MB,
   MIN_DISK_SPACE_WARN_MB,
@@ -52,15 +53,19 @@ interface CheckResult {
 // ============================================================================
 
 async function checkNodeVersion(): Promise<CheckResult> {
-  const [major] = process.versions.node.split('.').map(Number);
-  if (major >= MIN_NODE_MAJOR_VERSION) {
+  const [major, minor] = process.versions.node.split('.').map(Number);
+  const min = `${MIN_NODE_MAJOR_VERSION}.${MIN_NODE_MINOR_VERSION}`;
+  const ok =
+    major > MIN_NODE_MAJOR_VERSION ||
+    (major === MIN_NODE_MAJOR_VERSION && minor >= MIN_NODE_MINOR_VERSION);
+  if (ok) {
     return { name: 'Node.js version', status: 'ok', detail: `v${process.versions.node}` };
   }
   return {
     name: 'Node.js version',
     status: 'fail',
-    detail: `v${process.versions.node} (requires >=${MIN_NODE_MAJOR_VERSION})`,
-    fix: `Install Node.js ${MIN_NODE_MAJOR_VERSION}+ from https://nodejs.org/`,
+    detail: `v${process.versions.node} (requires >=${min} for node:sqlite)`,
+    fix: `Switch to Node ${min}+ (\`nvm use ${MIN_NODE_MAJOR_VERSION}\`) or install from https://nodejs.org/ — a .nvmrc pinned to an older Node will crash the MCP server`,
   };
 }
 
@@ -142,15 +147,25 @@ async function checkAnalysis(rootPath: string): Promise<CheckResult> {
 }
 
 async function checkOpenSpecDir(rootPath: string): Promise<CheckResult> {
-  const specsDir = join(rootPath, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR);
+  // Read the *configured* openspecPath rather than assuming the default — a
+  // project may point OpenLore at docs/specs/ or another root (Spec 26 B5).
+  let configuredRoot = OPENSPEC_DIR;
+  try {
+    const config = await readOpenLoreConfig(rootPath);
+    if (config?.openspecPath) configuredRoot = config.openspecPath;
+  } catch {
+    /* no config — fall back to the default */
+  }
+  const specsDir = join(rootPath, configuredRoot, OPENSPEC_SPECS_SUBDIR);
+  const rel = `${configuredRoot.replace(/^\.\//, '').replace(/\/$/, '')}/${OPENSPEC_SPECS_SUBDIR}/`;
   try {
     await access(specsDir);
-    return { name: 'OpenSpec directory', status: 'ok', detail: 'openspec/specs/ exists' };
+    return { name: 'OpenSpec directory', status: 'ok', detail: `${rel} exists` };
   } catch {
     return {
       name: 'OpenSpec directory',
       status: 'warn',
-      detail: 'openspec/specs/ not found',
+      detail: `${rel} not found`,
       fix: "Run 'openlore init' then 'openlore generate'",
     };
   }
@@ -250,9 +265,9 @@ async function checkLLMConnection(rootPath: string): Promise<CheckResult> {
     } catch {
       return {
         name: 'LLM connection',
-        status: 'fail',
+        status: 'warn',
         detail: `${provider} · '${bin}' not found on PATH`,
-        fix: `Install the ${bin} CLI and ensure it is on your PATH`,
+        fix: `Optional — only 'openlore generate' needs an LLM. Install the ${bin} CLI to enable it`,
       };
     }
   }
@@ -278,9 +293,9 @@ async function checkLLMConnection(rootPath: string): Promise<CheckResult> {
   } catch (err) {
     return {
       name: 'LLM connection',
-      status: 'fail',
+      status: 'warn',
       detail: `${provider} · ${(err as Error).message}`,
-      fix: 'Check that the required API key environment variable is set',
+      fix: 'Optional — set the provider API key only if you use \'openlore generate\'',
     };
   }
 
@@ -298,9 +313,9 @@ async function checkLLMConnection(rootPath: string): Promise<CheckResult> {
     const msg = (err as Error).message ?? String(err);
     return {
       name: 'LLM connection',
-      status: 'fail',
+      status: 'warn',
       detail: `${provider} · ${msg} (${ms}ms)`,
-      fix: 'Check your API key, base URL, and network connectivity',
+      fix: 'Optional — needed only for \'openlore generate\'. Check API key, base URL, and connectivity',
     };
   }
 }
@@ -339,9 +354,9 @@ async function checkEmbeddingConnection(rootPath: string): Promise<CheckResult |
       const body = (await response.text().catch(() => '')).trim() || '(empty)';
       return {
         name: 'Embedding connection',
-        status: 'fail',
+        status: 'warn',
         detail: `HTTP ${response.status}: ${body} (${ms}ms)`,
-        fix: 'Check your embedding server URL, API key, and that the server is running',
+        fix: 'Optional — search/orient fall back to BM25 without embeddings. Check the server URL, API key, and that it is running',
       };
     }
     const data = await response.json() as { data?: Array<{ embedding: number[] }> };
@@ -356,9 +371,9 @@ async function checkEmbeddingConnection(rootPath: string): Promise<CheckResult |
     const msg = (err as Error).message ?? String(err);
     return {
       name: 'Embedding connection',
-      status: 'fail',
+      status: 'warn',
       detail: `${url} · ${msg} (${ms}ms)`,
-      fix: 'Check your embedding server is running (npm run embed:up) and the URL is correct',
+      fix: 'Optional — search/orient fall back to BM25. Start the embedding server (npm run embed:up) and check the URL',
     };
   }
 }
@@ -433,7 +448,7 @@ Examples:
   $ openlore doctor --json    Output results as JSON
 
 Checks performed:
-  • Node.js version (>=${MIN_NODE_MAJOR_VERSION} required)
+  • Node.js version (>=${MIN_NODE_MAJOR_VERSION}.${MIN_NODE_MINOR_VERSION} required for node:sqlite)
   • Git repository detection
   • openlore configuration (${OPENLORE_CONFIG_REL_PATH})
   • Analysis artifacts freshness
@@ -490,10 +505,11 @@ Checks performed:
     const warnings = checks.filter(c => c.status === 'warn');
 
     if (failures.length > 0) {
-      logger.error(`${failures.length} check(s) failed — fix the issues above before proceeding`);
+      const warnSuffix = warnings.length > 0 ? `, ${warnings.length} warning(s)` : '';
+      logger.error(`${failures.length} check(s) failed${warnSuffix} — fix the failures above before proceeding`);
       process.exitCode = 1;
     } else if (warnings.length > 0) {
-      logger.warning(`${warnings.length} warning(s) — some features may not work correctly`);
+      logger.warning(`${warnings.length} warning(s) — optional features (LLM generate, embeddings) may be limited`);
     } else {
       logger.success('All checks passed!');
     }

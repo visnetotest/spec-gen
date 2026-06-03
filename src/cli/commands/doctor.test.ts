@@ -240,7 +240,7 @@ describe('doctor command', () => {
       }
     });
 
-    it('should fail when createLLMService throws (missing API key)', async () => {
+    it('warns (not fails) when createLLMService throws (missing API key) — LLM is optional', async () => {
       const saved = clearLLMKeys();
       const llmService = await import('../../core/services/llm-service.js');
       vi.mocked(llmService.createLLMService).mockImplementationOnce(() => {
@@ -249,15 +249,15 @@ describe('doctor command', () => {
       try {
         const checks = await runDoctorJson();
         const llmCheck = checks.find(c => c.name === 'LLM connection')!;
-        expect(llmCheck.status).toBe('fail');
+        expect(llmCheck.status).toBe('warn');
         expect(llmCheck.fix).toBeDefined();
-        expect(llmCheck.fix).toContain('API key');
+        expect(llmCheck.fix).toContain('Optional');
       } finally {
         restoreLLMKeys(saved);
       }
     });
 
-    it('should fail when complete() rejects (network error)', async () => {
+    it('warns (not fails) when complete() rejects (network error)', async () => {
       const saved = clearLLMKeys();
       process.env.ANTHROPIC_API_KEY = 'sk-test-anthropic';
       const llmService = await import('../../core/services/llm-service.js');
@@ -268,14 +268,14 @@ describe('doctor command', () => {
       try {
         const checks = await runDoctorJson();
         const llmCheck = checks.find(c => c.name === 'LLM connection')!;
-        expect(llmCheck.status).toBe('fail');
-        expect(llmCheck.fix).toContain('API key');
+        expect(llmCheck.status).toBe('warn');
+        expect(llmCheck.fix).toContain('Optional');
       } finally {
         restoreLLMKeys(saved);
       }
     });
 
-    it('should include a fix suggestion when failing', async () => {
+    it('should include a fix suggestion when degraded', async () => {
       const saved = clearLLMKeys();
       const llmService = await import('../../core/services/llm-service.js');
       vi.mocked(llmService.createLLMService).mockImplementationOnce(() => {
@@ -358,8 +358,29 @@ describe('doctor command', () => {
 
   // --------------------------------------------------------------------------
   describe('exit code', () => {
-    it('should set exitCode=1 when any check fails (JSON mode confirms fail status)', async () => {
+    it('should report a fail when a deterministic check fails (unparseable config)', async () => {
       consoleSpy.mockImplementation(() => {});
+      // A missing LLM is only a warning now (B4); a genuine fail comes from a
+      // deterministic check — here an existing-but-unparseable config.
+      const { access } = await import('node:fs/promises');
+      vi.mocked(access).mockResolvedValue(undefined);
+      const configManager = await import('../../core/services/config-manager.js');
+      vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue(null);
+
+      const checks = await runDoctorJson();
+      const configCheck = checks.find(c => c.name === 'openlore config')!;
+      expect(configCheck.status).toBe('fail');
+      const failures = checks.filter(c => c.status === 'fail');
+      expect(failures.length).toBeGreaterThan(0);
+    });
+
+    it('missing LLM/embedding alone does NOT fail (exit stays 0)', async () => {
+      consoleSpy.mockImplementation(() => {});
+      // Valid, parseable config so the deterministic checks all pass/warn.
+      const configManager = await import('../../core/services/config-manager.js');
+      vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+        projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec', maxFiles: 500,
+      } as never);
       const keyVars = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENAI_COMPAT_API_KEY'];
       const saved: Record<string, string | undefined> = {};
       for (const k of keyVars) { saved[k] = process.env[k]; delete process.env[k]; }
@@ -368,16 +389,11 @@ describe('doctor command', () => {
       vi.mocked(llmService.createLLMService).mockImplementationOnce(() => {
         throw new Error('No API key');
       });
-
       try {
-        // Confirm via JSON mode that the LLM check is a 'fail'
         const checks = await runDoctorJson();
         const llmCheck = checks.find(c => c.name === 'LLM connection')!;
-        expect(llmCheck.status).toBe('fail');
-        // The JSON path returns early, so exitCode is only set in the non-JSON path.
-        // Verify the failure count reported includes at least one failure.
-        const failures = checks.filter(c => c.status === 'fail');
-        expect(failures.length).toBeGreaterThan(0);
+        expect(llmCheck.status).toBe('warn');
+        expect(checks.filter(c => c.status === 'fail')).toHaveLength(0);
       } finally {
         for (const k of keyVars) { if (saved[k] !== undefined) process.env[k] = saved[k]; else delete process.env[k]; }
       }
@@ -435,28 +451,22 @@ describe('doctor command', () => {
       }
     });
 
-    it('non-JSON: logger.error called and exitCode=1 when a check fails', async () => {
+    it('non-JSON: logger.error called and exitCode=1 when a deterministic check fails', async () => {
       doctorCommand.setOptionValue('json', false);
 
-      const keyVars = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENAI_COMPAT_API_KEY'];
-      const saved: Record<string, string | undefined> = {};
-      for (const k of keyVars) { saved[k] = process.env[k]; delete process.env[k]; }
-
-      const llmService = await import('../../core/services/llm-service.js');
-      vi.mocked(llmService.createLLMService).mockImplementationOnce(() => {
-        throw new Error('No API key');
-      });
+      // Trigger a genuine fail via an existing-but-unparseable config (missing
+      // LLM would only warn now, B4).
+      const { access } = await import('node:fs/promises');
+      vi.mocked(access).mockResolvedValue(undefined);
+      const configManager = await import('../../core/services/config-manager.js');
+      vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue(null);
 
       const loggerModule = await import('../../utils/logger.js');
       vi.mocked(loggerModule.logger.error).mockClear();
 
-      try {
-        await doctorCommand.parseAsync(['node', 'doctor'], { from: 'user' });
-        expect(vi.mocked(loggerModule.logger.error)).toHaveBeenCalled();
-        expect(process.exitCode).toBe(1);
-      } finally {
-        for (const k of keyVars) { if (saved[k] !== undefined) process.env[k] = saved[k]; else delete process.env[k]; }
-      }
+      await doctorCommand.parseAsync(['node', 'doctor'], { from: 'user' });
+      expect(vi.mocked(loggerModule.logger.error)).toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
     });
   });
 
