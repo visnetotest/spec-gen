@@ -316,6 +316,12 @@ The system SHALL The orient command SHALL accept a `lean` flag that, when set, r
 
 > Decision recorded: e57091fb
 > Date: 2026-06-03
+### Requirement: LeanMcpToolSurfaceViaLosslessTrimPayloadsizeGuardNotServerdrivenLazySchemas
+
+The system SHALL enforce a payload-size budget guard on the MCP tools/list response to prevent unbounded tool-surface growth.
+
+> Decision recorded: d54af0d3
+> Date: 2026-06-03
 
 ## Technical Notes
 
@@ -402,3 +408,13 @@ Allows callers to cap the number of tokens returned in relevantFunctions/search 
 Shallow 'who/where' lookups don't need provenance, change-coupling, insertion-points, specs, or decisions enrichment — returning only the navigation core (relevantFunctions, callPaths, specDomains) cuts per-call token cost for agents that only need a quick lookup before drilling deeper with dedicated tools.
 
 **Consequences:** Callers must opt-in via the `lean` flag; expand handles and dedicated tools remain the path to full enrichment. Both MCP and CLI surfaces must forward the parameter to handleOrient.
+
+### Lean MCP tool surface via lossless trim + payload-size guard, not server-driven lazy schemas
+
+**Status:** Approved
+**Date:** 2026-06-03
+**ID:** d54af0d3
+
+MCP has no server-driven lazy-schema mechanism (tools/list always returns full inputSchemas), and the dominant client (Claude Code) already defers schemas client-side. The server's only lossless lever is tool count + bytes; byte savings are ~2% because payload is dominated by irreducible per-tool schema structure. A meta-dispatcher tool was rejected (loses per-tool validation, Spec 11 annotations, discoverable selection surface, reintroduces wrong-tool round-trips). Forcing the navigation preset as install default was also rejected (hides governance tools the decision gate needs, per Spec 25 Phase B).
+
+**Consequences:** tools/list shrinks ~2% losslessly (47,037→46,118 B full; 8,121→8,002 B nav) with zero selection-quality risk. A budget-guard test regresses if surface bloats, making tool additions a conscious budget bump. Structural shallow-task prefix cost is acknowledged as client-controlled and not further reducible server-side; eager clients retain the --preset navigation lever.

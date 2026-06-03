@@ -146,6 +146,12 @@ export {
 // TOOL DEFINITIONS
 // ============================================================================
 
+// Spec 28 — the `directory` param is the one input every tool shares (50×). Its
+// description was a verbatim 38-char repeat on each tool; a single short shared
+// constant trims that lossless repeat from the cached tools/list prefix without
+// dropping the one fact that matters (it must be absolute, not relative).
+const DIR_DESC = 'Absolute project path';
+
 export const TOOL_DEFINITIONS = [
   {
     name: 'orient',
@@ -160,7 +166,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         task: {
           type: 'string',
@@ -208,8 +214,8 @@ export const TOOL_DEFINITIONS = [
     name: 'get_architecture_overview',
     description:
       'USE THIS WHEN: onboarding to an unknown codebase, or before planning a large feature. ' +
-      'Returns domain clusters, cross-cluster dependencies, global entry points, and critical hubs — ' +
-      'faster than reading package.json + directory tree yourself. Run analyze_codebase first.',
+      'Returns domain clusters, cross-cluster dependencies, global entry points, and critical hubs. ' +
+      'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -244,14 +250,13 @@ export const TOOL_DEFINITIONS = [
     description:
       'Return the call graph for a project: hub functions (high fan-in), ' +
       'entry points (no internal callers), and architectural layer violations. ' +
-      'Supports TypeScript, JavaScript, Python, Go, Rust, Ruby, Java, C++. ' +
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
       },
       required: ['directory'],
@@ -264,7 +269,7 @@ export const TOOL_DEFINITIONS = [
       'Detects Type 1 (exact clones — identical after whitespace/comment normalization), ' +
       'Type 2 (structural clones — same structure with renamed variables), and ' +
       'Type 3 (near-clones with Jaccard similarity ≥ 0.7 on token n-grams). ' +
-      'No LLM calls required. Run analyze_codebase first.',
+      'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -287,7 +292,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         filePattern: {
           type: 'string',
@@ -312,7 +317,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         functionName: {
           type: 'string',
@@ -352,7 +357,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         entryFunction: {
           type: 'string',
@@ -386,7 +391,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         domain: {
           type: 'string',
@@ -453,7 +458,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         symbol: {
           type: 'string',
@@ -479,7 +484,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         changedSymbols: {
           type: 'array',
           items: { type: 'string' },
@@ -506,7 +511,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         ifDeleted: { type: 'string', description: 'Symbol name — returns what becomes dead if it is deleted (delete-impact mode)' },
         maxResults: { type: 'number', description: 'Max candidate-dead results (default 100)' },
         filePattern: { type: 'string', description: 'Only report candidates whose file path contains this substring' },
@@ -526,7 +531,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         baseRef: { type: 'string', description: 'Old state to diff against (default "HEAD")' },
         headRef: { type: 'string', description: 'New state (a git ref). Omit to use the working tree.' },
         maxResults: { type: 'number', description: 'Cap reported items per category (default 200)' },
@@ -546,7 +551,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         file: { type: 'string', description: 'A file to query its coupling/volatility. Omit for the most-volatile overview.' },
         limit: { type: 'number', description: 'Cap results (default 20)' },
       },
@@ -566,7 +571,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         from: { type: 'string', description: 'Pre-edit mode: the file that would gain the import (relative or absolute). Requires "to".' },
         to: { type: 'string', description: 'Pre-edit mode: the target file path or exported symbol being imported. Requires "from".' },
       },
@@ -585,7 +590,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         limit: {
           type: 'number',
@@ -611,7 +616,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         limit: {
           type: 'number',
@@ -643,7 +648,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         limit: {
           type: 'number',
@@ -670,7 +675,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         filePath: {
           type: 'string',
@@ -692,7 +697,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         filePath: {
           type: 'string',
@@ -719,7 +724,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         description: {
           type: 'string',
@@ -752,7 +757,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         query: {
           type: 'string',
@@ -786,7 +791,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
       },
       required: ['directory'],
     },
@@ -803,7 +808,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         query: {
           type: 'string',
@@ -839,7 +844,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         query: {
           type: 'string',
@@ -875,7 +880,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         domain: {
           type: 'string',
           description: 'Domain name as returned by list_spec_domains (e.g. "auth", "analyzer")',
@@ -894,7 +899,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         filePath: {
           type: 'string',
           description: 'File path relative to the project directory, e.g. "src/auth/jwt.ts"',
@@ -917,7 +922,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         filePath: {
           type: 'string',
           description: 'File path relative to the project root, e.g. "src/core/analyzer/vector-index.ts"',
@@ -945,7 +950,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         description: {
           type: 'string',
@@ -983,7 +988,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         storyFilePath: {
           type: 'string',
@@ -1011,7 +1016,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         query: {
           type: 'string',
           description: 'Optional text filter — returns only ADRs whose title or content contains this string',
@@ -1033,7 +1038,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
       },
       required: ['directory'],
     },
@@ -1051,7 +1056,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
       },
       required: ['directory'],
     },
@@ -1068,7 +1073,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
       },
       required: ['directory'],
     },
@@ -1085,7 +1090,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
       },
       required: ['directory'],
     },
@@ -1103,7 +1108,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
       },
       required: ['directory'],
     },
@@ -1119,7 +1124,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
       },
       required: ['directory'],
     },
@@ -1137,7 +1142,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         maxUncovered: {
           type: 'number',
           description: 'Maximum uncovered functions to return (default: 50)',
@@ -1166,7 +1171,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         domains: {
           type: 'array',
@@ -1204,7 +1209,7 @@ export const TOOL_DEFINITIONS = [
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory',
+          description: DIR_DESC,
         },
         domains: {
           type: 'array',
@@ -1230,7 +1235,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         functionName: { type: 'string', description: 'Exact function or method name' },
         filePath: {
           type: 'string',
@@ -1251,7 +1256,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         functionName: { type: 'string', description: 'Function name to look up the community for' },
       },
       required: ['directory', 'functionName'],
@@ -1269,7 +1274,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         base: {
           type: 'string',
           description: 'Git ref to diff against (default: HEAD). Use "HEAD~1" for last commit, "main" for branch diff.',
@@ -1289,7 +1294,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         title: { type: 'string', description: 'Short imperative statement, e.g. "Use UUIDs for decision IDs"' },
         rationale: { type: 'string', description: 'Why this decision was made' },
         consequences: { type: 'string', description: 'What changes as a result (optional)' },
@@ -1321,7 +1326,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         status: {
           type: 'string',
           enum: ['draft', 'consolidated', 'verified', 'phantom', 'approved', 'rejected', 'synced'],
@@ -1342,7 +1347,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         id: { type: 'string', description: '8-character decision ID from list_decisions' },
         note: { type: 'string', description: 'Optional review note' },
       },
@@ -1356,7 +1361,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         id: { type: 'string', description: '8-character decision ID from list_decisions' },
         note: { type: 'string', description: 'Optional reason for rejection' },
       },
@@ -1374,7 +1379,7 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        directory: { type: 'string', description: DIR_DESC },
         dryRun: { type: 'boolean', description: 'Preview without writing files (default: false)' },
         id: { type: 'string', description: 'Sync only this specific decision ID (default: all approved)' },
       },

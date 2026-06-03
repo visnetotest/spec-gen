@@ -670,11 +670,13 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       if (artifacts.repoStructure.envVars.length > 0) {
         console.log(`    ├─ ${opts.output}env-inventory.json  (${artifacts.repoStructure.envVars.length} env var(s))`);
       }
+      // CODEBASE.md (digestWritten) is the last branch when present, so it owns the
+      // └─ corner; otherwise the corner falls to ARCHITECTURE.md / SUMMARY.md.
       if (architectureMdWritten) {
         console.log(`    ├─ ${opts.output}SUMMARY.md`);
-        console.log(`    ├─ ${opts.output}ARCHITECTURE.md`);
+        console.log(`    ${digestWritten ? '├─' : '└─'} ${opts.output}ARCHITECTURE.md`);
       } else {
-        console.log(`    ├─ ${opts.output}SUMMARY.md`);
+        console.log(`    ${digestWritten ? '├─' : '└─'} ${opts.output}SUMMARY.md`);
       }
       if (digestWritten) {
         console.log(`    └─ ${opts.output}CODEBASE.md`);
