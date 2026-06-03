@@ -181,7 +181,17 @@ async function ensureGitignored(rootPath: string, entry: string): Promise<void> 
   let content = '';
   if (await fileExists(gitignorePath)) {
     content = await readFile(gitignorePath, 'utf-8');
-    if (content.split('\n').some((l) => l.trim() === entry)) return;
+    // Trailing-slash-insensitive segments, so `.openlore` and `.openlore/` match
+    // but `.openlore` never falsely matches a sibling like `.openapi/` (B2a).
+    const segs = (p: string) => p.trim().replace(/\/+$/, '').split('/').filter(Boolean);
+    const want = segs(entry);
+    for (const line of content.split('\n')) {
+      const have = segs(line);
+      if (have.length === 0) continue;
+      // Skip if an existing line is identical, or a covering parent prefix
+      // (e.g. existing `.openlore/` covers a new `.openlore/decisions/`).
+      if (have.length <= want.length && have.every((s, i) => s === want[i])) return;
+    }
   }
   await writeFile(gitignorePath, content.trimEnd() + '\n' + entry + '\n', 'utf-8');
   logger.discovery(`  → added ${entry} to .gitignore`);

@@ -11,19 +11,33 @@
 
 ## Progress
 
-Branch: `chore/post-arc-ci-hardening` → [PR #120](https://github.com/clay-good/OpenLore/pull/120) (the plan).
-This document is the **plan**; implementation lands in follow-up commits/PRs per the wave sequence in
-§4. Status: **Wave 0 shipped; Waves 1–4 pending.**
+Original plan branch: `chore/post-arc-ci-hardening` → [PR #120](https://github.com/clay-good/OpenLore/pull/120).
+All implementation landed on `fix/spec-26-wave-0-mcp-registration` →
+[PR #121](https://github.com/clay-good/OpenLore/pull/121). Status: **Waves 0–4 shipped.**
 
 - [x] **Wave 0** — Fix MCP registration (the headline bug). B1: `openlore install --agent claude-code`
   now writes `mcpServers.openlore` to **`.mcp.json`** (the file Claude Code actually reads) and keeps
   only the SessionStart hook in `.claude/settings.json`; re-running migrates a legacy
   `settings.json` entry away. Added a `doctor` **MCP wiring** check that warns when the server is in
-  the wrong file (with the exact `--force` fix). [PR #121](https://github.com/clay-good/OpenLore/pull/121).
-- [ ] Wave 1 — Consolidated `doctor` pass
-- [ ] Wave 2 — Detection correctness (spec dir, agent/project, node version)
-- [ ] Wave 3 — Freshness ownership (drop redundant hook, auto-rebuild on reset)
-- [ ] Wave 4 — Cosmetic/cleanup wins (skill schema, ARCHITECTURE.md path, gitignore dedupe, model bump)
+  the wrong file (with the exact `--force` fix).
+- [x] **Wave 1** — Consolidated `doctor` pass. B4 (LLM/embedding = warn, not fail → no-LLM exits 0),
+  B7-doctor (Node *minor*-version check ≥22.5 for node:sqlite), B5-doctor (read the configured
+  openspecPath). Also fixed an audit-found layer-matching bug (`layerOf` substring → path-boundary).
+- [x] **Wave 2** — Detection correctness. B5 (`detectExistingSpecDir` → point at docs/specs/ or
+  specs/ instead of an empty openspec/; sharpened spec-index error), B6A (depth-1 nested-manifest
+  scan), B6B (bias to claude-code when `~/.claude` exists instead of blind AGENTS.md).
+- [x] **Wave 3** — Freshness ownership. B9 (removed the redundant full-`analyze` PostToolUse hook;
+  `--watch-auto` is the sole owner; setup migrates the legacy hook away), B10 (watcher schedules one
+  detached `analyze --force` to self-heal a schema-reset graph).
+- [x] **Wave 4** — Cleanup. B8 (skill SKILL.md → real camelCase fields + `.mcp.json` detection note),
+  B3 (`ARCHITECTURE.md` now lands in `.openlore/analysis/`; dropped the redundant gitignore line),
+  B2a (gitignore parent-prefix guard, slash-insensitive), B2b (default model → `claude-sonnet-4-6`).
+
+> **Deferred (low value, already mitigated):** B7's optional npx/`node:sqlite` import guards — the
+> doctor minor-version check (Wave 1) + `engines.node` already catch a too-old Node. Audit findings
+> in orient (`involvesRelevant`) and structural-diff (rename path) were investigated and judged
+> **not bugs** (both endpoints are full file paths so `===` is the real match; labeling the old
+> snapshot with the new path is intentional rename-matching).
 
 ---
 

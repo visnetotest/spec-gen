@@ -76,7 +76,7 @@ describe('config-manager', () => {
       expect(config.analysis.maxFiles).toBe(100_000);
       expect(config.analysis.includePatterns).toEqual([]);
       expect(config.analysis.excludePatterns).toEqual([]);
-      expect(config.generation.model).toBe('claude-sonnet-4-20250514');
+      expect(config.generation.model).toBe('claude-sonnet-4-6');
       expect(config.generation.domains).toBe('auto');
       expect(config.createdAt).toBeDefined();
       expect(config.lastRun).toBe(null);

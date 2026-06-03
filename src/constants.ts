@@ -210,7 +210,7 @@ export const GENERATION_OUTPUT_RATIO = 0.4;
 // DEFAULT MODELS (per provider)
 // ============================================================================
 
-export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-20250514';
+export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
 export const DEFAULT_OPENAI_MODEL = 'gpt-4o';
 export const DEFAULT_OPENAI_COMPAT_MODEL = 'mistral-large-latest';
 export const DEFAULT_GEMINI_MODEL = 'gemini-2.0-flash';
