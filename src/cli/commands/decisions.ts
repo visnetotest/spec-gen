@@ -323,40 +323,13 @@ export async function uninstallPreCommitHook(rootPath: string): Promise<void> {
   for (const filePath of agentFiles) await removeAgentInstructions(filePath);
 }
 
+// Marker for the legacy full-`analyze` PostToolUse hook. The MCP server's
+// `--watch-auto` (default since v2.0.6, Spec 13.1) is now the single freshness
+// owner and keeps the index fresh incrementally O(change); the old hook ran a
+// full O(repo) `openlore analyze` on *every* tool call (Read, Bash, …, masked
+// only by a 10s lock) — pure double work. We no longer install it, and
+// `uninstallClaudeHook` strips any copy a prior version left behind (Spec 26 B9).
 const ANALYZE_HOOK_MARKER = 'openlore analyze';
-const ANALYZE_HOOK_ENTRY = {
-  _comment: 'openlore: keep call graph fresh after every file edit (debounced 10s)',
-  type: 'command',
-  command: [
-    'LOCK=.openlore/.analyze.lock;',
-    'if [ ! -f "$LOCK" ] || [ $(( $(date +%s) - $(cat "$LOCK" 2>/dev/null || echo 0) )) -gt 10 ]; then',
-    '  echo $(date +%s) > "$LOCK";',
-    '  openlore analyze --output .openlore/analysis 2>/dev/null & true;',
-    'fi',
-  ].join(' '),
-};
-
-export async function installClaudeHook(rootPath: string): Promise<void> {
-  const settingsPath = join(rootPath, '.claude', 'settings.json');
-  let settings: ClaudeSettings = {};
-
-  try {
-    settings = JSON.parse(await readFile(settingsPath, 'utf-8')) as ClaudeSettings;
-  } catch { /* file missing or corrupt — start fresh */ }
-
-  const hooks = settings.hooks?.PostToolUse ?? [];
-  if (hooks.some((h) => JSON.stringify(h).includes(ANALYZE_HOOK_MARKER))) {
-    logger.success('Claude Code analyze hook already present in .claude/settings.json');
-    return;
-  }
-
-  settings.hooks ??= {};
-  settings.hooks.PostToolUse = [...hooks, ANALYZE_HOOK_ENTRY];
-
-  await mkdir(join(rootPath, '.claude'), { recursive: true });
-  await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
-  logger.success('Claude Code PostToolUse hook added to .claude/settings.json');
-}
 
 interface ClaudeSettings {
   hooks?: {
