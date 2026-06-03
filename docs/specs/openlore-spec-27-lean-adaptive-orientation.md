@@ -30,6 +30,16 @@ re-measured live and refreshed honestly (Spec 25 honesty contract applies).
   orienting, express doesn't), and an agent can't reliably tell ahead of time, so forcing the choice
   risks the deep-task win. We deliberately do not ship a heuristic that guesses. The honest answer
   stays: `openlore prove` lets each user measure their own repo + task mix.
+- [x] **P5 — Lean is now *compute*-lean, not just payload-lean (deepened 2026-06-03, shipped with Spec 28).**
+  P1 trimmed the lean *response* but the handler still did all the enrichment *work* and threw it away:
+  an extra `SpecVectorIndex.search` embedding query (`matchingSpecs`), manifest + spec-file reads
+  (`inlineSpecs`), a decision-store load (`pendingDecisions`), the git-derived `provenance` /
+  `changeCoupling` / `governingDecisions` joins, and a `dependency-graph.json` parse + violation scan
+  (`architectureViolations`). Each enrichment block is now guarded by `!lean`, so lean skips the I/O
+  and the second embedding round-trip entirely — it makes the shallow-task path *faster*, not only
+  smaller. Unit test asserts the decision-store load (a representative side-effect) is **not** invoked
+  in lean and **is** in rich. This is the honest counter to P3's structural finding: lean can't remove
+  the agent round-trip, but it now removes the *server-side* work behind the call too.
 
 **Net (honest):** lean orient is a real, shipped efficiency improvement (40% smaller orient payload,
 deterministic, no downside — enrichment stays one `expand` away). It does **not** eliminate the

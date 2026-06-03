@@ -174,6 +174,23 @@ describe('handleOrient', () => {
     expect(Buffer.byteLength(JSON.stringify(lean))).toBeLessThan(Buffer.byteLength(JSON.stringify(rich)));
   });
 
+  it('lean mode skips the enrichment WORK, not just the payload (Spec 27 deepened)', async () => {
+    vi.mocked(VectorIndex.exists).mockReturnValue(true);
+    vi.mocked(VectorIndex.search).mockResolvedValue([
+      makeSearchResult({ name: 'handleAuth', filePath: 'src/auth.ts' }),
+    ]);
+
+    // The decision-store load is one of the enrichment side-effects lean must avoid:
+    // rich computes it (then surfaces pendingDecisions), lean must not even read it.
+    vi.mocked(loadDecisionStore).mockClear();
+    await handleOrient('/tmp/proj', 'who calls handleAuth', 5, undefined, true);
+    expect(loadDecisionStore, 'lean must not load the decision store').not.toHaveBeenCalled();
+
+    vi.mocked(loadDecisionStore).mockClear();
+    await handleOrient('/tmp/proj', 'who calls handleAuth', 5);
+    expect(loadDecisionStore, 'rich still loads the decision store').toHaveBeenCalled();
+  });
+
   it('preserves raw score (higher = better) without inverting via 1 - score', async () => {
     vi.mocked(VectorIndex.exists).mockReturnValue(true);
     vi.mocked(VectorIndex.search).mockResolvedValue([

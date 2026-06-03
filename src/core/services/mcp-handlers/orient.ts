@@ -240,7 +240,7 @@ export async function handleOrient(
   // doesn't connect them to the seed functions.
   type SpecLinkedFunction = { name: string; filePath: string; domain: string; requirement: string };
   const specLinkedFunctions: SpecLinkedFunction[] = [];
-  if (mappingIdx && relevantFunctions.length > 0) {
+  if (!lean && mappingIdx && relevantFunctions.length > 0) {
     const seedDomains = new Set<string>();
     for (const fn of relevantFunctions) {
       for (const spec of fn.linkedSpecs) seedDomains.add(spec.domain);
@@ -316,9 +316,18 @@ export async function handleOrient(
     .slice(0, 3)
     .map((c, i) => ({ rank: i + 1, ...c, score: parseFloat(c.score.toFixed(3)) }));
 
+  // ── Enrichment (Spec 27, deepened) ─────────────────────────────────────────
+  // Everything from here down is dropped by lean mode (it returns the navigation
+  // `core` only). Spec 27 P1 trimmed the lean *payload* but still computed this
+  // enrichment and threw it away — an extra embedding search (matchingSpecs),
+  // manifest + spec-file reads (inlineSpecs), a decision-store load, git-derived
+  // blocks, and a dependency-graph scan, all wasted on a shallow lookup. Each
+  // block is now guarded by `!lean`, so lean skips the *work*, not just the
+  // bytes: it makes the shallow-task path measurably faster, not only smaller.
+
   // ── Spec search (best-effort — skipped if spec index not available) ────────
   let matchingSpecs: OrientSpecMatch[] | undefined;
-  if (hasSpecIndex && embedSvc) {
+  if (!lean && hasSpecIndex && embedSvc) {
     try {
       const specResults = await SpecVectorIndex.search(outputDir, task, embedSvc, { limit: 3 });
       matchingSpecs = specResults.map(r => ({
@@ -335,7 +344,7 @@ export async function handleOrient(
 
   // ── Inline spec purpose from RAG manifest ─────────────────────────────────
   let inlineSpecs: InlineSpec[] | undefined;
-  if (specDomains.length > 0) {
+  if (!lean && specDomains.length > 0) {
     try {
       const cfg = await readOpenLoreConfig(absDir);
       const openspecRelPath = cfg?.openspecPath ?? OPENSPEC_DIR;
@@ -385,7 +394,7 @@ export async function handleOrient(
     affectedDomains: string[];
   }
   let pendingDecisions: DecisionSummary[] | undefined;
-  try {
+  if (!lean) try {
     const { loadDecisionStore, INACTIVE_STATUSES } = await import('../../decisions/store.js');
     const store = await loadDecisionStore(absDir);
     const relevantDomainSet = new Set(specDomains.map((s) => s.domain));
@@ -419,7 +428,7 @@ export async function handleOrient(
   let governingDecisions:
     | Array<{ id: string; title: string; status: string; governs: string[] }>
     | undefined;
-  try {
+  if (!lean) try {
     const es = llmCtx?.edgeStore;
     if (es && relevantFiles.length > 0) {
       const govs = es.getDecisionsForFiles(relevantFiles);
@@ -442,7 +451,7 @@ export async function handleOrient(
   let provenance:
     | Array<{ file: string; lastAuthor: string; lastDate?: string; lastPr?: number; lastPrTitle?: string }>
     | undefined;
-  try {
+  if (!lean) try {
     const es = llmCtx?.edgeStore;
     if (es && relevantFiles.length > 0) {
       const records = es.getProvenanceForFiles(relevantFiles);
@@ -470,7 +479,7 @@ export async function handleOrient(
   let changeCoupling:
     | Array<{ file: string; volatility: 'high' | 'medium' | 'low'; changes: number; frequentlyChangesWith: Array<{ file: string; confidence: number }> }>
     | undefined;
-  try {
+  if (!lean) try {
     const es = llmCtx?.edgeStore;
     if (es && relevantFiles.length > 0) {
       const { volatilityLevel } = await import('../../provenance/change-coupling.js');
@@ -493,7 +502,7 @@ export async function handleOrient(
   // Only when the repo declares rules AND a relevant file participates in a
   // violation. Fully omitted otherwise — inert by default.
   let architectureViolations: Array<{ from: string; to: string; kind: string; reason: string }> | undefined;
-  try {
+  if (!lean) try {
     const rules = await loadArchitectureRules(absDir);
     if (rules.rules.length > 0 && relevantFiles.length > 0) {
       const depRaw = await readFile(join(outputDir, 'dependency-graph.json'), 'utf-8').catch(() => null);
