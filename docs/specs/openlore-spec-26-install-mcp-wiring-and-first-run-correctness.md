@@ -316,3 +316,42 @@ estimation still resolves. *Files:* `constants.ts` + those tests.
 - No new runtime behavior beyond making install/first-run **work and tell the truth**.
 - Do **not** lower the Node floor to support 20 (keep `node:sqlite`; fix the *signal* instead).
 - No LLM/network in any fix (model-id bump is a default-string change, not a runtime dependency).
+
+---
+
+## 7. Full-surface verification (specs 1–26)
+
+A final methodical pass on `2026-06-03` confirming every shipped spec is complete **and functionally
+working**, not just unit-green. No code changed in this pass.
+
+**Deterministic gates:** `lint` clean · `typecheck` clean · `build` clean · **3104 tests pass**, 2
+skipped (145 files).
+
+**Live MCP surface (driven over stdio against this repo):** `initialize` negotiates protocol
+`2025-11-25`; `tools/list` returns **50 tools**, each with a schema (specs 11/12). A 25-call battery
+of the headline read tools returned **25/25 OK, zero `isError`**:
+
+| Spec | Tool | Evidence |
+|------|------|----------|
+| 06/13 | `orient` | returns ranked functions via `bm25_fallback` |
+| 13 | `search_code` / `search_unified` | hits returned |
+| 17 | `analyze_impact` | impact set for `readOpenLoreConfig` |
+| 18 | provenance | `orient` surfaces last author/PR per file |
+| 19 | `select_tests` | reachable tests for changed symbols |
+| 20 | `find_dead_code` | swept 1,575 functions |
+| 21 | `structural_diff` | base/head delta computed |
+| 22 | `get_change_coupling` | volatility + co-change from git |
+| 23 | `check_architecture` | scan mode (no rules → clean); 55 unit tests incl. the layer-boundary regression |
+| 15/16 | `get_decisions` | the synced `e3d3214e` decision is a graph node |
+| drift | `check_spec_drift` · `audit_spec_coverage` | run clean |
+
+**CLI-only surfaces:** `preflight` (spec 03) exits 0; `export scip` (spec 04) emits a 641 KB SCIP
+index; `manifest emit` + `validate` (spec 05) round-trip as a valid v1 manifest.
+
+**Confirmed-intentional deferrals (behave correctly, never crash):** spec 04 SCIP import + column
+ranges, spec 05 federation index + events/RPC extraction, spec 08 deferred languages, spec 09
+(*NOT DOING — superseded*). Each emits empty arrays / a documented warning rather than wrong data.
+
+**Conclusion: specs 1–26 are complete and fully working.** The only confirmed defect found across the
+whole audit was the `layerOf` substring bug (fixed in Wave 1); two other reported findings were
+investigated and judged not-bugs.
