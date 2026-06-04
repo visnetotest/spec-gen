@@ -33,7 +33,16 @@ import { logger } from '../../utils/logger.js';
 import { OPENLORE_DIR } from '../../constants.js';
 import { dispatchTool, UnknownToolError } from '../../core/services/tool-dispatch.js';
 import { validateDirectory } from '../../core/services/mcp-handlers/utils.js';
+import { McpWatcher } from '../../core/services/mcp-watcher.js';
+import { openloreAnalyze } from '../../api/analyze.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS, selectActiveTools } from './mcp.js';
+
+/**
+ * Debounce before a full call-graph re-analyze after edits settle. Longer than
+ * the watcher's signature debounce (WATCH_DEBOUNCE_MS=400) because re-analysis
+ * is heavier; a few seconds of quiet is the signal that an edit burst is done.
+ */
+const REANALYZE_DEBOUNCE_MS = 4000;
 
 const _require = createRequire(import.meta.url);
 const _pkgVersion = (_require('../../../package.json') as { version: string }).version;
@@ -55,6 +64,8 @@ interface ServeCliOptions {
   preset?: string;
   token?: string;
   stop?: boolean;
+  /** false (via --no-watch) disables the freshness watcher + re-analyze lane. */
+  watch?: boolean;
 }
 
 /** Live daemon handle. Returned by {@link startServe} so callers (tests) can
@@ -253,6 +264,45 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   logger.success(`openlore serve listening on http://${host}:${boundPort} (preset: ${presetName})`);
   logger.discovery(`Discovery file: ${serveFilePath(root)}`);
 
+  // ── Freshness: watcher (signatures + vector) + debounced call-graph re-analyze ──
+  // The watcher keeps signatures/vector fresh between commits and primes the read
+  // cache in place. Its onBatchFlushed hook schedules a heavier full re-analyze so
+  // the CALL GRAPH (which the watcher deliberately skips) also stays fresh between
+  // commits — turning divergence from "wait for the next commit" into continuous.
+  let watcher: McpWatcher | undefined;
+  let reanalyzeTimer: ReturnType<typeof setTimeout> | undefined;
+  let reanalyzeRunning = false;
+  let reanalyzePending = false;
+
+  const runReanalyze = async (): Promise<void> => {
+    if (reanalyzeRunning) { reanalyzePending = true; return; } // single-flight + coalesce
+    reanalyzeRunning = true;
+    try {
+      await openloreAnalyze({ rootPath: root, force: true });
+      logger.discovery(`[serve] call graph re-analyzed (${root})`);
+    } catch (err) {
+      logger.warning(`[serve] re-analyze failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      reanalyzeRunning = false;
+      if (reanalyzePending) { reanalyzePending = false; scheduleReanalyze(); }
+    }
+  };
+  function scheduleReanalyze(): void {
+    if (reanalyzeTimer) clearTimeout(reanalyzeTimer);
+    reanalyzeTimer = setTimeout(() => void runReanalyze(), REANALYZE_DEBOUNCE_MS);
+  }
+
+  if (options.watch !== false) {
+    watcher = new McpWatcher({ rootPath: root, onBatchFlushed: () => scheduleReanalyze() });
+    try {
+      await watcher.start();
+      logger.discovery(`[serve] watching ${root} — signatures/vector live, call-graph re-analyze debounced`);
+    } catch (err) {
+      logger.warning(`[serve] watcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
+      watcher = undefined;
+    }
+  }
+
   // Clean shutdown: drop the descriptor so clients don't reuse a dead port.
   // Signal handlers exit the process; the returned close() is for in-process
   // callers (tests) that must not kill the host.
@@ -260,6 +310,8 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   const teardown = async (): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    if (reanalyzeTimer) clearTimeout(reanalyzeTimer);
+    if (watcher) await watcher.stop().catch(() => {});
     await unlink(serveFilePath(root)).catch(() => {});
     await new Promise<void>((res) => server.close(() => res()));
   };
@@ -290,6 +342,7 @@ export const serveCommand = new Command('serve')
     'navigation',
   )
   .option('--token <token>', 'Require this token as the x-openlore-token header (default: $OPENLORE_SERVE_TOKEN)')
+  .option('--no-watch', 'Disable the freshness watcher + debounced call-graph re-analyze')
   .option('--stop', 'Stop a running daemon for --directory and exit')
   .addHelpText(
     'after',

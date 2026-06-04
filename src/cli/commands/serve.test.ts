@@ -29,7 +29,8 @@ afterEach(async () => {
 
 async function boot(opts: { token?: string; preset?: string } = {}): Promise<ServeHandle> {
   root = await mkdtemp(join(tmpdir(), 'openlore-serve-'));
-  const h = await startServe({ directory: root, port: '0', ...opts });
+  // watch:false — these are transport tests; the watcher has its own coverage.
+  const h = await startServe({ directory: root, port: '0', watch: false, ...opts });
   if (!h) throw new Error('startServe returned no handle');
   handle = h;
   return h;
@@ -122,7 +123,7 @@ describe('openlore serve', () => {
   it('rejects an unknown preset at startup', async () => {
     root = await mkdtemp(join(tmpdir(), 'openlore-serve-'));
     const prev = process.exitCode;
-    const h = await startServe({ directory: root, port: '0', preset: 'bogus' });
+    const h = await startServe({ directory: root, port: '0', watch: false, preset: 'bogus' });
     expect(h).toBeUndefined();
     expect(process.exitCode).toBe(1);
     process.exitCode = prev; // don't fail the suite
