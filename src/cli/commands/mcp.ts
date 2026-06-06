@@ -1702,17 +1702,25 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
 
   if (options.watch) {
     const { resolve } = await import('node:path');
-    const { McpWatcher } = await import('../../core/services/mcp-watcher.js');
-    const debounceMs = parseInt(options.watchDebounce ?? '400', 10);
-    const watcher = new McpWatcher({
-      rootPath: resolve(options.watch),
-      debounceMs: isNaN(debounceMs) ? 400 : debounceMs,
-      embed: !options.watchNoEmbed,
-    });
-    await watcher.start();
-    const cleanup = () => watcher.stop().then(() => process.exit(0));
-    process.on('SIGINT',  cleanup);
-    process.on('SIGTERM', cleanup);
+    const watchDir = resolve(options.watch);
+    // Don't start a second watcher when a daemon is already watching this
+    // directory — that's exactly the invariant this PR establishes.
+    // Check discover-only (spawn:false): --watch is an explicit opt-in; if the
+    // user also started a daemon, they want delegation, not two watchers racing.
+    const existingDaemon = await ensureServeDaemon(watchDir, { spawn: false });
+    if (!existingDaemon) {
+      const { McpWatcher } = await import('../../core/services/mcp-watcher.js');
+      const debounceMs = parseInt(options.watchDebounce ?? '400', 10);
+      const watcher = new McpWatcher({
+        rootPath: watchDir,
+        debounceMs: isNaN(debounceMs) ? 400 : debounceMs,
+        embed: !options.watchNoEmbed,
+      });
+      await watcher.start();
+      const cleanup = () => watcher.stop().then(() => process.exit(0));
+      process.on('SIGINT',  cleanup);
+      process.on('SIGTERM', cleanup);
+    }
   }
 }
 

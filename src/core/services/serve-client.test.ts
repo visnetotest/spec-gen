@@ -82,4 +82,24 @@ describe('serve-client', () => {
     const ep = { baseUrl: 'http://127.0.0.1:1' }; // nothing listening
     await expect(callServeTool(ep, 'orient', { task: 'x' }, '/tmp')).rejects.toThrow();
   });
+
+  it('returns null for a stale serve.json pointing at a dead port (kill -9 simulation)', async () => {
+    // Simulate kill -9: serve.json left on disk but nothing at that port.
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-stale-'));
+    try {
+      const { writeFile, mkdir } = await import('node:fs/promises');
+      await mkdir(join(dir, '.openlore'), { recursive: true });
+      await writeFile(
+        join(dir, '.openlore', 'serve.json'),
+        JSON.stringify({ port: 1, pid: 99999, host: '127.0.0.1', version: 'x' }),
+        'utf-8',
+      );
+      // spawn:false so we don't try to start a new daemon — just discovery.
+      const ep = await ensureServeDaemon(dir, { spawn: false });
+      // Stale descriptor → health check fails → null (caller falls back to in-process).
+      expect(ep).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

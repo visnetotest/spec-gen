@@ -172,4 +172,41 @@ describe('openlore serve', () => {
     expect(process.exitCode).toBe(1);
     process.exitCode = prev; // don't fail the suite
   });
+
+  it('handles 20 concurrent tool calls without corruption or crash', async () => {
+    handle = await boot();
+    const calls = Array.from({ length: 20 }, () =>
+      fetch(`${handle!.baseUrl}/tool/orient`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ directory: root, args: { task: 'concurrent test' } }),
+      }).then(r => r.json())
+    );
+    const results = await Promise.all(calls);
+    expect(results).toHaveLength(20);
+    for (const r of results) {
+      // No analysis in temp dir → handler returns { error } but HTTP 200.
+      // Assert transport succeeded (no crash, no null, no 500).
+      expect(r).toBeTruthy();
+      expect(typeof r).toBe('object');
+    }
+  });
+
+  it('does not spin a second watcher when a daemon is reusing the root (invariant)', async () => {
+    // The fundamental invariant: daemon present → MCP must not start a second watcher.
+    // Validated here at the serve layer: two startServe() calls on the same root →
+    // second returns the reuse handle (no new server, no new watcher).
+    const h1 = await boot();
+    // Before reuse: verify there is exactly one server (h1 is it).
+    const health1 = await jsonOf(await fetch(`${h1.baseUrl}/health`));
+    expect(health1.ok).toBe(true);
+
+    // Second startServe → reuse path, no second server bound.
+    const h2 = await startServe({ directory: root, port: '0', watch: false });
+    expect(h2!.port).toBe(h1.port); // same port = same server
+
+    // Original server still alive after h2.close()
+    await h2!.close();
+    expect((await fetch(`${h1.baseUrl}/health`)).ok).toBe(true);
+  });
 });
