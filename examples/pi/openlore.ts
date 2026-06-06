@@ -19,17 +19,22 @@
  *
  * Requires `openlore` on PATH and `openlore analyze` to have been run once.
  *
- * NOTE: imports follow the pi docs; adjust the @earendil-works/* paths to match
- * your installed Pi version if they differ.
+ * Imports verified against pi 0.78 (`Type` from typebox, `StringEnum` from
+ * @earendil-works/pi-ai, extension types from @earendil-works/pi-coding-agent).
  */
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { Type, truncateTail } from '@earendil-works/pi-coding-agent';
 import { StringEnum } from '@earendil-works/pi-ai';
+import { Type } from 'typebox';
 
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+
+/** Trim text to a max length with a marker — keeps small-model context lean. */
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max) + `\n… (truncated, ${s.length - max} more chars)`;
+}
 
 // ── Daemon discovery + lifecycle ─────────────────────────────────────────────
 
@@ -260,6 +265,9 @@ export default function openlore(pi: ExtensionAPI): void {
   const daemons = new Map<string, Daemon | null>();
   // Inject the heavy session primer only once per session.
   const primed = new Set<string>();
+  // before_agent_start receives only `event` (no ctx in pi's API), so capture
+  // the working directory from session_start and reuse it there.
+  let sessionCwd = process.cwd();
 
   async function getDaemon(cwd: string): Promise<Daemon | null> {
     if (!daemons.has(cwd)) daemons.set(cwd, await ensureDaemon(cwd));
@@ -285,26 +293,27 @@ export default function openlore(pi: ExtensionAPI): void {
         }
         const result = await callTool(daemon, tool.name, params, cwd, signal);
         const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-        return { content: [{ type: 'text', text: truncateTail(text, RESULT_MAX) }], details: result };
+        return { content: [{ type: 'text', text: truncate(text, RESULT_MAX) }], details: result };
       },
     });
   }
 
   // ── Lifecycle: warm the daemon at session start (best-effort) ──
   pi.on('session_start', async (_event: unknown, ctx: ExtensionContext) => {
+    sessionCwd = ctx.cwd;
     await getDaemon(ctx.cwd);
   });
 
   // ── C: context injection on the first turn ──
-  pi.on('before_agent_start', async (event: { systemPrompt: string }, ctx: ExtensionContext) => {
-    const cwd = ctx.cwd;
+  pi.on('before_agent_start', async (event: { systemPrompt: string }) => {
+    const cwd = sessionCwd;
     if (primed.has(cwd)) return undefined;
     primed.add(cwd);
 
     const blocks: string[] = [];
 
     const digest = await readDigest(cwd);
-    if (digest) blocks.push('# Codebase architecture (openlore)\n\n' + truncateTail(digest, 8000));
+    if (digest) blocks.push('# Codebase architecture (openlore)\n\n' + truncate(digest, 8000));
 
     const specIndex = await readSpecIndex(cwd);
     if (specIndex) blocks.push(specIndex);
@@ -315,7 +324,7 @@ export default function openlore(pi: ExtensionAPI): void {
     if (daemon && firstUserMsg) {
       const oriented = await callTool(daemon, 'orient', { task: firstUserMsg }, cwd);
       if (oriented && typeof oriented === 'object' && !('error' in (oriented as object))) {
-        blocks.push('# openlore orientation for this task\n\n' + truncateTail(JSON.stringify(oriented, null, 2), 6000));
+        blocks.push('# openlore orientation for this task\n\n' + truncate(JSON.stringify(oriented, null, 2), 6000));
       }
     }
 

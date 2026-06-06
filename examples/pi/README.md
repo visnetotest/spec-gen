@@ -37,9 +37,9 @@ openlore setup --tools pi --global   # → ~/.pi/agent/extensions/openlore.ts (a
 
 Manual: copy `openlore.ts` into either location.
 
-> The extension imports `@earendil-works/*` types per the Pi docs. If your
-> installed Pi version exposes different paths for `Type` / `StringEnum` /
-> `truncateTail`, adjust the imports at the top of `openlore.ts`.
+> Imports are verified against pi 0.78 (`Type` from `typebox`, `StringEnum` from
+> `@earendil-works/pi-ai`, extension types from `@earendil-works/pi-coding-agent`).
+> If a future Pi version moves these, adjust the imports at the top of `openlore.ts`.
 
 ## How it works
 
