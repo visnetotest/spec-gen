@@ -381,6 +381,19 @@ export default function openlore(pi: ExtensionAPI): void {
     },
   });
 
+  // ── /configure slash command ──
+  pi.registerCommand('configure', {
+    description: 'Open the openlore configuration wizard',
+    async handler(_args, ctx) {
+      if (!ctx.hasUI) {
+        ctx.ui.notify('Config wizard requires an interactive session.', 'error');
+        return;
+      }
+      const existing = await readConfig(ctx.cwd);
+      await runConfigWizard(ctx, existing);
+    },
+  });
+
   // ── session_start: onboarding + daemon warmup ──
   pi.on('session_start', async (_event: SessionStartEvent, ctx: ExtensionContext) => {
     sessionCwd = ctx.cwd;
