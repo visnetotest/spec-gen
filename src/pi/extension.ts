@@ -107,29 +107,30 @@ async function fetchModels(baseUrl: string, apiKey?: string): Promise<string[] |
 async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig | null): Promise<void> {
   const { ui } = ctx;
 
-  // ui.select / ui.input / ui.confirm return undefined when the user cancels —
-  // fall back to sensible defaults throughout.
+  // ui.select / ui.input / ui.confirm: undefined = cancelled, '' = empty.
+  // For edits, always fall back to existing values so partial navigation never destroys data.
 
-  const provider = await ui.select('LLM provider', PROVIDERS) ?? PROVIDERS[0];
+  // Put existing provider first so select starts on the current value.
+  const existingProvider = existing?.generation?.provider;
+  const providerList = existingProvider
+    ? [existingProvider, ...PROVIDERS.filter((p) => p !== existingProvider)]
+    : PROVIDERS;
+  const provider = await ui.select('LLM provider', providerList) ?? providerList[0];
 
-  let baseUrl: string | undefined;
-  let genSkipSsl = false;
+  let baseUrl: string | undefined = existing?.generation?.openaiCompatBaseUrl;
+  let genSkipSsl = existing?.generation?.skipSslVerify ?? false;
   let apiKey: string | undefined;
 
   if (provider === 'openai-compat') {
-    baseUrl = await ui.input(
-      'Base URL',
-      existing?.generation?.openaiCompatBaseUrl ?? 'http://localhost:11434',
-    ) ?? existing?.generation?.openaiCompatBaseUrl ?? '';
-    genSkipSsl = await ui.confirm(
-      'Skip SSL verification?',
-      'Required for local servers with self-signed certificates',
-    );
+    const rawUrl = await ui.input('Base URL', baseUrl ?? 'http://localhost:11434');
+    baseUrl = rawUrl || baseUrl || '';
+    genSkipSsl = await ui.confirm('Skip SSL verification?', 'Required for local servers with self-signed certificates');
   }
 
   if (!SYSTEM_AUTH_PROVIDERS.has(provider)) {
-    const key = await ui.input('API key', '(leave blank to skip)');
-    apiKey = key && key !== '(leave blank to skip)' ? key : undefined;
+    const key = await ui.input('API key', '(blank to skip / keep existing)');
+    // Empty or placeholder means "keep existing" — we don't store keys so just omit.
+    apiKey = key && key !== '(blank to skip / keep existing)' ? key : undefined;
   }
 
   let model: string;
@@ -139,29 +140,32 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
   if (models && models.length > 0) {
     model = await ui.select('Model', models) ?? models[0];
   } else {
-    model = await ui.input(
-      'Model',
-      existing?.generation?.model ?? PROVIDER_MODEL_DEFAULTS[provider] ?? '',
-    ) ?? existing?.generation?.model ?? PROVIDER_MODEL_DEFAULTS[provider] ?? '';
+    const existingModel = existing?.generation?.model ?? PROVIDER_MODEL_DEFAULTS[provider] ?? '';
+    model = (await ui.input('Model', existingModel)) || existingModel;
   }
 
   const maxFilesRaw = await ui.input('Max files to analyze', String(existing?.analysis?.maxFiles ?? 500));
   const maxFiles = parseInt(maxFilesRaw ?? '500', 10) || 500;
 
-  let embedding: OpenLoreConfig['embedding'] | undefined;
-  const configureEmbed = await ui.confirm(
-    'Configure a custom embedding endpoint?',
-    'Optional — enables semantic search with a local embedding model (e.g. Ollama)',
-  );
-  if (configureEmbed) {
-    const embedUrl = await ui.input('Embedding base URL', existing?.embedding?.baseUrl ?? '') ?? '';
+  // Embedding: if already configured, ask whether to change it — declining preserves existing.
+  let embedding: OpenLoreConfig['embedding'] | undefined = existing?.embedding;
+  const embedPrompt = existing?.embedding
+    ? `Change embedding? (current: ${existing.embedding.baseUrl})`
+    : 'Configure a custom embedding endpoint?';
+  const embedMessage = existing?.embedding
+    ? 'Select No to keep the current embedding configuration unchanged.'
+    : 'Optional — enables semantic search with a local embedding model (e.g. Ollama)';
+  const changeEmbed = await ui.confirm(embedPrompt, embedMessage);
+  if (changeEmbed) {
+    const embedUrl = (await ui.input('Embedding base URL', existing?.embedding?.baseUrl ?? '')) ?? '';
     const embedSsl = await ui.confirm('Skip SSL verification for embedding?', 'Required for self-signed certificates');
     const embedModels = embedUrl ? await fetchModels(embedUrl) : null;
     let embedModel: string;
     if (embedModels && embedModels.length > 0) {
       embedModel = await ui.select('Embedding model', embedModels) ?? embedModels[0];
     } else {
-      embedModel = await ui.input('Embedding model', existing?.embedding?.model ?? '') ?? '';
+      const existingEmbedModel = existing?.embedding?.model ?? '';
+      embedModel = (await ui.input('Embedding model', existingEmbedModel)) || existingEmbedModel;
     }
     const embedKey = await ui.input('Embedding API key', '(blank if not needed)') ?? '';
     embedding = {
