@@ -62,7 +62,10 @@ const OPENLORE_DIR = '.openlore';
 
 async function readConfig(cwd: string): Promise<OpenLoreConfig | null> {
   try {
-    return JSON.parse(await readFile(join(cwd, OPENLORE_DIR, 'config.json'), 'utf-8')) as OpenLoreConfig;
+    const raw = JSON.parse(await readFile(join(cwd, OPENLORE_DIR, 'config.json'), 'utf-8')) as OpenLoreConfig;
+    // Treat as absent if config is missing the minimum viable fields.
+    if (!raw || typeof raw !== 'object' || !raw.generation?.provider) return null;
+    return raw;
   } catch { return null; }
 }
 
@@ -102,7 +105,7 @@ async function fetchModels(baseUrl: string, apiKey?: string): Promise<string[] |
     const base = baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
     const res = await fetch(`${base}/v1/models`, {
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
-      signal: AbortSignal.timeout(3000),
+      signal: AbortSignal.timeout(1500),
     });
     if (!res.ok) return null;
     const data = await res.json() as { data?: { id: string }[] };
@@ -131,7 +134,10 @@ async function configureGeneration(
     const urlTitle = baseUrl ? `Base URL (current: ${baseUrl})` : 'Base URL';
     const rawUrl = await ui.input(urlTitle, 'http://localhost:11434');
     baseUrl = rawUrl || baseUrl || '';
-    skipSslVerify = await ui.confirm('Skip SSL verification?', 'Required for local servers with self-signed certificates');
+    skipSslVerify = await ui.confirm(
+      'Skip SSL verification?',
+      'Only enable for local servers with self-signed certificates (e.g. Ollama on localhost). Do NOT enable for remote/cloud endpoints.',
+    );
   }
 
   if (!SYSTEM_AUTH_PROVIDERS.has(provider) && PROVIDER_ENV_VARS[provider]) {
