@@ -60,12 +60,15 @@ interface OpenLoreConfig {
 
 const OPENLORE_DIR = '.openlore';
 
-async function readConfig(cwd: string): Promise<OpenLoreConfig | null> {
+/** Treat a config as absent unless it has the minimum viable fields. */
+export function isUsableConfig(raw: unknown): raw is OpenLoreConfig {
+  return !!raw && typeof raw === 'object' && typeof (raw as OpenLoreConfig).generation?.provider === 'string';
+}
+
+export async function readConfig(cwd: string): Promise<OpenLoreConfig | null> {
   try {
-    const raw = JSON.parse(await readFile(join(cwd, OPENLORE_DIR, 'config.json'), 'utf-8')) as OpenLoreConfig;
-    // Treat as absent if config is missing the minimum viable fields.
-    if (!raw || typeof raw !== 'object' || !raw.generation?.provider) return null;
-    return raw;
+    const raw = JSON.parse(await readFile(join(cwd, OPENLORE_DIR, 'config.json'), 'utf-8'));
+    return isUsableConfig(raw) ? raw : null;
   } catch { return null; }
 }
 
@@ -100,10 +103,23 @@ const PROVIDER_ENV_VARS: Record<string, string> = {
   copilot: 'COPILOT_API_KEY',
 };
 
+/**
+ * Build the `/v1/models` URL for a provider base URL, tolerating a trailing
+ * slash and an already-present `/v1` segment (e.g. https://api.mistral.ai/v1/).
+ */
+export function modelsUrl(baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
+  return `${base}/v1/models`;
+}
+
+/** Strip the trailing " *" current-value marker added to select-list entries. */
+export function stripMarker(label: string): string {
+  return label.replace(/ \*$/, '');
+}
+
 async function fetchModels(baseUrl: string, apiKey?: string): Promise<string[] | null> {
   try {
-    const base = baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
-    const res = await fetch(`${base}/v1/models`, {
+    const res = await fetch(modelsUrl(baseUrl), {
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
       signal: AbortSignal.timeout(1500),
     });
@@ -124,7 +140,7 @@ async function configureGeneration(
     ? [`${existingProvider} *`, ...PROVIDERS.filter((p) => p !== existingProvider)]
     : PROVIDERS;
   const selectedProvider = await ui.select('LLM provider', providerList) ?? providerList[0];
-  const provider = selectedProvider.replace(/ \*$/, '');
+  const provider = stripMarker(selectedProvider);
 
   let baseUrl: string | undefined = existing?.openaiCompatBaseUrl;
   let skipSslVerify = existing?.skipSslVerify ?? false;
@@ -157,7 +173,7 @@ async function configureGeneration(
       ? [`${currentModel} *`, ...models.filter((m) => m !== currentModel)]
       : models;
     const selectedModel = await ui.select('Model', modelList) ?? modelList[0];
-    model = selectedModel.replace(/ \*$/, '');
+    model = stripMarker(selectedModel);
   } else {
     const existingModel = existing?.model ?? PROVIDER_MODEL_DEFAULTS[provider] ?? '';
     const modelTitle = existing?.model ? `Model (current: ${existing.model})` : 'Model';
@@ -182,7 +198,10 @@ async function configureEmbedding(
   )) || existing?.baseUrl || '';
   if (!embedUrl) return undefined;
 
-  const embedSsl = await ui.confirm('Skip SSL verification for embedding?', 'Required for self-signed certificates');
+  const embedSsl = await ui.confirm(
+    'Skip SSL verification for embedding?',
+    'Only enable for local servers with self-signed certificates (e.g. Ollama on localhost). Do NOT enable for remote/cloud endpoints.',
+  );
   const embedModels = await fetchModels(embedUrl);
   let embedModel: string;
   if (embedModels && embedModels.length > 0) {
@@ -191,7 +210,7 @@ async function configureEmbedding(
       ? [`${currentEmbedModel} *`, ...embedModels.filter((m) => m !== currentEmbedModel)]
       : embedModels;
     const selectedEmbedModel = await ui.select('Embedding model', embedModelList) ?? embedModelList[0];
-    embedModel = selectedEmbedModel.replace(/ \*$/, '');
+    embedModel = stripMarker(selectedEmbedModel);
   } else {
     const existingModel = existing?.model ?? '';
     embedModel = (await ui.input(
@@ -218,6 +237,14 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
   let generation = existing?.generation ?? {};
   let embedding = existing?.embedding;
   let maxFiles = existing?.analysis?.maxFiles ?? 500;
+
+  // Pi never persists API keys (they belong in env vars). If an older config
+  // written by the CLI carried an embedding apiKey, drop it on save and tell the
+  // user — keeps behaviour consistent whether or not they edit the embedding.
+  if (embedding?.apiKey) {
+    embedding = { baseUrl: embedding.baseUrl, model: embedding.model, ...(embedding.skipSslVerify ? { skipSslVerify: true } : {}) };
+    ui.notify('Removed stored embedding API key from config — set OPENLORE_EMBEDDING_API_KEY in your shell instead.', 'warning');
+  }
 
   // Menu loop — user picks which section to edit, repeats until Done.
   while (true) {
@@ -250,7 +277,7 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
   }
 
   const config: OpenLoreConfig = {
-    version: '1.0.0',
+    version: existing?.version ?? '1.0.0',
     projectType: existing?.projectType ?? 'unknown',
     openspecPath: existing?.openspecPath ?? 'openspec',
     analysis: {
