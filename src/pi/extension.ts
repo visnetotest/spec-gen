@@ -141,8 +141,10 @@ async function configureGeneration(
   }
 
   if (!SYSTEM_AUTH_PROVIDERS.has(provider) && PROVIDER_ENV_VARS[provider]) {
-    ui.notify(`API key: set ${PROVIDER_ENV_VARS[provider]} in your shell environment`, 'info');
     apiKey = process.env[PROVIDER_ENV_VARS[provider]];
+    if (!apiKey) {
+      ui.notify(`API key: set ${PROVIDER_ENV_VARS[provider]} in your shell environment`, 'warning');
+    }
   }
 
   let model: string;
