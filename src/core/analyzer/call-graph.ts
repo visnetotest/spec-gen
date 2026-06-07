@@ -13,7 +13,7 @@
  */
 
 import { dirname, join as joinPath } from 'node:path';
-import Parser from 'tree-sitter';
+import Parser, { Query as TsQuery } from 'tree-sitter';
 import { FunctionRegistryTrie } from './function-registry-trie.js';
 import type { ImportMap } from './import-resolver-bridge.js';
 import { inferTypesFromSource, resolveViaTypeInference } from './type-inference-engine.js';
@@ -1733,9 +1733,9 @@ async function loadWasmGrammarSoft(
         const queries: Array<{ delete?: () => void }> = [];
         const runQuery = (src: string): TsMatch[] => {
           try {
-            const q = lang.query(src);
-            queries.push(q);
-            return q.matches(tree.rootNode);
+            const q = new TsQuery(lang as unknown as import('tree-sitter').Language, src);
+            queries.push(q as unknown as { delete?: () => void });
+            return q.matches(tree.rootNode as unknown as import('tree-sitter').SyntaxNode) as unknown as TsMatch[];
           } catch { return []; }
         };
         try {
