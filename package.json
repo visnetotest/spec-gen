@@ -80,6 +80,7 @@
     "!dist/**/*.test.*",
     "src/viewer",
     "examples",
+    "skills/openlore-orient",
     "stubs",
     "schemas",
     "README.md",

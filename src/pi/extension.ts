@@ -431,18 +431,28 @@ function toolResult(text: string, details: unknown = null): AgentToolResult<unkn
 // ── Extension entry point ─────────────────────────────────────────────────────
 
 export default function openlore(pi: ExtensionAPI): void {
-  const daemons = new Map<string, Daemon | null>();
+  const daemons = new Map<string, Daemon>();
+  // Negative cache: when a daemon can't be reached, remember the failure for a
+  // short window so we don't pay the full 8s spawn-and-poll on every call in a
+  // repo that simply isn't analyzed yet. Transient failures recover after TTL.
+  const failedUntil = new Map<string, number>();
+  const DAEMON_RETRY_COOLDOWN_MS = 30_000;
   const primed = new Set<string>();
   let sessionCwd = process.cwd();
   let sessionMode: ExtensionContext['mode'] = 'tui';
 
   async function getDaemon(cwd: string): Promise<Daemon | null> {
-    if (!daemons.has(cwd)) {
-      const d = await ensureDaemon(cwd);
-      if (d) daemons.set(cwd, d);
-      return d;
+    const cached = daemons.get(cwd);
+    if (cached) return cached;
+    if ((failedUntil.get(cwd) ?? 0) > Date.now()) return null;
+    const d = await ensureDaemon(cwd);
+    if (d) {
+      daemons.set(cwd, d);
+      failedUntil.delete(cwd);
+    } else {
+      failedUntil.set(cwd, Date.now() + DAEMON_RETRY_COOLDOWN_MS);
     }
-    return daemons.get(cwd) ?? null;
+    return d;
   }
 
   // ── B: navigation tools ──
