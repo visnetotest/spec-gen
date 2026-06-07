@@ -224,6 +224,40 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // re-open EdgeStore. Uses a Map because the daemon can serve multiple dirs.
   const schemaResetByDir = new Map<string, boolean>();
 
+  // Single forced-rebuild coordinator, keyed by directory. BOTH the schema-reset
+  // healer (below) and the watcher's debounced re-analyze (further down) funnel
+  // through here, so at most one `analyze --force` ever runs per directory at a
+  // time — two concurrent ones would clear+repopulate the same EdgeStore
+  // non-atomically and could tear the graph. A trigger that arrives mid-rebuild
+  // is coalesced into a single follow-up run rather than dropped or stacked.
+  //
+  // Why serve must drive this at all: a schema-version bump makes EdgeStore.open()
+  // wipe the DB and report wasReset ONCE (the on-disk version is rewritten on that
+  // first open, so every later open reports false). serve consumes that flag at
+  // startup / first request, so the watcher's wasReset-keyed self-heal never sees
+  // it; without an explicit trigger, waitForGraphRebuild() would poll an empty
+  // store until it times out.
+  const rebuildRunning = new Set<string>();
+  const rebuildPending = new Set<string>();
+  function triggerRebuild(directory: string): void {
+    if (rebuildRunning.has(directory)) { rebuildPending.add(directory); return; }
+    rebuildRunning.add(directory);
+    logger.discovery(`[serve] rebuilding graph index (${directory})`);
+    void openloreAnalyze({ rootPath: directory, force: true })
+      .then(() => logger.discovery(`[serve] graph index rebuilt (${directory})`))
+      .catch((err) => logger.warning(`[serve] graph rebuild failed: ${err instanceof Error ? err.message : String(err)}`))
+      .finally(() => {
+        rebuildRunning.delete(directory);
+        if (rebuildPending.delete(directory)) {
+          // Re-run for the coalesced trigger. For the served root, go back through
+          // the debounce so sustained editing doesn't spin back-to-back analyzes;
+          // other dirs (per-request schema heal) re-run immediately.
+          if (directory === root) scheduleReanalyze();
+          else triggerRebuild(directory);
+        }
+      });
+  }
+
   const server = createServer((req, res) => {
     void handleRequest(req, res).catch((err) => {
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
@@ -301,6 +335,9 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       }
       if (schemaResetByDir.get(directory)) {
         logger.debug(`[serve] Schema mismatch — waiting for graph rebuild before dispatching…`);
+        // Kick the rebuild ourselves (coalesced) — nothing else will, because the
+        // wasReset flag has already been consumed by the open above.
+        triggerRebuild(directory);
         // waitForGraphRebuild polls readCachedContext until edgeStore is
         // non-null. readCachedContext invalidates on llm-context.json mtime,
         // which openloreAnalyze rewrites as its last step — so the poll sees
@@ -363,6 +400,10 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
           `[serve] Schema version mismatch detected — graph index is being rebuilt in the background. ` +
           `Graph-dependent tools will wait for completion on first request.`
         );
+        // Actually start the rebuild — the warning above is only honest if
+        // something kicks `analyze --force`. The watcher won't: its self-heal
+        // keys off wasReset, which this startup open just consumed.
+        triggerRebuild(root);
       }
     } else {
       schemaResetByDir.set(root, false);
@@ -379,25 +420,12 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // commits — turning divergence from "wait for the next commit" into continuous.
   let watcher: McpWatcher | undefined;
   let reanalyzeTimer: ReturnType<typeof setTimeout> | undefined;
-  let reanalyzeRunning = false;
-  let reanalyzePending = false;
 
-  const runReanalyze = async (): Promise<void> => {
-    if (reanalyzeRunning) { reanalyzePending = true; return; } // single-flight + coalesce
-    reanalyzeRunning = true;
-    try {
-      await openloreAnalyze({ rootPath: root, force: true });
-      logger.discovery(`[serve] call graph re-analyzed (${root})`);
-    } catch (err) {
-      logger.warning(`[serve] re-analyze failed: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      reanalyzeRunning = false;
-      if (reanalyzePending) { reanalyzePending = false; scheduleReanalyze(); }
-    }
-  };
+  // Debounced call-graph re-analyze. Routes through triggerRebuild so it shares
+  // the single-flight lock with the schema-reset healer (no concurrent --force).
   function scheduleReanalyze(): void {
     if (reanalyzeTimer) clearTimeout(reanalyzeTimer);
-    reanalyzeTimer = setTimeout(() => void runReanalyze(), REANALYZE_DEBOUNCE_MS);
+    reanalyzeTimer = setTimeout(() => triggerRebuild(root), REANALYZE_DEBOUNCE_MS);
   }
 
   if (options.watch !== false) {
