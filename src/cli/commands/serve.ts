@@ -224,6 +224,26 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // re-open EdgeStore. Uses a Map because the daemon can serve multiple dirs.
   const schemaResetByDir = new Map<string, boolean>();
 
+  // In-flight schema-reset rebuilds, keyed by directory, so we kick exactly one
+  // `analyze --force` per reset and never stack duplicates across requests.
+  const rebuildingDirs = new Set<string>();
+
+  // A schema-version bump makes EdgeStore.open() wipe the DB and report wasReset
+  // ONCE (the on-disk version is rewritten on that first open, so every later
+  // open reports false). We consume that flag at startup / on the first request,
+  // which means the watcher's own self-heal (which keys off wasReset) never sees
+  // it — so serve MUST start the rebuild itself, or waitForGraphRebuild() below
+  // would poll an empty store until it times out.
+  function triggerSchemaRebuild(directory: string): void {
+    if (rebuildingDirs.has(directory)) return;
+    rebuildingDirs.add(directory);
+    logger.discovery(`[serve] schema reset detected — rebuilding graph index (${directory})`);
+    void openloreAnalyze({ rootPath: directory, force: true })
+      .then(() => logger.discovery(`[serve] schema-reset rebuild complete (${directory})`))
+      .catch((err) => logger.warning(`[serve] schema-reset rebuild failed: ${err instanceof Error ? err.message : String(err)}`))
+      .finally(() => rebuildingDirs.delete(directory));
+  }
+
   const server = createServer((req, res) => {
     void handleRequest(req, res).catch((err) => {
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
@@ -301,6 +321,9 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       }
       if (schemaResetByDir.get(directory)) {
         logger.debug(`[serve] Schema mismatch — waiting for graph rebuild before dispatching…`);
+        // Kick the rebuild ourselves (deduped) — nothing else will, because the
+        // wasReset flag has already been consumed by the open above.
+        triggerSchemaRebuild(directory);
         // waitForGraphRebuild polls readCachedContext until edgeStore is
         // non-null. readCachedContext invalidates on llm-context.json mtime,
         // which openloreAnalyze rewrites as its last step — so the poll sees
@@ -363,6 +386,10 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
           `[serve] Schema version mismatch detected — graph index is being rebuilt in the background. ` +
           `Graph-dependent tools will wait for completion on first request.`
         );
+        // Actually start the rebuild — the warning above is only honest if
+        // something kicks `analyze --force`. The watcher won't: its self-heal
+        // keys off wasReset, which this startup open just consumed.
+        triggerSchemaRebuild(root);
       }
     } else {
       schemaResetByDir.set(root, false);

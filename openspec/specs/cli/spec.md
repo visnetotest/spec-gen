@@ -328,6 +328,12 @@ The system SHALL keep performance metrics out of always-loaded skill context and
 
 > Decision recorded: 37206feb
 > Date: 2026-06-05
+### Requirement: ServeDaemonOwnsSchemaresetRebuildTrigger
+
+The system SHALL The serve daemon SHALL trigger a background `analyze --force` rebuild whenever a schema-version reset is detected, deduplicating concurrent rebuilds per directory.
+
+> Decision recorded: 55d797b9
+> Date: 2026-06-07
 
 ## Technical Notes
 
@@ -434,3 +440,13 @@ MCP has no server-driven lazy-schema mechanism (tools/list always returns full i
 The orient SKILL.md frontmatter description and 'Cost & latency' section embedded scorecard/benchmark numbers and relative ../../README.md links. The description loads into every agent context (pure token overhead) and the relative links break when the skill bundle is copied into a consumer's .claude/skills/. Performance transparency should remain available but opt-in, not baked into the loaded surface.
 
 **Consequences:** SKILL.md description carries no perf claims; the Cost & latency section is removed; transparency content moves to the bundle README (not loaded into context) using absolute GitHub URLs so links never break on copy. A new opt-in `openlore orient --metrics` flag reports wall time + output-size locally. agent-instructions install template drops the embedded metric sentence.
+
+### Serve daemon owns schema-reset rebuild trigger
+
+**Status:** Approved
+**Date:** 2026-06-07
+**ID:** 55d797b9
+
+EdgeStore.open() consumes the wasReset flag on first open, so the watcher's self-heal (which also keys off wasReset) never fires; the serve daemon must initiate `analyze --force` itself or waitForGraphRebuild polls an empty store until timeout
+
+**Consequences:** Serve now carries a deduplication Set and spawns background analyze processes; if the analyze binary is unavailable the daemon logs a warning but requests hang until timeout

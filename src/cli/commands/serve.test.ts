@@ -11,7 +11,11 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile, access, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { startServe, type ServeHandle } from './serve.js';
+import { EdgeStore } from '../../core/services/edge-store.js';
+import { openloreAnalyze } from '../../api/analyze.js';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
 
 let handle: ServeHandle | undefined;
 let root = '';
@@ -163,6 +167,60 @@ describe('openlore serve', () => {
     await h2!.close();
     expect((await fetch(`${h1.baseUrl}/health`)).status).toBe(200);
   });
+
+  it('repopulates the graph after a schema-version reset instead of stalling', async () => {
+    // Regression for the schema-reset auto-heal: EdgeStore.open() reports wasReset
+    // exactly ONCE (it rewrites the on-disk version on that first open), so the
+    // watcher's wasReset-keyed self-heal never fires once serve's startup open has
+    // consumed the flag. Serve must therefore kick `analyze --force` itself —
+    // otherwise every graph request polls an empty store until the 60s timeout.
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-reset-'));
+    await mkdir(join(root, OPENLORE_DIR), { recursive: true });
+    await mkdir(join(root, 'openspec', 'specs'), { recursive: true });
+    await writeFile(
+      join(root, OPENLORE_DIR, 'config.json'),
+      JSON.stringify({
+        version: '1.0.0', projectType: 'unknown', openspecPath: './openspec',
+        analysis: { maxFiles: 100000, includePatterns: [], excludePatterns: [] },
+        generation: { model: 'claude-sonnet-4-6', domains: 'auto' },
+        createdAt: new Date().toISOString(), lastRun: null,
+      }, null, 2),
+      'utf-8',
+    );
+    await writeFile(
+      join(root, 'index.js'),
+      'export function add(a, b) { return a + b; }\nexport function main() { return add(1, 2); }\n',
+      'utf-8',
+    );
+
+    // Build a real, populated graph, then simulate a post-upgrade schema bump by
+    // forcing the on-disk version stale so the next open() wipes + flags wasReset.
+    await openloreAnalyze({ rootPath: root, force: true });
+    const analysisDir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    const dbFile = EdgeStore.dbPath(analysisDir);
+    {
+      const probe = EdgeStore.open(dbFile);
+      expect(probe.countNodes()).toBeGreaterThan(0); // sanity: analyze populated it
+      probe.close();
+    }
+    const raw = new DatabaseSync(dbFile);
+    raw.exec('UPDATE schema_version SET version = 0');
+    raw.close();
+
+    // Start serve (watch:false so the ONLY possible healer is serve's own trigger).
+    handle = await startServe({ directory: root, port: '0', watch: false });
+    expect(handle).toBeDefined();
+
+    // The startup open consumed wasReset and wiped the DB; the fix must rebuild it.
+    let nodes = 0;
+    for (let i = 0; i < 100 && nodes === 0; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      const es = EdgeStore.open(dbFile);
+      nodes = es.countNodes();
+      es.close();
+    }
+    expect(nodes).toBeGreaterThan(0); // rebuilt, not left empty
+  }, 30_000);
 
   it('rejects an unknown preset at startup', async () => {
     root = await mkdtemp(join(tmpdir(), 'openlore-serve-'));
