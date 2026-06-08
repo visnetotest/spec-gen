@@ -28,12 +28,12 @@ import type {
   SessionStartEvent,
 } from '@earendil-works/pi-coding-agent';
 import { StringEnum } from '@earendil-works/pi-ai';
+import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { Type, type TObject, type TSchema } from 'typebox';
 
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 
 // ── Config types & helpers ────────────────────────────────────────────────────
 
@@ -302,9 +302,12 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
     ui.notify('Running openlore analyze…', 'info');
     const [exitCode, errText] = await new Promise<[number, string]>((resolve) => {
       // Try `openlore` in PATH; fall back to `npx openlore` if not found.
+      // On Windows, npm installs .cmd wrappers — shell: true is required for
+      // Node's spawn() to resolve them without an explicit .cmd suffix.
+      const isWin = process.platform === 'win32';
       const trySpawn = (cmd: string, args: string[]) => new Promise<[number, string] | null>((res) => {
         const chunks: Buffer[] = [];
-        const proc = spawn(cmd, args, { cwd: ctx.cwd, stdio: ['ignore', 'ignore', 'pipe'] });
+        const proc = spawn(cmd, args, { cwd: ctx.cwd, stdio: ['ignore', 'ignore', 'pipe'], shell: isWin });
         proc.stderr?.on('data', (d: Buffer) => chunks.push(d));
         proc.on('close', (code) => res([code ?? 1, Buffer.concat(chunks).toString().trim()]));
         proc.on('error', () => res(null));
@@ -350,7 +353,9 @@ async function ensureDaemon(cwd: string): Promise<Daemon | null> {
   const existing = await readDescriptor(cwd);
   if (existing && (await healthy(existing))) return { baseUrl: `http://${existing.host}:${existing.port}`, token: existing.token };
   try {
-    spawn('openlore', ['serve', '--directory', cwd], { detached: true, stdio: 'ignore' }).unref();
+    // On Windows, npm installs .cmd wrappers — shell: true lets spawn()
+    // resolve them without an explicit suffix.
+    spawn('openlore', ['serve', '--directory', cwd], { detached: true, stdio: 'ignore', shell: process.platform === 'win32' }).unref();
   } catch { return null; }
   const deadline = Date.now() + HEALTH_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -574,5 +579,5 @@ export default function openlore(pi: ExtensionAPI): void {
 
 export const installPaths = {
   project: (cwd: string) => join(cwd, '.pi', 'extensions', 'openlore.js'),
-  global: () => join(homedir(), '.pi', 'agent', 'extensions', 'openlore.js'),
+  global: () => join(getAgentDir(), 'extensions', 'openlore.js'),
 };
