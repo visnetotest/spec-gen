@@ -28,12 +28,12 @@ import type {
   SessionStartEvent,
 } from '@earendil-works/pi-coding-agent';
 import { StringEnum } from '@earendil-works/pi-ai';
+import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { Type, type TObject, type TSchema } from 'typebox';
 
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 
 // ── Config types & helpers ────────────────────────────────────────────────────
 
@@ -579,5 +579,5 @@ export default function openlore(pi: ExtensionAPI): void {
 
 export const installPaths = {
   project: (cwd: string) => join(cwd, '.pi', 'extensions', 'openlore.js'),
-  global: () => join(homedir(), '.pi', 'agent', 'extensions', 'openlore.js'),
+  global: () => join(getAgentDir(), 'extensions', 'openlore.js'),
 };
