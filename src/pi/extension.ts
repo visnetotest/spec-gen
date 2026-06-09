@@ -150,7 +150,7 @@ const SEP_GENERATION = fmtSep('Generation (LLM)');
 const SEP_EMBEDDING  = fmtSep('Embedding (retrieval)');
 const SEP_ANALYSIS   = fmtSep('Analysis');
 const SEP_DIVIDER    = fmtSep();
-const SEPARATORS = new Set([SEP_GENERATION, SEP_EMBEDDING, SEP_ANALYSIS, SEP_DIVIDER]);
+
 
 async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig | null): Promise<void> {
   const { ui } = ctx;
