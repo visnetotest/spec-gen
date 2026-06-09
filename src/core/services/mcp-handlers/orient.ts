@@ -14,8 +14,9 @@
  * → suggest_insertion_points manually.
  */
 
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
+import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext } from './utils.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
@@ -528,6 +529,66 @@ export async function handleOrient(
     // non-fatal — architecture guardrail is additive and opt-in
   }
 
+  // ── Task-scoped landmarks (change: add-structural-landmark-salience) ───────
+  // The labeled structural anchors NEAREST the matched functions, ordered by
+  // call-distance proximity ONLY (no blended salience). `dead` is omitted — a
+  // landmark is a point to navigate toward, not dead code — and the whole block
+  // runs in full mode only (lean skips the work).
+  const ORIENT_LANDMARK_MAX_DISTANCE = 4;
+  const ORIENT_LANDMARK_LIMIT = 6;
+  let landmarks: Array<{ name: string; file: string; distance: number; hops: number; signals: unknown[] }> | undefined;
+  if (!lean && llmCtx?.callGraph) {
+    try {
+      const cg = llmCtx.callGraph as SerializedCallGraph;
+      const { computeLandmarkSignals } = await import('../../analyzer/landmark-signals.js');
+      const { buildWeightedAdjacency, weightedBfs } = await import('./graph.js');
+      const { volatilityLevel } = await import('../../provenance/change-coupling.js');
+
+      // volatile from the persisted churn table; dead intentionally omitted.
+      const volatilityByFile = new Map<string, { level: 'high' | 'medium'; churn: number; coChangedWith: number }>();
+      try {
+        for (const v of llmCtx.edgeStore?.getTopVolatile(1000) ?? []) {
+          const level = volatilityLevel(v.churn);
+          if (level !== 'low') volatilityByFile.set(v.filePath, { level, churn: v.churn, coChangedWith: v.coupledWith?.length ?? 0 });
+        }
+      } catch { /* no churn data */ }
+
+      const landmarkById = new Map(computeLandmarkSignals(cg, { volatilityByFile }).map(l => [l.id, l]));
+
+      // Seeds = the matched functions, mapped to node ids.
+      const idsByNameFile = new Map<string, string[]>();
+      for (const n of cg.nodes) {
+        const key = `${n.filePath} ${n.name}`;
+        const arr = idsByNameFile.get(key);
+        if (arr) arr.push(n.id); else idsByNameFile.set(key, [n.id]);
+      }
+      const seedIds = relevantFunctions.flatMap(f => idsByNameFile.get(`${f.filePath} ${f.name}`) ?? []);
+      const seedSet = new Set(seedIds);
+
+      if (seedIds.length > 0 && landmarkById.size > 0) {
+        // Undirected weighted adjacency: a nearby caller OR callee is "near".
+        const { forward, backward } = buildWeightedAdjacency(cg);
+        const undirected = new Map<string, Array<{ to: string; cost: number }>>();
+        for (const m of [forward, backward]) {
+          for (const [k, arr] of m) {
+            const cur = undirected.get(k);
+            if (cur) cur.push(...arr); else undirected.set(k, [...arr]);
+          }
+        }
+        const ranked = [...weightedBfs(seedIds, undirected, ORIENT_LANDMARK_MAX_DISTANCE).entries()]
+          .filter(([id]) => !seedSet.has(id) && landmarkById.has(id))
+          .map(([id, r]) => ({ lm: landmarkById.get(id)!, distance: r.distance, hops: r.hops }))
+          .sort((a, b) => a.distance - b.distance || a.lm.id.localeCompare(b.lm.id))
+          .slice(0, ORIENT_LANDMARK_LIMIT);
+        if (ranked.length > 0) {
+          landmarks = ranked.map(({ lm, distance, hops }) => ({
+            name: lm.name, file: relative(absDir, lm.filePath), distance, hops, signals: lm.signals,
+          }));
+        }
+      }
+    } catch { /* landmarks are additive — never fail orient over them */ }
+  }
+
   // ── Suggested tools (portable discovery for non-Claude Code clients) ─────
   // Derived from what orient already knows — no extra I/O.
   const _suggested: string[] = ['record_decision'];
@@ -608,6 +669,7 @@ export async function handleOrient(
     ...(provenance !== undefined ? { provenance } : {}),
     ...(changeCoupling !== undefined ? { changeCoupling } : {}),
     ...(architectureViolations !== undefined ? { architectureViolations } : {}),
+    ...(landmarks !== undefined ? { landmarks } : {}),
     nextSteps,
   };
 }

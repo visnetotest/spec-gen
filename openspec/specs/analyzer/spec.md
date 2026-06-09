@@ -3579,6 +3579,29 @@ default surface.
 - **AND** the computation introduces no numeric threshold that is not already defined by the hub and
   god-function classifiers
 
+### Requirement: OrientSurfacesTaskScopedLandmarks
+
+The `orient` response SHALL include a bounded `landmarks` list: the labeled functions nearest to the
+functions matched for the task, **ordered by structural proximity only** (call-distance / hop count),
+each entry carrying its signal labels with evidence plus its `distance` and `hops`. The list SHALL be
+present in full mode and omitted when `lean` is requested. The ordering SHALL NOT use a blended
+salience score, and the matched functions themselves SHALL NOT appear as their own landmarks.
+
+#### Scenario: Lean orient omits landmarks
+
+- **GIVEN** an `orient` call with `lean = true`
+- **WHEN** the response is produced
+- **THEN** it contains no `landmarks` section, preserving the lean path's cost
+
+#### Scenario: Full orient surfaces nearby anchors with labels, ordered by proximity
+
+- **GIVEN** an `orient` call for a task that matches a set of functions, with labeled landmarks nearby
+  in the call graph
+- **WHEN** the full response is produced
+- **THEN** `landmarks` lists the labeled functions nearest those matches, ordered by structural
+  proximity, each entry carrying its `signals` (e.g. `hub`, `volatile`) with evidence and its
+  `distance`/`hops`
+
 
 ## Sub-components
 

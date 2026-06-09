@@ -16,10 +16,16 @@
       from injected classifier data, and **no `score` field is present**.
 
 ## 2. Surface in orient (task-scoped, proximity-ordered)
-- [ ] DEFERRED to a follow-up. Phase 2 attaches a proximity-ordered `landmarks[]` to the `orient`
-      response behind the `lean` flag. It touches the large `handleOrient` enrichment phase; deferred
-      to keep this change focused on the reusable signal pass + the global tool. The
-      `OrientSurfacesTaskScopedLandmarks` spec requirement lands with that follow-up.
+- [x] In `handleOrient`, after function matching, attached a `landmarks[]` enrichment: the labeled
+      landmarks nearest the matched functions, ranked by call-distance proximity over an undirected
+      weighted adjacency (reuses `weightedBfs` / `buildWeightedAdjacency`), each entry carrying its
+      `signals` + evidence and its `distance`/`hops`. The matched seeds are excluded from their own
+      landmark list; `dead` is omitted (an anchor is a point to navigate toward, not dead code).
+- [x] Gated behind `!lean` (computed in the enrichment region, added only to the full return), so
+      `lean=true` skips the work.
+      → verified: `orient.test.ts` shows `landmarks[]` present in full mode with labels+evidence and
+      absent in lean mode; verified live on the repo (6 proximity-ordered anchors, distance asc).
+- [x] Landed the `OrientSurfacesTaskScopedLandmarks` spec requirement.
 
 ## 3. Optional global tool (opt-in preset only)
 - [x] Added `handleGetLandmarks(directory, { limit, label? })` in
