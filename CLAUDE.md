@@ -13,6 +13,7 @@
 | Reviewing a change: structural delta + stale callers | `structural_diff` |
 | "What changes together with this / what's volatile?" | `get_change_coupling` — co-change + churn from git |
 | Lay of the land / where do regions connect? | `get_map` (region view; pass a communityId to drill in) |
+| Find the route from A to B (by name, role, or landmark) | `find_path` (cheapest call path + alternates) |
 | Planning where to add a feature | `suggest_insertion_points` |
 | Reading a spec before writing code | `get_spec` |
 | Checking if code still matches spec | `check_spec_drift` |

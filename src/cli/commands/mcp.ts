@@ -1280,6 +1280,25 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'find_path',
+    description:
+      'Find the route from A to B in the call graph. `from`/`to` may be exact/fuzzy function names ' +
+      'OR selectors: landmark:<id>, role:entrypoint|hub|sink, file:<path>. Returns the single ' +
+      'CHEAPEST path (by call-distance, or fewest hops if useCallDistance=false) plus a few bounded ' +
+      'alternates and a reason — not a raw multi-path dump. "No path within budget" is an explicit ' +
+      'answer. Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        from: { type: 'string', description: 'Start endpoint: a function name, or landmark:<id> / role:entrypoint|hub|sink / file:<path>' },
+        to: { type: 'string', description: 'Goal endpoint: a function name, or landmark:<id> / role:entrypoint|hub|sink / file:<path>' },
+        useCallDistance: { type: 'boolean', description: 'Rank by confidence-weighted call-distance (default true); false ranks by fewest hops' },
+      },
+      required: ['directory', 'from', 'to'],
+    },
+  },
+  {
     name: 'detect_changes',
     description:
       'Detect recently changed functions and rank them by blast radius. ' +
@@ -1468,7 +1487,7 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
   navigation: new Set([
     'orient', 'search_code', 'get_subgraph', 'trace_execution_path',
     'analyze_impact', 'suggest_insertion_points', 'get_function_skeleton',
-    'get_landmarks', 'get_map',
+    'get_landmarks', 'get_map', 'find_path',
   ]),
 };
 

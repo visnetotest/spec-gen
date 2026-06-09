@@ -1,54 +1,46 @@
 # Tasks: add landmark pathfinding
 
 ## 1. Endpoint resolution
-- [ ] Add `resolveEndpoint(spec: string, ctx): FunctionNode[]` in a new
-      `src/core/services/mcp-handlers/pathfind.ts`. Support:
-      - exact / fuzzy name → reuse the case-insensitive substring match already used by
-        `trace_execution_path` (`graph.ts:854-941`) and `EdgeStore.searchNodes`.
-      - `landmark:<id>` → look up the labeled landmark set from `add-structural-landmark-salience`.
-      - `role:entrypoint|hub|sink` — each resolves through an EXISTING classifier, no new threshold:
-        `entrypoint` = `SerializedCallGraph.entryPoints`; `hub` = the hub set feeding
-        `handleGetCriticalHubs` (`graph.ts:661`); `sink` = **a call-graph leaf that is actually
-        called** — zero outgoing internal call edges (existing leaf analysis, `graph.ts:618`) AND
-        `fanIn ≥ 1`. This is parameter-free: there is no "high-fan-in" or "leaf-ish" cutoff to tune;
-        a function is a sink iff it terminates an internal call chain and has at least one caller.
-      - `file:<path>` → all functions whose `filePath` matches.
-      → verify: unit test resolves each selector form to a non-empty seed set on the repo fixture,
-      and an unresolvable selector returns a clear error (not an empty silent result).
+- [x] Added `resolveEndpoint(spec, cg, forward): ResolvedEndpoint` in
+      `src/core/services/mcp-handlers/pathfind.ts`. Supports:
+      - exact / fuzzy name → case-insensitive substring match (like `trace_execution_path`).
+      - `landmark:<id>` → resolve a node by exact id/name, else id-substring.
+      - `role:entrypoint` = `cg.entryPoints`; `role:hub` = `cg.hubFunctions`; `role:sink` = a called
+        leaf (zero outgoing internal call edges AND `fanIn >= 1`) — parameter-free, no new threshold.
+      - `file:<path>` → functions whose `filePath` matches.
+      → verified: unit tests resolve each selector to a non-empty seed set; an unknown role yields an
+      `error` kind (the handler turns it into a clear message, not a silent empty result).
 
 ## 2. Cost-based pathfinding
-- [ ] Add `findCheapestPath(adjacency, fromSeeds, toSeeds, opts)` that runs the weighted traversal
-      from `add-call-distance-scoping` (`weightedBfs`) from the `from` seeds and stops at the nearest
-      `to` seed, reconstructing the path via the predecessor map. Fall back to hop-count BFS
-      (`graph.ts:97`) if call-distance is not present.
-- [ ] Return the single cheapest path plus up to `MAX_ALTERNATES` (propose 3) next-best paths, each
-      with `{ chain, hops, distance }`.
-      → verify: on a fixture with a short weak path and a longer strong path, the strong path wins
-      when call-distance is enabled and the short path wins under pure hop-count.
+- [x] Added `findCheapestPath(cg, fromSeeds, toSeeds, opts)` running `weightedBfs` forward from the
+      `from` seeds, stopping at the nearest reached `to` seed and reconstructing via the predecessor
+      map. Call-distance weights by default; unit-cost adjacency (distance == hops) when
+      `useCallDistance=false`, so both modes share one traversal.
+- [x] Returns the single cheapest path plus up to `MAX_ALTERNATES` (3) next-best paths (to other
+      resolved `to` seeds), each `{ ids, hops, distance }`.
+      → verified: on a fixture with a short weak path and a longer strong path, the strong path wins
+      under call-distance and the short path wins under hop-count.
 
 ## 3. find_path tool
-- [ ] Add `handleFindPath(directory, from, to, opts)` composing endpoint resolution + cheapest-path.
-      Response: `{ from, to, resolvedFrom, resolvedTo, path: {chain,hops,distance}, alternates[],
-      reason }`.
-- [ ] Register in `TOOL_DEFINITIONS` (`mcp.ts:138+`) and the dispatch chain
-      (`tool-dispatch.ts:99-286`) using the `trace_execution_path` entry as the closest template.
-- [ ] Add `find_path` to the **`navigation` preset only** (`TOOL_PRESETS`, `mcp.ts:1430`); it MUST
-      NOT enter `MINIMAL_TOOLS`. Opt-in, per the `mcp-quality` tool-surface requirement.
-- [ ] Classify `find_path` as `conclusion` in the contract table from
-      `enforce-conclusion-over-graph-tool-contract`.
-      → verify: `tool-contract.test.ts` passes; response has no unbounded multi-path edge dump.
+- [x] Added `handleFindPath(directory, from, to, opts)` composing resolution + cheapest-path.
+      Response: `{ from, to, resolvedFrom, resolvedTo, path: {chain,hops,distance}, alternates[], reason }`.
+- [x] Registered in `TOOL_DEFINITIONS` and the dispatch chain (mirrors `trace_execution_path`).
+- [x] Added `find_path` to the **`navigation` preset only** (NOT `MINIMAL_TOOLS`); nav payload ceiling
+      bumped 10_700 → 11_800 and full-surface ceiling 48_000 → 50_000 (spec-28, conscious decisions).
+- [x] Classified `find_path` as `conclusion` in the contract table.
+      → verified: `tool-contract.test.ts` completeness passes; `pathfind.test.ts` runs
+      `assertConclusionShape` on the real response (chain + bounded alternates, no edge dump).
 
 ## 4. Graceful degradation + guardrails
-- [ ] When neither endpoint resolves to a connected path within `maxDistance`/`maxDepth`, return a
-      structured "no path found within budget" answer including how far the search reached — not an
-      empty array the agent must interpret.
-- [ ] Reuse the existing depth/path caps (`SUBGRAPH_MAX_DEPTH_LIMIT`, maxPaths≤50) so the new tool
-      cannot be used to force an unbounded traversal.
+- [x] No connected path within budget returns a structured `{ path: null, noPath: { reason,
+      reachedNodes, hint } }`, not an empty array.
+- [x] Bounded by `SUBGRAPH_MAX_DEPTH_LIMIT` (hop mode) and a call-distance cap (`PATH_MAX_DISTANCE`),
+      so the tool cannot force an unbounded traversal.
 
 ## 5. Spec + close the loop
-- [ ] Land the `specs/mcp-handlers/spec.md` delta in this change.
-- [ ] Run `vitest run src/core/services/mcp-handlers/pathfind.test.ts`.
-- [ ] Update the MCP tool table in `CLAUDE.md` with a "find the route from A to B (by name, role, or
-      landmark)" → `find_path` row.
-- [ ] `record_decision` titled "Goal-conditioned landmark pathfinding" noting the selector grammar
-      and the call-distance-then-hop-count fallback.
+- [x] Landed the `GoalConditionedLandmarkPathfinding` requirement in `specs/mcp-handlers/spec.md`.
+- [x] Ran `vitest run src/core/services/mcp-handlers/pathfind.test.ts` → passing; verified `find_path`
+      live on the repo (role→name, name→sink with alternates, distance/hop modes, structured no-path).
+- [x] Added a "find the route from A to B (by name, role, or landmark)" → `find_path` row to `CLAUDE.md`.
+- [x] `record_decision` "Goal-conditioned landmark pathfinding" recorded (id `539ee661`) noting the
+      selector grammar and the call-distance-then-hop-count fallback.
