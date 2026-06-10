@@ -293,55 +293,107 @@ export interface SerializedCallGraph {
 
 const HUB_THRESHOLD = 5;
 
-/** Common builtins and stdlib names to ignore as call targets (across all languages) */
-const IGNORED_CALLEES = new Set([
-  // Python builtins
+// Builtins / stdlib names to ignore as call targets, partitioned BY LANGUAGE.
+// This used to be one global set applied to every language, which dropped
+// legitimate calls: a Java `repo.find(id)`, `list.contains(x)`, or
+// `cache.remove(k)` vanished because `find`/`contains`/`remove` are C++ STL /
+// Swift names. Each language now only ignores its own builtins; unknown
+// languages fall back to the union (legacy behavior) — see isIgnoredCallee.
+
+const PYTHON_IGNORED = new Set([
   'print', 'len', 'range', 'str', 'int', 'float', 'list', 'dict', 'set', 'tuple',
   'bool', 'type', 'isinstance', 'issubclass', 'hasattr', 'getattr', 'setattr',
   'enumerate', 'zip', 'map', 'filter', 'sorted', 'reversed', 'sum', 'min', 'max',
   'open', 'input', 'format', 'repr', 'id', 'hash', 'abs', 'round', 'pow',
   'super', 'object', 'property', 'staticmethod', 'classmethod',
-  // JS/TS common
+  'assert', 'raise', 'return', 'yield', 'await', 'pass', 'del',
+]);
+
+const JS_IGNORED = new Set([
   'console', 'log', 'error', 'warn', 'JSON', 'parse', 'stringify',
   'Promise', 'resolve', 'reject', 'then', 'catch', 'finally',
   'Array', 'Object', 'String', 'Number', 'Boolean', 'Math', 'Date',
   'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
   'require', 'import', 'exports',
-  // Python control flow (used like functions sometimes)
-  'assert', 'raise', 'return', 'yield', 'await', 'pass', 'del',
-  // Node.js common
+  'map', 'filter', 'reduce', 'forEach',
+  // Node.js
   'readFile', 'writeFile', 'mkdir', 'join', 'resolve', 'basename', 'dirname',
   'existsSync', 'readFileSync', 'writeFileSync',
-  // Go builtins
+]);
+
+const GO_IGNORED = new Set([
   'make', 'new', 'append', 'copy', 'delete', 'close', 'panic', 'recover',
-  'println', 'printf', 'sprintf', 'errorf', 'fprintf',
-  // Rust macros / common stdlib
+  'println', 'printf', 'sprintf', 'errorf', 'fprintf', 'print',
+]);
+
+const RUST_IGNORED = new Set([
   'println', 'eprintln', 'format', 'vec', 'assert', 'unwrap', 'expect',
   'ok', 'err', 'some', 'none',
-  // Ruby builtins
+]);
+
+const RUBY_IGNORED = new Set([
   'puts', 'print', 'p', 'raise', 'require', 'require_relative', 'include',
   'extend', 'attr_accessor', 'attr_reader', 'attr_writer',
-  // Java common
-  'toString', 'equals', 'hashCode', 'getClass', 'println', 'printf',
-  // Swift stdlib / builtins
+]);
+
+// JVM family (Java/Kotlin/Scala) + C# share these Object/print builtins. Note:
+// generic collection methods (find/insert/remove/contains/size/...) are NOT
+// ignored here — they are legitimate, frequently user-defined method names.
+const JVM_IGNORED = new Set([
+  'toString', 'equals', 'hashCode', 'getClass', 'println', 'printf', 'print',
+]);
+
+const SWIFT_IGNORED = new Set([
   'print', 'debugPrint', 'dump', 'fatalError', 'precondition', 'preconditionFailure',
   'assert', 'assertionFailure', 'withUnsafePointer', 'withUnsafeMutablePointer',
   'DispatchQueue', 'main', 'async', 'sync', 'append', 'remove', 'insert', 'contains',
   'map', 'filter', 'reduce', 'forEach', 'compactMap', 'flatMap', 'sorted', 'first', 'last',
-  // C++ stdlib / builtins
+]);
+
+const CFAMILY_IGNORED = new Set([
   'cout', 'cin', 'cerr', 'endl', 'malloc', 'free', 'memcpy', 'memset', 'memcmp',
-  'strlen', 'strcpy', 'strcat', 'strcmp', 'sprintf', 'snprintf', 'fprintf',
+  'strlen', 'strcpy', 'strcat', 'strcmp', 'sprintf', 'snprintf', 'fprintf', 'printf',
   'push_back', 'pop_back', 'emplace_back', 'begin', 'end', 'size', 'empty',
   'find', 'insert', 'erase', 'at', 'front', 'back', 'clear', 'reserve', 'resize',
   'make_shared', 'make_unique', 'move', 'forward', 'swap',
   'static_cast', 'dynamic_cast', 'reinterpret_cast', 'const_cast',
 ]);
 
-/** Returns true if the name should be skipped as a call target. */
-function isIgnoredCallee(name: string): boolean {
-  if (IGNORED_CALLEES.has(name)) return true;
-  // ALL_CAPS names (3+ chars) are almost certainly C/C++ macros, not functions
+const IGNORED_BY_LANGUAGE: Record<string, Set<string>> = {
+  Python: PYTHON_IGNORED,
+  TypeScript: JS_IGNORED,
+  JavaScript: JS_IGNORED,
+  Go: GO_IGNORED,
+  Rust: RUST_IGNORED,
+  Ruby: RUBY_IGNORED,
+  Java: JVM_IGNORED,
+  Kotlin: JVM_IGNORED,
+  Scala: JVM_IGNORED,
+  'C#': JVM_IGNORED,
+  Swift: SWIFT_IGNORED,
+  'C++': CFAMILY_IGNORED,
+  C: CFAMILY_IGNORED,
+};
+
+// Union of every language's set — the fallback for callers that pass no
+// language (and languages without a dedicated set), preserving legacy behavior.
+const ALL_IGNORED_CALLEES = new Set<string>(
+  Object.values(IGNORED_BY_LANGUAGE).flatMap(s => Array.from(s))
+);
+
+/**
+ * Returns true if the name should be skipped as a call target.
+ * Pass the source `language` so only that language's builtins are ignored;
+ * omit it (or pass an unmapped language) to fall back to the cross-language
+ * union (legacy behavior).
+ */
+function isIgnoredCallee(name: string, language?: string): boolean {
+  // ALL_CAPS names (3+ chars) are almost certainly C/C++ macros (or constants),
+  // not function calls — skip regardless of language.
   if (/^[A-Z][A-Z0-9_]{2,}$/.test(name)) return true;
+  const set = language ? IGNORED_BY_LANGUAGE[language] : undefined;
+  if (set) return set.has(name);
+  if (ALL_IGNORED_CALLEES.has(name)) return true;
   return false;
 }
 
@@ -843,7 +895,7 @@ async function extractTSGraph(
     if (!nameCapture || !nodeCapture) continue;
 
     const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName)) continue;
+    if (isIgnoredCallee(calleeName, 'TypeScript')) continue;
 
     const callPos = nodeCapture.node.startIndex;
     const caller = findEnclosingFunction(nodes, callPos);
@@ -980,7 +1032,7 @@ async function extractPyGraph(
     if (!nameCapture || !nodeCapture) continue;
 
     const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName)) continue;
+    if (isIgnoredCallee(calleeName, 'Python')) continue;
 
     const callPos = nodeCapture.node.startIndex;
     const caller = findEnclosingFunction(nodes, callPos);
@@ -1004,7 +1056,7 @@ async function extractPyGraph(
     if (!objectCapture || !nameCapture || !nodeCapture) continue;
 
     const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName)) continue;
+    if (isIgnoredCallee(calleeName, 'Python')) continue;
 
     const callPos = nodeCapture.node.startIndex;
     const caller = findEnclosingFunction(nodes, callPos);
@@ -1097,7 +1149,7 @@ async function extractGoGraph(
     if (!nameCapture || !nodeCapture) continue;
 
     const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName)) continue;
+    if (isIgnoredCallee(calleeName, 'Go')) continue;
 
     const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
     if (!caller) continue;
@@ -1183,7 +1235,7 @@ async function extractRustGraph(
     if (!nameCapture || !nodeCapture) continue;
 
     const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName)) continue;
+    if (isIgnoredCallee(calleeName, 'Rust')) continue;
 
     const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
     if (!caller) continue;
@@ -1272,7 +1324,7 @@ async function extractRubyGraph(
   // Explicit calls: fn(), obj.method(). RUBY_CALL_QUERY has the same two-pattern
   // overlap as Java (a bare `method:` pattern that also matches `receiver.method`),
   // so dedupe per call site to avoid emitting both `obj.method` and a bare `method`.
-  const rawEdges = dedupeOverlappingCalls(callQuery, tree.rootNode, nodes);
+  const rawEdges = dedupeOverlappingCalls(callQuery, tree.rootNode, nodes, 'Ruby');
 
   // Bareword calls: identifier at statement level, no parens
   for (const match of barewordQuery.matches(tree.rootNode)) {
@@ -1280,7 +1332,7 @@ async function extractRubyGraph(
     if (!nameCapture) continue;
 
     const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName)) continue;
+    if (isIgnoredCallee(calleeName, 'Ruby')) continue;
 
     const caller = findEnclosingFunction(nodes, nameCapture.node.startIndex);
     if (!caller) continue;
@@ -1324,7 +1376,8 @@ const JAVA_CALL_QUERY = `
 function dedupeOverlappingCalls(
   callQuery: Parser.Query,
   root: Parser.SyntaxNode,
-  nodes: FunctionNode[]
+  nodes: FunctionNode[],
+  language: string
 ): RawEdge[] {
   const callByNode = new Map<number, { calleeName: string; calleeObject?: string; node: Parser.SyntaxNode }>();
   for (const match of callQuery.matches(root)) {
@@ -1347,7 +1400,7 @@ function dedupeOverlappingCalls(
 
   const rawEdges: RawEdge[] = [];
   for (const call of callByNode.values()) {
-    if (isIgnoredCallee(call.calleeName)) continue;
+    if (isIgnoredCallee(call.calleeName, language)) continue;
     const caller = findEnclosingFunction(nodes, call.node.startIndex);
     if (!caller) continue;
     rawEdges.push({ callerId: caller.id, calleeName: call.calleeName, line: call.node.startPosition.row + 1, calleeObject: call.calleeObject });
@@ -1406,7 +1459,7 @@ async function extractJavaGraph(
   // for one call site — a qualified `Money.of` AND a bare `of` — doubling fan-out
   // and polluting the external-node set. Collapse to one edge per invocation node,
   // preferring the qualified match (it carries the receiver).
-  const rawEdges = dedupeOverlappingCalls(callQuery, tree.rootNode, nodes);
+  const rawEdges = dedupeOverlappingCalls(callQuery, tree.rootNode, nodes, 'Java');
 
   return { nodes, rawEdges };
 }
@@ -1539,7 +1592,7 @@ async function extractCppGraph(
     if (!nameCapture || !nodeCapture) continue;
 
     const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName)) continue;
+    if (isIgnoredCallee(calleeName, 'C++')) continue;
 
     const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
     if (!caller) continue;
@@ -1555,7 +1608,7 @@ async function extractCppGraph(
     if (!nameCapture || !nodeCapture) continue;
 
     const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName)) continue;
+    if (isIgnoredCallee(calleeName, 'C++')) continue;
 
     const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
     if (!caller) continue;
@@ -1648,7 +1701,7 @@ async function extractSwiftGraph(
     if (!nameCapture || !nodeCapture) continue;
 
     const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName)) continue;
+    if (isIgnoredCallee(calleeName, 'Swift')) continue;
 
     const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
     if (!caller) continue;
@@ -1663,7 +1716,7 @@ async function extractSwiftGraph(
     if (!nameCapture || !nodeCapture) continue;
 
     const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName)) continue;
+    if (isIgnoredCallee(calleeName, 'Swift')) continue;
 
     const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
     if (!caller) continue;
@@ -1915,7 +1968,7 @@ async function extractByQueries(
       const objectCapture = match.captures.find(c => c.name === 'call.object');
       if (!nameCapture || !nodeCapture) continue;
       const calleeName = nameCapture.node.text;
-      if (isIgnoredCallee(calleeName)) continue;
+      if (isIgnoredCallee(calleeName, spec.language)) continue;
       if (spec.callFilter && !spec.callFilter(calleeName, definedNames)) continue;
       const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
       if (!caller) continue;

@@ -467,6 +467,29 @@ public class OrderService {
     expect(createNode?.className).toBe('OrderService');
   });
 
+  it('does not drop calls to methods named after C++/Swift builtins', async () => {
+    // Regression (#138): IGNORED_CALLEES was global, so C++/Swift stdlib names
+    // (find/contains/remove/insert/size/...) silently dropped legitimate Java
+    // calls — e.g. a repository `find(id)` or a cache `remove(k)`.
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'Repo.java',
+      language: 'Java',
+      content: `
+public class Repo {
+    public Item lookup(int id) {
+        return find(id);
+    }
+    private Item find(int id) { return null; }
+}
+      `,
+    }]);
+
+    // The internal `find` method must keep its caller edge (not be ignored).
+    expect(edgePairs(result)).toContain('lookup→find');
+    expect(fanIn(result, 'find')).toBe(1);
+  });
+
   it('emits one edge per qualified call (no bare/qualified duplication)', async () => {
     // Regression (#138): JAVA_CALL_QUERY matched a qualified `Money.of(...)` with
     // BOTH the qualified and the bare pattern, emitting two edges (a `Money.of`
