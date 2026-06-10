@@ -33,7 +33,7 @@ Branch: `openlore-spec-09-mcp-live-data-test-harness`. **IN PROGRESS — overrid
 - [x] Summary report: tool x repo x pass/fail x output-size matrix, written to a gitignored artifact and printed.
 - [x] Wired into `vitest.integration.config.ts` only (+ `test:live` script); default `test:run` stays fast and offline.
 - [x] `npm run lint`, `npm run typecheck`, `npm run test:run`, `npm run build` all green.
-- [ ] One PR opened, titled `spec-09: MCP live-data test harness`.
+- [x] One PR opened, titled `spec-09: MCP live-data test harness`. → https://github.com/clay-good/OpenLore/pull/137
 - [ ] TODO(spec-09-followup): networked run to confirm/correct pinned SHAs and generate the overview-count golden snapshots (cannot run from the build sandbox — no network).
 
 ## Context for you (the agent)
