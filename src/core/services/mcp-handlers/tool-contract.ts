@@ -91,6 +91,8 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   get_map: 'conclusion',
   find_path: 'conclusion',
   detect_changes: 'conclusion',
+  get_health_map: 'conclusion',
+  get_surprising_connections: 'conclusion',
   record_decision: 'conclusion',
   list_decisions: 'conclusion',
   approve_decision: 'conclusion',

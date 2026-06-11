@@ -1262,7 +1262,10 @@ export async function handleDetectChanges(
   let newLineNum = 0;
   for (const line of diffOutput.split('\n')) {
     const fileMatch = line.match(/^\+\+\+ b\/(.+)$/);
-    if (fileMatch) { curFile = join(absDir, fileMatch[1]); newLineNum = 0; continue; }
+    // git diff paths are repo-root-relative, matching the call-graph node
+    // convention (nodes store relative filePaths). Keep them relative so the
+    // node-overlap match below — and the classifyChangeType lookup — line up.
+    if (fileMatch) { curFile = fileMatch[1]; newLineNum = 0; continue; }
     const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
     if (hunkMatch && curFile) {
       newLineNum = parseInt(hunkMatch[1], 10);
@@ -1284,11 +1287,15 @@ export async function handleDetectChanges(
   const cg = ctx.callGraph as SerializedCallGraph;
   const nodeMap = new Map(cg.nodes.map(n => [n.id, n]));
 
+  // Node filePaths are repo-root-relative, but tolerate an absolute path defensively
+  // (older analyses, or a future builder change) by normalising to the diff's relative form.
+  const relPath = (p: string) => (p.startsWith(absDir) ? relative(absDir, p) : p);
+
   // Map changed line ranges to function nodes; track overlapping line count per function
   const changedFnIds = new Set<string>();
   const fnChangedLineCount = new Map<string, number>(); // nodeId → #lines overlapping with diff
   for (const [filePath, ranges] of changedLines) {
-    const fileNodes = cg.nodes.filter(n => n.filePath === filePath && !n.isExternal && !n.isTest && n.startLine);
+    const fileNodes = cg.nodes.filter(n => relPath(n.filePath) === filePath && !n.isExternal && !n.isTest && n.startLine);
     for (const node of fileNodes) {
       const fnEnd = node.endLine ?? node.startLine!;
       let overlap = 0;
@@ -1380,9 +1387,12 @@ export async function handleDetectChanges(
     const absScore = Math.log(1 + changed) / Math.log(201);
     const rawChangeScore = Math.min(0.6 * relScore + 0.4 * absScore, 1);
     // Semantic modifier: signature changes are higher risk than config/literal tweaks
-    const changeType = classifyChangeType(n, changedFileData.get(n.filePath)?.addedLines ?? new Map());
+    const changeType = classifyChangeType(n, changedFileData.get(relPath(n.filePath))?.addedLines ?? new Map());
     const changeScore = Math.min(rawChangeScore * CHANGE_TYPE_MULTIPLIER[changeType], 1);
     const tests = testedByMap.get(id) ?? [];
+    const testCoverage: 'none' | 'import-only' | 'direct' =
+      tests.length === 0 ? 'none' :
+      tests.some(t => t.confidence === 'called') ? 'direct' : 'import-only';
     // called-edges are direct proof; imported-only is weaker (survives vi.mock)
     const effectiveTests = tests.reduce((s, t) => s + (t.confidence === 'called' ? 1.0 : 0.3), 0);
     const coveragePenalty = 1 / (1 + Math.log(1 + effectiveTests));
@@ -1398,7 +1408,7 @@ export async function handleDetectChanges(
     const reason = buildReason({ changeType, directCallers, tests, bScore, fanIn: n.fanIn });
     return {
       name: n.name,
-      file: relative(absDir, n.filePath),
+      file: relPath(n.filePath),
       startLine: n.startLine ?? null,
       endLine: n.endLine ?? null,
       fanIn: n.fanIn,
@@ -1406,13 +1416,19 @@ export async function handleDetectChanges(
       changeType,
       riskScore,
       reason,
+      testCoverage,
       testedBy: testedByMap.get(id) ?? [],
     };
   }).sort((a, b) => b.riskScore - a.riskScore);
+
+  const testGaps = scored
+    .filter(f => f.testCoverage === 'none')
+    .map(f => ({ name: f.name, file: f.file, riskScore: f.riskScore, changeType: f.changeType }));
 
   return {
     base: ref,
     totalChanged: scored.length,
     changedFunctions: scored,
+    testGaps,
   };
 }

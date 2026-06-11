@@ -85,6 +85,8 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
   list_decisions: { kind: 'read', buildArgs: dirOnly },
   get_landmarks: { kind: 'read', buildArgs: dirOnly },
   get_map: { kind: 'read', buildArgs: dirOnly },
+  get_health_map: { kind: 'read', buildArgs: dirOnly },
+  get_surprising_connections: { kind: 'read', buildArgs: dirOnly },
   detect_changes: { kind: 'read', buildArgs: dirOnly },
   get_critical_hubs: { kind: 'read', buildArgs: dirOnly },
   get_leaf_functions: { kind: 'read', buildArgs: dirOnly },
