@@ -8,7 +8,6 @@
 
 import { readFile, stat } from 'node:fs/promises';
 import { join, relative } from 'node:path';
-import { volatilityLevel } from '../../provenance/change-coupling.js';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';

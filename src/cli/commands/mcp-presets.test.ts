@@ -157,8 +157,10 @@ describe('tools/list payload budget (spec-28)', () => {
   // Bumped 50_000 → 52_000 when the opt-in `memory` preset's remember/recall were added
   // (code-anchored persistent memory) — again a conscious decision, not silent drift. The
   // two tools stay out of the default/minimal surface; only the full surface widens.
+  // Bumped 52_000 → 53_000 when get_surprising_connections and get_health_map were added
+  // to the full surface — conscious budget decision.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({})).toBeLessThan(52_000);
+    expect(payloadBytes({})).toBeLessThan(53_000);
   });
 
   it('navigation preset stays lean (the low-overhead surface that wins the benchmark)', () => {
