@@ -2738,12 +2738,36 @@ function calleeMethodName(callee: Parser.SyntaxNode | null): string | undefined 
   return undefined;
 }
 
-/** Static string-literal value of an argument node, or undefined if not a plain literal. */
-function staticStringArg(node: Parser.SyntaxNode | undefined): string | undefined {
+/**
+ * Static channel key of an argument node, or undefined when not statically pairable.
+ * Accepts the forms that appear on BOTH a registration and a dispatch site so the two
+ * pair deterministically:
+ *   - a string literal `'mount'`                          → `str:mount`
+ *   - a substitution-free template literal `` `mount` ``  → `str:mount`
+ *   - a constant member reference `EVENTS.MOUNT`          → `const:EVENTS.MOUNT`
+ * The `str:`/`const:` namespace prefix keeps a string `'MOUNT'` from pairing with a
+ * constant `EVENTS.MOUNT`. A computed/dynamic key returns undefined (no guess).
+ */
+function staticChannelKey(node: Parser.SyntaxNode | undefined): string | undefined {
   if (!node) return undefined;
   if (node.type === 'string') {
     // tree-sitter `string` text includes the surrounding quotes.
-    return node.text.length >= 2 ? node.text.slice(1, -1) : '';
+    return `str:${node.text.length >= 2 ? node.text.slice(1, -1) : ''}`;
+  }
+  if (node.type === 'template_string') {
+    // Only a literal template with no ${…} substitution is a static key.
+    if (node.descendantsOfType('template_substitution').length === 0) {
+      return `str:${node.text.length >= 2 ? node.text.slice(1, -1) : ''}`;
+    }
+    return undefined;
+  }
+  if (node.type === 'member_expression') {
+    const obj = node.childForFieldName('object');
+    const prop = node.childForFieldName('property');
+    if (obj?.type === 'identifier' && prop?.type === 'property_identifier') {
+      return `const:${obj.text}.${prop.text}`;
+    }
+    return undefined;
   }
   return undefined;
 }
@@ -2751,18 +2775,18 @@ function staticStringArg(node: Parser.SyntaxNode | undefined): string | undefine
 /**
  * Channel key for a dispatch call. For `dispatchEvent(new Event('k'))` /
  * `dispatchEvent(new CustomEvent('k'))` the key is the Event constructor's first
- * string-literal argument; otherwise it is the call's first string-literal argument.
+ * static argument; otherwise it is the call's first static argument.
  */
 function dispatchChannelKey(method: string, args: Parser.SyntaxNode[]): string | undefined {
   if (method === 'dispatchEvent') {
     const arg0 = args[0];
     if (arg0?.type === 'new_expression') {
       const ctorArgs = arg0.childForFieldName('arguments')?.namedChildren ?? [];
-      return staticStringArg(ctorArgs[0]);
+      return staticChannelKey(ctorArgs[0]);
     }
     return undefined;
   }
-  return staticStringArg(args[0]);
+  return staticChannelKey(args[0]);
 }
 
 /**
@@ -2857,7 +2881,7 @@ async function synthesizeEventChannelEdges(
       if (!argsNode) continue;
       const args = argsNode.namedChildren;
       if (EVENT_REGISTER_METHODS.has(method)) {
-        const key = staticStringArg(args[0]);
+        const key = staticChannelKey(args[0]);
         if (key !== undefined) {
           const handlerIds = resolveHandlerTargets(args[1], file.path, resolveHandler);
           if (handlerIds.length) registrations.push({ key, handlerIds });

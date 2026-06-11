@@ -142,6 +142,45 @@ describe('event-channel synthesis', () => {
     expect(edgeBetween(b, 'trigger', 'realHandler')?.synthesizedBy).toBe('event-channel');
   });
 
+  it('pairs on a constant member-expression key (EVENTS.MOUNT)', async () => {
+    const b = await build(`
+      const EVENTS = { MOUNT: 'mount' };
+      function onMount() { return 1; }
+      function register(e: any) { e.on(EVENTS.MOUNT, onMount); }
+      function trigger(e: any) { e.emit(EVENTS.MOUNT); }
+    `);
+    expect(edgeBetween(b, 'trigger', 'onMount')?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('pairs on a substitution-free template-literal key', async () => {
+    const b = await build([
+      'function onMount() { return 1; }',
+      'function register(e: any) { e.on(`mount`, onMount); }',
+      'function trigger(e: any) { e.emit(`mount`); }',
+    ].join('\n'));
+    expect(edgeBetween(b, 'trigger', 'onMount')?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('does NOT pair a string key with a same-text constant key (namespace isolation)', async () => {
+    const b = await build(`
+      const EVENTS = { MOUNT: 'mount' };
+      function onMount() { return 1; }
+      function register(e: any) { e.on(EVENTS.MOUNT, onMount); }
+      function trigger(e: any) { e.emit('EVENTS.MOUNT'); }
+    `);
+    // 'EVENTS.MOUNT' (string) must not pair with EVENTS.MOUNT (constant ref).
+    expect(edgeBetween(b, 'trigger', 'onMount')).toBeUndefined();
+  });
+
+  it('ignores a computed/dynamic dispatch key (no guess)', async () => {
+    const b = await build(`
+      function onMount() { return 1; }
+      function register(e: any) { e.on('mount', onMount); }
+      function trigger(e: any, k: string) { e.emit(k); }
+    `);
+    expect(synthEdges(b)).toHaveLength(0);
+  });
+
   it('supports pub/sub verbs (subscribe / publish)', async () => {
     const b = await build(`
       function onTopic() { return 1; }

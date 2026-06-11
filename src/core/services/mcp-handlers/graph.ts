@@ -472,6 +472,9 @@ export async function handleGetSubgraph(
           calleeFile: calleeN?.filePath,
           kind: e.kind ?? 'calls',
           callType: e.callType,
+          // Provenance: flag synthesized dynamic-dispatch edges so the agent sees which
+          // edges rest on a heuristic vs direct name resolution (spec: add-synthesized-…).
+          ...(e.confidence === 'synthesized' && { synthesized: true, synthesizedBy: e.synthesizedBy }),
         };
       })
   );

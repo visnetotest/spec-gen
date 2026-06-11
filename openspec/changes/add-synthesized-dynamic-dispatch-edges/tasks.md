@@ -45,6 +45,14 @@ step 1 (it extends a core data structure — `EdgeConfidence` / `CallEdge`).
 > directly-resolved edges. Reachability, impact, dead-code, and the path tools still traverse the
 > full edge list (synthesized included) by default, with `directResolvedOnly` to opt out. New
 > invariant test: synthesized edges leave `fanIn`/`fanOut` unchanged.
+>
+> **Provenance fidelity + key coverage (same PR):**
+> - the persisted edge store gained a `synthesized_by` column (SCHEMA_VERSION 5→6, rebuild-on-open)
+>   so the rule name survives into the SQLite-backed tools; `get_subgraph` now flags synthesized
+>   edges (`synthesized: true` + `synthesizedBy`) so an agent sees which edges rest on a heuristic;
+> - event-channel keys now also pair on a **constant member reference** (`EVENTS.MOUNT`) and a
+>   **substitution-free template literal** (`` `mount` ``), namespaced (`str:` vs `const:`) so a
+>   string key never pairs with a same-text constant; a computed/dynamic key still emits nothing.
 
 ## 1. Provenance on the edge model
 - [ ] Add `'synthesized'` to `EdgeConfidence` (`call-graph.ts:30`) and `synthesizedBy?: string` to
