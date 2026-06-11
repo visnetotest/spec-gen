@@ -60,9 +60,12 @@ and language-agnostic. Adding a language SHALL NOT change the edges synthesized 
 language, and a language whose idioms are not statically pairable SHALL emit no edges rather than
 guess.
 
-Languages are added one at a time. The set in effect is JavaScript/TypeScript and Python; the
-handler may be a function reference, a member/attribute reference (`self.handler`), a bound
-reference, or an inline function/lambda (wired to the internal functions its body calls).
+Languages are added one at a time. The set in effect is JavaScript/TypeScript, Python, Ruby, PHP, and
+Swift (NotificationCenter `addObserver(forName:)` ↔ `post(name:)`); the handler may be a function
+reference, a member/attribute reference (`self.handler`), a bound reference, a Ruby block, a PHP
+callable (`'fn'` / `[$this, 'm']`), or an inline function/lambda/closure (wired to the internal
+functions its body calls). Keys are namespaced by kind (string / symbol / constant) so a key of one
+kind never pairs with a same-text key of another.
 
 #### Scenario: Python event handler is reachable through a synthesized edge
 
@@ -94,7 +97,7 @@ a handler when the handler's event type and the dispatched event's constructed t
 statically from the AST with no LLM. The key is the event type name; pairing, the fan-out cap, and
 provenance are shared with the string-key rule, but the producing rule is labeled distinctly
 (`synthesizedBy: 'type-event'`). Type-based recovery is per-language and added one language at a time;
-in effect it covers **Java** (Guava `@Subscribe` / Spring `@EventListener` handler methods paired with
+in effect it covers **Java** and **Kotlin** (Guava `@Subscribe` / Spring `@EventListener` handler methods paired with
 `post(new T(...))` / `publishEvent(new T(...))`) and **C#** (a class implementing a handler interface
 such as `INotificationHandler<T>` / `IRequestHandler<T>` paired with `Publish(new T(...))` /
 `Send(new T(...))`). A dispatch whose argument is not a statically-typed construction SHALL emit no

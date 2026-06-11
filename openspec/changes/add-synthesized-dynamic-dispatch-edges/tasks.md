@@ -78,6 +78,14 @@ step 1 (it extends a core data structure — `EdgeConfidence` / `CallEdge`).
 > `type:T`; a dispatch whose argument is not a `new T(...)` construction emits nothing. Channel-based
 > languages with no statically-pairable idiom (Go, Rust, Elixir process-based PubSub, …) still have NO
 > collector — the pass emits nothing rather than guess.
+>
+> **All top languages covered (same PR).** String-key event-channel: **JS/TS, Python, Ruby, PHP,
+> Swift** (NotificationCenter `addObserver(forName:){closure}` ↔ `post(name:)`, `Notification.Name`
+> keys). Type-based: **Java, C#, Kotlin** (Kotlin reuses the JVM annotation model; construction is
+> `T(...)` not `new T(...)`). Eight languages across two rules. Also fixed: C#'s capitalized `Main`
+> is now recognized as a dead-code liveness root (was only `main`/`default`). Remaining OpenLore
+> languages (Go, Rust, C/C++, Scala, Elixir, Lua, Bash, Dart) have no statically-pairable key+handler
+> or type+handler event idiom, so by design they get no collector.
 
 ## 1. Provenance on the edge model
 - [ ] Add `'synthesized'` to `EdgeConfidence` (`call-graph.ts:30`) and `synthesizedBy?: string` to

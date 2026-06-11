@@ -578,6 +578,89 @@ describe('type-based event synthesis — C#', () => {
   });
 });
 
+describe('type-based event synthesis — Kotlin', () => {
+  const buildKt = (content: string): Promise<Built> =>
+    new CallGraphBuilder().build([{ path: 'App.kt', content, language: 'Kotlin' }]);
+
+  it('@Subscribe handler is reachable from post(T())', async () => {
+    const b = await buildKt([
+      'class Listeners {',
+      '  @Subscribe',
+      '  fun onUserCreated(e: UserCreatedEvent) { doWork() }',
+      '}',
+      'class Publisher {',
+      '  fun go(bus: EventBus) { bus.post(UserCreatedEvent("a")) }',
+      '}',
+    ].join('\n'));
+    const edge = edgeBetween(b, 'go', 'onUserCreated');
+    expect(edge?.confidence).toBe('synthesized');
+    expect(edge?.synthesizedBy).toBe('type-event');
+  });
+
+  it('Kotlin mismatched event types produce no edge', async () => {
+    const b = await buildKt([
+      'class Listeners {',
+      '  @Subscribe',
+      '  fun onA(e: EventA) { work() }',
+      '}',
+      'class Publisher {',
+      '  fun go(bus: EventBus) { bus.post(EventB()) }',
+      '}',
+    ].join('\n'));
+    expect(synthEdges(b)).toHaveLength(0);
+  });
+
+  it('Kotlin un-annotated method is not a handler', async () => {
+    const b = await buildKt([
+      'class Listeners {',
+      '  fun onUserCreated(e: UserCreatedEvent) { doWork() }',
+      '}',
+      'class Publisher {',
+      '  fun go(bus: EventBus) { bus.post(UserCreatedEvent()) }',
+      '}',
+    ].join('\n'));
+    expect(synthEdges(b)).toHaveLength(0);
+  });
+});
+
+describe('event-channel synthesis — Swift (NotificationCenter)', () => {
+  const buildSwift = (content: string): Promise<Built> =>
+    new CallGraphBuilder().build([{ path: 'App.swift', content, language: 'Swift' }]);
+
+  it('addObserver(forName:){closure} is reachable from post(name:)', async () => {
+    const b = await buildSwift([
+      'class C {',
+      '  func onMount() { doWork() }',
+      '  func register() {',
+      '    NotificationCenter.default.addObserver(forName: Notification.Name("mount"), object: nil, queue: nil) { note in self.onMount() }',
+      '  }',
+      '  func trigger() {',
+      '    NotificationCenter.default.post(name: Notification.Name("mount"), object: nil)',
+      '  }',
+      '}',
+    ].join('\n'));
+    const edge = edgeBetween(b, 'trigger', 'onMount');
+    expect(edge?.confidence).toBe('synthesized');
+    expect(edge?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('Swift mismatched notification names produce no edge', async () => {
+    const b = await buildSwift([
+      'class C {',
+      '  func onMount() { doWork() }',
+      '  func register() {',
+      '    NotificationCenter.default.addObserver(forName: Notification.Name("open"), object: nil, queue: nil) { note in self.onMount() }',
+      '  }',
+      '  func trigger() {',
+      '    NotificationCenter.default.post(name: Notification.Name("close"), object: nil)',
+      '  }',
+      '}',
+    ].join('\n'));
+    expect(edgeBetween(b, 'trigger', 'onMount')).toBeUndefined();
+    expect(synthEdges(b)).toHaveLength(0);
+  });
+});
+
 describe('event-channel synthesis — per-language isolation', () => {
   it('does not pair a Python registration with a JS/TS dispatch on the same key', async () => {
     const b = await new CallGraphBuilder().build([

@@ -431,6 +431,7 @@ let _cppParser: Parser | undefined;
 let _swiftParser: Parser | undefined;
 let _phpParser: Parser | undefined;
 let _csParser: Parser | undefined;
+let _ktParser: Parser | undefined;
 let _TsLanguage: object | undefined;
 let _PyLanguage: object | undefined;
 let _GoLanguage: object | undefined;
@@ -441,6 +442,7 @@ let _CppLanguage: object | undefined;
 let _SwiftLanguage: object | undefined;
 let _PhpLanguage: object | undefined;
 let _CsLanguage: object | undefined;
+let _KtLanguage: object | undefined;
 
 async function getTSParser(): Promise<{ parser: Parser; lang: object }> {
   if (!_tsParser) {
@@ -520,6 +522,16 @@ async function getCSharpParser(): Promise<{ parser: Parser; lang: object }> {
     (_csParser as Parser).setLanguage(_CsLanguage as unknown as Parser.Language);
   }
   return { parser: _csParser!, lang: _CsLanguage! };
+}
+
+async function getKotlinParser(): Promise<{ parser: Parser; lang: object }> {
+  if (!_ktParser) {
+    const ktModule = await import('tree-sitter-kotlin');
+    _KtLanguage = ktModule.default;
+    _ktParser = new Parser();
+    (_ktParser as Parser).setLanguage(_KtLanguage as unknown as Parser.Language);
+  }
+  return { parser: _ktParser!, lang: _KtLanguage! };
 }
 
 async function getCppParser(): Promise<{ parser: Parser; lang: object }> {
@@ -2760,6 +2772,8 @@ const EVENT_PREFILTER = /\b(on|once|addListener|prependListener|prependOnceListe
 /** Pre-filters for the type-based (Java/C#) rule: an annotation/interface or a dispatch verb. */
 const JAVA_TYPE_EVENT_PREFILTER = /@(?:Subscribe|EventListener|TransactionalEventListener|EventHandler)\b|\b(?:post|publishEvent|publish|fire|fireEvent|raise|send)\s*\(/;
 const CSHARP_TYPE_EVENT_PREFILTER = /\b(?:INotificationHandler|IRequestHandler|IConsumer|IEventHandler|IHandleMessages|IHandle)\b|\b(?:Publish|Send|Raise|RaiseEvent|Fire|Notify)\s*\(/;
+/** Swift NotificationCenter pre-filter: an observer registration or a post. */
+const SWIFT_EVENT_PREFILTER = /\b(?:addObserver|post)\s*\(/;
 
 /** Resolve a referenced simple name to a single internal function node, or undefined
  *  when unknown or ambiguous (never guesses). Prefers a match in `preferFile`. */
@@ -3276,6 +3290,119 @@ function collectCSharpTypeEventSites(
   }
 }
 
+/** Method name of a Kotlin call_expression: `recv.m(...)` (navigation) or `m(...)` (identifier). */
+function ktCallName(call: Parser.SyntaxNode): string | undefined {
+  const callee = call.namedChildren[0];
+  if (!callee) return undefined;
+  if (callee.type === 'simple_identifier') return callee.text;
+  if (callee.type === 'navigation_expression') {
+    const suffixes = callee.namedChildren.filter(c => c.type === 'navigation_suffix');
+    return suffixes[suffixes.length - 1]?.namedChildren.find(c => c.type === 'simple_identifier')?.text;
+  }
+  return undefined;
+}
+
+/** Ordered argument VALUE nodes of a Kotlin call (`call_suffix > value_arguments > value_argument`). */
+function ktArgValues(call: Parser.SyntaxNode): Parser.SyntaxNode[] {
+  const suffix = call.namedChildren.find(c => c.type === 'call_suffix');
+  const va = suffix?.namedChildren.find(c => c.type === 'value_arguments');
+  return (va?.namedChildren.filter(c => c.type === 'value_argument') ?? [])
+    .map(a => a.namedChildren[a.namedChildren.length - 1]);
+}
+
+/** Constructed type for a Kotlin value: `Foo(...)` is a call_expression with a Capitalized callee. */
+function ktConstructedType(value: Parser.SyntaxNode | undefined): string | undefined {
+  if (value?.type !== 'call_expression') return undefined;
+  const callee = value.namedChildren[0];
+  if (callee?.type === 'simple_identifier' && /^[A-Z]/.test(callee.text)) return callee.text;
+  return undefined;
+}
+
+/** Collect Kotlin type-based event sites (JVM annotation model, like Java; construction is `T(...)`). */
+function collectKotlinTypeEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], _filePath: string, _resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  for (const fn of tree.rootNode.descendantsOfType('function_declaration')) {
+    const mods = fn.namedChildren.find(c => c.type === 'modifiers');
+    const annotated = mods?.descendantsOfType('annotation').some(
+      a => JAVA_HANDLER_ANNOTATIONS.has(a.descendantsOfType('type_identifier')[0]?.text ?? ''),
+    );
+    if (!annotated) continue;
+    const params = fn.namedChildren.find(c => c.type === 'function_value_parameters');
+    const firstParam = params?.namedChildren.find(c => c.type === 'parameter');
+    const t = firstParam?.descendantsOfType('type_identifier')[0]?.text;
+    if (!t) continue;
+    const nameNode = fn.namedChildren.find(c => c.type === 'simple_identifier');
+    const handlerId = nameNode && findEnclosingFunction(fileNodes, nameNode.startIndex)?.id;
+    if (handlerId) sites.registrations.push({ key: `type:${t}`, handlerIds: [handlerId] });
+  }
+  for (const call of tree.rootNode.descendantsOfType('call_expression')) {
+    const name = ktCallName(call);
+    if (!name || !JAVA_TYPE_DISPATCH_METHODS.has(name)) continue;
+    const t = ktConstructedType(ktArgValues(call)[0]);
+    if (!t) continue;
+    const caller = findEnclosingFunction(fileNodes, call.startIndex);
+    if (caller) sites.dispatches.push({ key: `type:${t}`, callerId: caller.id, line: call.startPosition.row + 1 });
+  }
+}
+
+/** Swift NotificationCenter name → namespaced key: `Notification.Name("x")` / `NSNotification.Name("x")`. */
+function swiftNotificationKey(value: Parser.SyntaxNode | undefined): string | undefined {
+  if (value?.type !== 'call_expression') return undefined;
+  const callee = value.namedChildren[0];
+  const endsInName = callee?.type === 'navigation_expression' &&
+    callee.descendantsOfType('navigation_suffix').slice(-1)[0]?.text === '.Name';
+  if (!endsInName) return undefined;
+  const str = value.descendantsOfType('line_string_literal')[0];
+  if (!str) return undefined;
+  return `str:${str.text.replace(/^"|"$/g, '')}`;
+}
+
+/** The labeled argument value for `label:` in a Swift call's value_arguments, or undefined. */
+function swiftLabeledArg(call: Parser.SyntaxNode, label: string): Parser.SyntaxNode | undefined {
+  const suffix = call.namedChildren.find(c => c.type === 'call_suffix');
+  const va = suffix?.namedChildren.find(c => c.type === 'value_arguments');
+  for (const arg of va?.namedChildren.filter(c => c.type === 'value_argument') ?? []) {
+    if (arg.childForFieldName('name')?.text === label) return arg.namedChildren[arg.namedChildren.length - 1];
+  }
+  return undefined;
+}
+
+/** Collect Swift NotificationCenter sites (`addObserver(forName:…){closure}` ↔ `post(name:…)`). */
+function collectSwiftEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], filePath: string, resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  const callName = (call: Parser.SyntaxNode): string | undefined => {
+    const callee = call.namedChildren[0];
+    if (callee?.type === 'navigation_expression') {
+      return callee.descendantsOfType('navigation_suffix').slice(-1)[0]?.namedChildren.find(c => c.type === 'simple_identifier')?.text;
+    }
+    if (callee?.type === 'simple_identifier') return callee.text;
+    return undefined;
+  };
+  for (const call of tree.rootNode.descendantsOfType('call_expression')) {
+    const name = callName(call);
+    if (name === 'addObserver') {
+      const key = swiftNotificationKey(swiftLabeledArg(call, 'forName') ?? swiftLabeledArg(call, 'name'));
+      if (key === undefined) continue;
+      // Handler: the trailing closure's inner calls.
+      const lambda = call.namedChildren.find(c => c.type === 'call_suffix')?.namedChildren.find(c => c.type === 'lambda_literal');
+      const handlerIds: string[] = [];
+      const seen = new Set<string>();
+      for (const inner of lambda?.descendantsOfType('call_expression') ?? []) {
+        const id = resolveHandler(callName(inner) ?? '', filePath)?.id;
+        if (id && !seen.has(id)) { seen.add(id); handlerIds.push(id); }
+      }
+      if (handlerIds.length) sites.registrations.push({ key, handlerIds });
+    } else if (name === 'post') {
+      const key = swiftNotificationKey(swiftLabeledArg(call, 'name'));
+      if (key === undefined) continue;
+      const caller = findEnclosingFunction(fileNodes, call.startIndex);
+      if (caller) sites.dispatches.push({ key, callerId: caller.id, line: call.startPosition.row + 1 });
+    }
+  }
+}
+
 /**
  * Event-channel rule: pair handler registrations (`on`/`once`/`addEventListener`/
  * `subscribe`/… with a static key) against dispatch sites (`emit`/`dispatch`/
@@ -3375,6 +3502,28 @@ async function synthesizeEventChannelEdges(
       catch { /* skip unparseable file */ }
     }
     edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
+  }
+
+  const ktFiles = files.filter(f => f.language === 'Kotlin' && JAVA_TYPE_EVENT_PREFILTER.test(f.content));
+  if (ktFiles.length > 0) {
+    const { parser } = await getKotlinParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of ktFiles) {
+      try { collectKotlinTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
+  }
+
+  const swiftFiles = files.filter(f => f.language === 'Swift' && SWIFT_EVENT_PREFILTER.test(f.content));
+  if (swiftFiles.length > 0) {
+    const { parser } = await getSwiftParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of swiftFiles) {
+      try { collectSwiftEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
   }
 
   return edges;

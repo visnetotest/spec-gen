@@ -163,7 +163,7 @@ export async function deadCodeIds(absDir: string, cg: SerializedCallGraph): Prom
   const importedNames = dep?.names ?? null;
   const { forward } = buildAdjacency(cg);
   const handlerRootIds = externallyInvokedHandlerIds(cg);
-  const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'default';
+  const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'Main' || n.name === 'default';
   const isRoot = (n: FunctionNode): boolean =>
     !!n.isTest || handlerRootIds.has(n.id) || isMainLike(n) ||
     (importedNames !== null && importedNames.has(n.name));
@@ -203,7 +203,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   // handlers · synthesized route handlers (framework-invoked entry points; omitted
   // in strict mode) · main-like entry functions.
   const httpHandlerIds = externallyInvokedHandlerIds(cg, !input.directResolvedOnly);
-  const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'default';
+  const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'Main' || n.name === 'default';
   const isRoot = (n: FunctionNode): boolean =>
     !!n.isTest ||
     httpHandlerIds.has(n.id) ||
