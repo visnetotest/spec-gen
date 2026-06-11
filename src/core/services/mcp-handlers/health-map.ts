@@ -18,8 +18,8 @@ export interface GetHealthMapInput {
 type BridgeEntry = { id: string; name: string; file: string; fanIn: number; fanOut: number; betweenness: number };
 type UntestedEntry = { id: string; name: string; file: string; degree: number };
 
-function computeBridgeNodes(nodes: FunctionNode[], edges: CallEdge[], topN: number): BridgeEntry[] {
-  if (nodes.length === 0) return [];
+function computeBridgeNodes(nodes: FunctionNode[], edges: CallEdge[], topN: number): { entries: BridgeEntry[]; sourcesUsed: number } {
+  if (nodes.length === 0) return { entries: [], sourcesUsed: 0 };
   const nodeIds = nodes.map(n => n.id);
   const idxMap = new Map<string, number>(nodeIds.map((id, i) => [id, i]));
   const adj: number[][] = nodeIds.map(() => []);
@@ -57,7 +57,8 @@ function computeBridgeNodes(nodes: FunctionNode[], edges: CallEdge[], topN: numb
   }
   let maxB = 1;
   for (let i = 0; i < n; i++) if (betweenness[i] > maxB) maxB = betweenness[i];
-  return nodes
+  const sourcesUsed = Math.ceil(n / step);
+  const entries = nodes
     .map((node, i) => ({ node, b: betweenness[i] / maxB }))
     .filter(x => x.b > 0)
     .sort((a, b) => b.b - a.b)
@@ -70,12 +71,16 @@ function computeBridgeNodes(nodes: FunctionNode[], edges: CallEdge[], topN: numb
       fanOut: node.fanOut ?? 0,
       betweenness: Math.round(b * 1000) / 1000,
     }));
+  return { entries, sourcesUsed };
 }
 
 function computeUntestedHotspots(nodes: FunctionNode[], edges: CallEdge[], topN: number): UntestedEntry[] {
   const testNodeIds = new Set(nodes.filter(n => n.isTest).map(n => n.id));
   const testedIds = new Set<string>();
+  // Direct: testNode → X
   for (const e of edges) { if (testNodeIds.has(e.callerId)) testedIds.add(e.calleeId); }
+  // 1-hop transitive: testNode → Y → X
+  for (const e of edges) { if (testedIds.has(e.callerId)) testedIds.add(e.calleeId); }
   return nodes
     .filter(n => !n.isTest && !n.isExternal && !testedIds.has(n.id))
     .map(n => ({ id: n.id, name: n.name, file: n.filePath, degree: (n.fanIn ?? 0) + (n.fanOut ?? 0) }))
@@ -127,7 +132,7 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
   const volatileFileSet = new Set(allVolatileFiles.map(v => v.file));
 
   // --- Bridge nodes (sampled betweenness centrality on the call graph) ---
-  const bridgeNodes = computeBridgeNodes(codeNodes, cg.edges, limit);
+  const { entries: bridgeNodes, sourcesUsed: betweennessSourceCount } = computeBridgeNodes(codeNodes, cg.edges, limit);
   const bridgeNodeIds = new Set(bridgeNodes.map(b => b.id));
   const bridgeCount = bridgeNodes.filter(b => b.betweenness >= BRIDGE_MIN_BETWEENNESS).length;
   const bridgeMap = new Map(bridgeNodes.map(b => [b.id, b]));
@@ -185,6 +190,8 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
       volatileFileCount: allVolatileFiles.length,
       bridgeCount,
       untestedHotspotCount: untestedHotspots.length,
+      betweennessApprox: codeNodes.length > MAX_BETWEENNESS_SOURCES,
+      betweennessSourceCount,
     },
     topRisks,
     hotspots: {
