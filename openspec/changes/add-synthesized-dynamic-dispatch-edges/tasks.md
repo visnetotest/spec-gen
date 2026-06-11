@@ -60,8 +60,14 @@ step 1 (it extends a core data structure — `EdgeConfidence` / `CallEdge`).
 > pair only WITHIN their own language (no cross-language pairing), and adding a language cannot change
 > another language's edges. In effect: **JavaScript/TypeScript** and **Python** (pyee `on`/`emit`,
 > pub/sub `subscribe`/`publish`; handler may be a function ref, `self.method` attribute, or inline
-> `lambda`; string + `Const.MEMBER` keys; f-strings ignored). Next languages (Ruby, Go, …) drop in as
-> additional collectors.
+> `lambda`; string + `Const.MEMBER` keys; f-strings ignored). Next languages drop in as additional
+> collectors.
+>
+> Languages with a collector: **JS/TS**, **Python**, **Ruby** (symbol `:evt` + string keys; block,
+> `&proc`, and bareword-call handlers; pyee-style `on`/`emit` and ActiveSupport::Notifications
+> `subscribe`/`instrument`). Symbol keys and string keys are namespaced so `:mount` never pairs with
+> `'mount'`. Languages whose event systems are type-/annotation-/channel-based (Go, Java, C#, Rust,
+> Kotlin, …) intentionally have NO collector — the pass emits nothing for them rather than guess.
 
 ## 1. Provenance on the edge model
 - [ ] Add `'synthesized'` to `EdgeConfidence` (`call-graph.ts:30`) and `synthesizedBy?: string` to

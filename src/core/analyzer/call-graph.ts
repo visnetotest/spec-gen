@@ -2723,8 +2723,11 @@ const EVENT_REGISTER_METHODS = new Set([
 /** JS/TS methods that dispatch on a channel key: `x.emit('k')` / `x.dispatchEvent(new Event('k'))`. */
 const EVENT_DISPATCH_METHODS = new Set(['emit', 'dispatch', 'publish', 'dispatchEvent']);
 
+/** Ruby adds instrumentation/broadcast dispatch verbs (ActiveSupport::Notifications, pub/sub). */
+const RUBY_DISPATCH_METHODS = new Set([...EVENT_DISPATCH_METHODS, 'instrument', 'broadcast']);
+
 /** Single regex pre-filter so we only parse files that could contain a pattern. */
-const EVENT_PREFILTER = /\b(on|once|addListener|prependListener|prependOnceListener|addEventListener|subscribe|emit|dispatch|publish|dispatchEvent)\s*\(/;
+const EVENT_PREFILTER = /\b(on|once|addListener|prependListener|prependOnceListener|addEventListener|subscribe|emit|dispatch|publish|dispatchEvent|instrument|broadcast)\s*\(/;
 
 /** Resolve a referenced simple name to a single internal function node, or undefined
  *  when unknown or ambiguous (never guesses). Prefers a match in `preferFile`. */
@@ -2991,6 +2994,75 @@ function collectPyEventSites(
   }
 }
 
+/** Static channel key for a Ruby argument: a symbol (`:mount`) or a string literal. */
+function rubyChannelKey(node: Parser.SyntaxNode | undefined): string | undefined {
+  if (!node) return undefined;
+  if (node.type === 'simple_symbol') return `sym:${node.text.replace(/^:/, '')}`;
+  if (node.type === 'string') {
+    if (node.descendantsOfType('interpolation').length > 0) return undefined;
+    const m = node.text.match(/^('|")([\s\S]*)\1$/);
+    return m ? `str:${m[2]}` : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve a Ruby handler to internal node-ids. Ruby handlers are usually a block
+ * (`on(:x) { … }` / `subscribe('x') { … }`) — wired to the internal functions the
+ * block calls, including paren-less bareword calls; the conservative resolver drops
+ * block params and locals. Also handles a block-pass `&handler` / trailing proc arg.
+ */
+function rubyHandlerTargets(call: Parser.SyntaxNode, file: string, resolveHandler: HandlerResolver): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (name: string | undefined): void => {
+    if (!name) return;
+    const n = resolveHandler(name, file);
+    if (n && !seen.has(n.id)) { seen.add(n.id); out.push(n.id); }
+  };
+  const block = call.childForFieldName('block');
+  if (block) {
+    for (const inner of block.descendantsOfType('call')) add(inner.childForFieldName('method')?.text);
+    // Paren-less bareword calls appear as bare identifiers; resolver gates to real fns.
+    for (const id of block.descendantsOfType('identifier')) add(id.text);
+  }
+  const args = call.childForFieldName('arguments')?.namedChildren ?? [];
+  for (const a of args.slice(1)) {
+    if (a.type === 'block_argument' || a.type === 'block_pass') {
+      const ref = a.namedChildren.find(c => c.type === 'identifier' || c.type === 'simple_symbol');
+      if (ref) add(ref.type === 'simple_symbol' ? ref.text.replace(/^:/, '') : ref.text);
+    } else if (a.type === 'identifier') {
+      add(a.text);
+    }
+  }
+  return out;
+}
+
+/** Collect Ruby event-channel sites (symbol/string-keyed on/emit, ActiveSupport::Notifications). */
+function collectRubyEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], filePath: string,
+  resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  for (const call of tree.rootNode.descendantsOfType('call')) {
+    const method = call.childForFieldName('method')?.text;
+    if (!method) continue;
+    const args = call.childForFieldName('arguments')?.namedChildren ?? [];
+    if (EVENT_REGISTER_METHODS.has(method)) {
+      const key = rubyChannelKey(args[0]);
+      if (key !== undefined) {
+        const handlerIds = rubyHandlerTargets(call, filePath, resolveHandler);
+        if (handlerIds.length) sites.registrations.push({ key, handlerIds });
+      }
+    } else if (RUBY_DISPATCH_METHODS.has(method)) {
+      const key = rubyChannelKey(args[0]);
+      if (key !== undefined) {
+        const caller = findEnclosingFunction(fileNodes, call.startIndex);
+        if (caller) sites.dispatches.push({ key, callerId: caller.id, line: call.startPosition.row + 1 });
+      }
+    }
+  }
+}
+
 /**
  * Event-channel rule: pair handler registrations (`on`/`once`/`addEventListener`/
  * `subscribe`/… with a static key) against dispatch sites (`emit`/`dispatch`/
@@ -3003,7 +3075,9 @@ function collectPyEventSites(
  * Recovery is PER-LANGUAGE and added one language at a time: each language has its
  * own collector (its AST node types), but pairing/fan-out/provenance are shared, and
  * sites are paired only within their own language (no cross-language pairing). In
- * effect: JavaScript/TypeScript and Python.
+ * effect: JavaScript/TypeScript, Python, and Ruby. Languages whose event systems are
+ * type-/annotation-/channel-based (Go, Java, C#, Rust, …) have no collector — the
+ * pass emits nothing for them rather than guess.
  */
 async function synthesizeEventChannelEdges(
   files: Array<{ path: string; content: string; language: string }>,
@@ -3036,6 +3110,17 @@ async function synthesizeEventChannelEdges(
     const sites: EventSites = { registrations: [], dispatches: [] };
     for (const file of pyFiles) {
       try { collectPyEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes));
+  }
+
+  const rubyFiles = files.filter(f => f.language === 'Ruby' && EVENT_PREFILTER.test(f.content));
+  if (rubyFiles.length > 0) {
+    const { parser } = await getRubyParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of rubyFiles) {
+      try { collectRubyEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
       catch { /* skip unparseable file */ }
     }
     edges.push(...pairAndEmitEventEdges(sites, allNodes));

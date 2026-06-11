@@ -341,6 +341,75 @@ describe('event-channel synthesis — Python', () => {
   });
 });
 
+describe('event-channel synthesis — Ruby', () => {
+  const buildRb = (content: string): Promise<Built> =>
+    new CallGraphBuilder().build([{ path: 'app.rb', content, language: 'Ruby' }]);
+
+  it('Ruby symbol-keyed on/emit with a block handler is reachable', async () => {
+    const b = await buildRb([
+      'def handler',
+      '  do_work',
+      'end',
+      'def register(e)',
+      '  e.on(:mount) { handler }',
+      'end',
+      'def trigger(e)',
+      '  e.emit(:mount)',
+      'end',
+    ].join('\n'));
+    const edge = edgeBetween(b, 'trigger', 'handler');
+    expect(edge?.confidence).toBe('synthesized');
+    expect(edge?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('Ruby mismatched symbol keys produce no edge', async () => {
+    const b = await buildRb([
+      'def handler',
+      '  do_work',
+      'end',
+      'def register(e)',
+      '  e.on(:open) { handler }',
+      'end',
+      'def trigger(e)',
+      '  e.emit(:close)',
+      'end',
+    ].join('\n'));
+    expect(edgeBetween(b, 'trigger', 'handler')).toBeUndefined();
+    expect(synthEdges(b)).toHaveLength(0);
+  });
+
+  it('Ruby ActiveSupport::Notifications subscribe/instrument (string key, block handler)', async () => {
+    const b = await buildRb([
+      'def handle_created',
+      '  do_work',
+      'end',
+      'def register',
+      "  ActiveSupport::Notifications.subscribe('user.created') { handle_created }",
+      'end',
+      'def trigger',
+      "  ActiveSupport::Notifications.instrument('user.created') { save }",
+      'end',
+    ].join('\n'));
+    expect(edgeBetween(b, 'trigger', 'handle_created')?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('Ruby symbol key does not pair with a same-text string key', async () => {
+    const b = await buildRb([
+      'def handler',
+      '  do_work',
+      'end',
+      'def register(e)',
+      '  e.on(:mount) { handler }',
+      'end',
+      'def trigger(e)',
+      "  e.emit('mount')",
+      'end',
+    ].join('\n'));
+    // :mount (sym:) must not pair with 'mount' (str:).
+    expect(edgeBetween(b, 'trigger', 'handler')).toBeUndefined();
+  });
+});
+
 describe('event-channel synthesis — per-language isolation', () => {
   it('does not pair a Python registration with a JS/TS dispatch on the same key', async () => {
     const b = await new CallGraphBuilder().build([
