@@ -135,9 +135,11 @@ that handler, labeled `synthesizedBy: 'callback-registration'`. Only curated reg
 so a function passed to an unrelated call is never treated as a callback; and inline function/closure
 arguments SHALL NOT be matched here (their bodies are already attributed to the enclosing function by
 direct resolution, so an edge would be redundant). Recovery is per-language; in effect it covers
-**Go** (`net/http` `HandleFunc`/`Handle` and router verbs `GET`/`POST`/… of gin/echo/chi) and
+**Go** (`net/http` `HandleFunc`/`Handle` and router verbs `GET`/`POST`/… of gin/echo/chi),
 **JavaScript/TypeScript** (scheduler registrars `setTimeout`/`setInterval`/`setImmediate`/
-`queueMicrotask`/`requestAnimationFrame`/`requestIdleCallback`/`nextTick`).
+`queueMicrotask`/`requestAnimationFrame`/`requestIdleCallback`/`nextTick`), and **C++** (Qt
+`connect(sender, &S::sig, receiver, &R::slot)` — the slot member function is wired; the signal, a Qt
+declaration with no body, does not resolve and is left alone).
 
 #### Scenario: Go HTTP handler registered by name is reachable
 
@@ -153,6 +155,15 @@ direct resolution, so an edge would be redundant). Recovery is per-language; in 
   direct call to `tick`
 - **WHEN** the call graph is built
 - **THEN** a synthesized `callback-registration` edge exists from the enclosing function to `tick`
+
+#### Scenario: C++ Qt slot is reachable from connect
+
+- **GIVEN** `connect(button, &QPushButton::clicked, this, &MyWidget::onClicked)` where `onClicked` is a
+  member function, with no direct call to `onClicked`
+- **WHEN** the call graph is built
+- **THEN** a synthesized `callback-registration` edge exists from the `connect` site's enclosing
+  function to `onClicked` (and the external Qt signal `clicked`, having no internal definition, is
+  not wired)
 
 #### Scenario: A function passed to a non-registrar is not treated as a callback
 

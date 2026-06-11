@@ -3635,6 +3635,9 @@ const GO_CALLBACK_REGISTRARS = new Set(['HandleFunc', 'Handle', 'GET', 'POST', '
 const TS_CALLBACK_REGISTRARS = new Set(['setTimeout', 'setInterval', 'setImmediate', 'queueMicrotask', 'requestAnimationFrame', 'requestIdleCallback', 'nextTick']);
 const GO_CALLBACK_PREFILTER = /\b(?:HandleFunc|Handle|GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|Any|Use)\s*\(/;
 const TS_CALLBACK_PREFILTER = /\b(?:setTimeout|setInterval|setImmediate|queueMicrotask|requestAnimationFrame|requestIdleCallback|nextTick)\s*\(/;
+/** C++ Qt signal/slot registrar. */
+const CPP_CALLBACK_REGISTRARS = new Set(['connect']);
+const CPP_CALLBACK_PREFILTER = /\bconnect\s*\(/;
 
 /** Append a callback-registration edge (deduped on caller→callee). */
 function pushCallbackEdge(out: CallEdge[], seen: Set<string>, callerId: string, handler: FunctionNode, line: number): void {
@@ -3678,7 +3681,30 @@ function collectTsCallbackEdges(tree: Parser.Tree, fileNodes: FunctionNode[], fi
   }
 }
 
-/** Callback-registration rule across languages (Go HTTP handlers, JS/TS schedulers). */
+/** Collect C++ Qt signal/slot registrations: `connect(sender, &S::sig, recv, &R::slot)`. The slot's
+ *  member function resolves to an internal node; the signal (a Qt declaration) does not, so only the
+ *  slot is wired. Both the `connect(...)` and `QObject::connect(...)` forms are matched. */
+function collectCppCallbackEdges(tree: Parser.Tree, fileNodes: FunctionNode[], file: string, resolveHandler: HandlerResolver, out: CallEdge[], seen: Set<string>): void {
+  for (const call of tree.rootNode.descendantsOfType('call_expression')) {
+    const fn = call.childForFieldName('function');
+    const name = fn?.type === 'identifier' ? fn.text : (fn?.type === 'qualified_identifier' ? fn.text.split('::').pop() : undefined);
+    if (!name || !CPP_CALLBACK_REGISTRARS.has(name)) continue;
+    const caller = findEnclosingFunction(fileNodes, call.startIndex);
+    if (!caller) continue;
+    for (const arg of call.childForFieldName('arguments')?.namedChildren ?? []) {
+      // A pointer-to-member `&Class::method` (slot/signal); take the member name.
+      const qual = arg.type === 'pointer_expression' ? arg.namedChildren.find(c => c.type === 'qualified_identifier') : undefined;
+      if (!qual) continue;
+      const ids = qual.descendantsOfType('identifier');
+      const mname = ids[ids.length - 1]?.text;
+      if (!mname) continue;
+      const h = resolveHandler(mname, file);
+      if (h) pushCallbackEdge(out, seen, caller.id, h, call.startPosition.row + 1);
+    }
+  }
+}
+
+/** Callback-registration rule across languages (Go HTTP handlers, JS/TS schedulers, C++ Qt slots). */
 async function synthesizeCallbackRegistrationEdges(
   files: Array<{ path: string; content: string; language: string }>,
   allNodes: Map<string, FunctionNode>,
@@ -3706,6 +3732,15 @@ async function synthesizeCallbackRegistrationEdges(
     const { parser } = await getGoParser();
     for (const file of goFiles) {
       try { collectGoCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
+      catch { /* skip */ }
+    }
+  }
+
+  const cppFiles = files.filter(f => f.language === 'C++' && CPP_CALLBACK_PREFILTER.test(f.content));
+  if (cppFiles.length > 0) {
+    const { parser } = await getCppParser();
+    for (const file of cppFiles) {
+      try { collectCppCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
       catch { /* skip */ }
     }
   }

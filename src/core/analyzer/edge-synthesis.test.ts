@@ -703,6 +703,33 @@ describe('callback-registration synthesis', () => {
     // No callback-registration edge from the inline arrow (the arrow body call is a direct edge).
     expect(synthEdges(b).filter(e => e.synthesizedBy === 'callback-registration')).toHaveLength(0);
   });
+
+  it('C++: Qt connect wires the slot member function (not the signal)', async () => {
+    const b = await new CallGraphBuilder().build([{ path: 'w.cpp', language: 'C++', content: [
+      'class MyWidget {',
+      '  void onClicked() { doWork(); }',
+      '  void setup(QPushButton* button) {',
+      '    connect(button, &QPushButton::clicked, this, &MyWidget::onClicked);',
+      '  }',
+      '};',
+    ].join('\n') }]);
+    const edge = edgeBetween(b, 'setup', 'onClicked');
+    expect(edge?.synthesizedBy).toBe('callback-registration');
+    // The Qt signal `clicked` is external (no body) → not wired as a handler.
+    expect(edgeBetween(b, 'setup', 'clicked')).toBeUndefined();
+  });
+
+  it('C++: QObject::connect form is also recognized', async () => {
+    const b = await new CallGraphBuilder().build([{ path: 'w.cpp', language: 'C++', content: [
+      'class MyWidget {',
+      '  void onPressed() { handle(); }',
+      '  void setup(QPushButton* button) {',
+      '    QObject::connect(button, &QPushButton::pressed, this, &MyWidget::onPressed);',
+      '  }',
+      '};',
+    ].join('\n') }]);
+    expect(edgeBetween(b, 'setup', 'onPressed')?.synthesizedBy).toBe('callback-registration');
+  });
 });
 
 describe('actor-message synthesis — Elixir GenServer', () => {
