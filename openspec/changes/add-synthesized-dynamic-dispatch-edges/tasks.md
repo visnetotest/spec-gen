@@ -96,6 +96,20 @@ step 1 (it extends a core data structure — `EdgeConfidence` / `CallEdge`).
 > match (a function passed to an unrelated call is never a callback); inline closures are skipped
 > (direct resolution already attributes their bodies). This is what makes Go HTTP handlers — which
 > route detection does not cover for Go — reachable instead of false-dead.
+>
+> **Actor-message rule (spec: `ActorMessageSynthesis`; `synthesizedBy: 'actor-message'`).** The one
+> actor/channel model statically pairable to a NAMED handler: **Elixir GenServer** — a dispatch
+> (`GenServer.cast`/`call`, or `send` → `handle_info`) carrying a message whose tag is a leading atom
+> (incl. the tag of a `{:tag, …}` tuple) pairs with the matching `handle_cast`/`handle_call`/
+> `handle_info` clause. Keyed `{kind}:{tag}` so `cast` never pairs with a `handle_call` of the same
+> tag; non-static tags emit nothing. **Go channels and Akka/Scala `receive` blocks expose no named
+> handler to pair, so they get no collector by design** — the honest boundary of "actor/channel
+> models" under the no-guessing discipline.
+>
+> **Five rules total:** `event-channel`, `type-event`, `route-handler`, `callback-registration`,
+> `actor-message` — each labeled distinctly via `synthesizedBy`, sharing the pairing/fan-out/
+> provenance core and the `directResolvedOnly` strict-mode opt-out, all isolated from the
+> directly-resolved graph's structural metrics.
 
 ## 1. Provenance on the edge model
 - [ ] Add `'synthesized'` to `EdgeConfidence` (`call-graph.ts:30`) and `synthesizedBy?: string` to

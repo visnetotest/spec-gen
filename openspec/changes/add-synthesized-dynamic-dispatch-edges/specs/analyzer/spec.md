@@ -160,6 +160,31 @@ direct resolution, so an edge would be redundant). Recovery is per-language; in 
 - **WHEN** the call graph is built
 - **THEN** no `callback-registration` edge is synthesized for it
 
+### Requirement: ActorMessageSynthesis
+
+The system SHALL recover edges for the actor/message-passing model where it is statically pairable to
+a named handler: a message dispatch and a message handler keyed on the message tag. In Elixir, a
+GenServer dispatch (`GenServer.cast`/`GenServer.call`, or `send` for `handle_info`) carrying a message
+whose tag is a leading atom (including the tag of a `{:tag, …}` tuple) SHALL pair with the matching
+`handle_cast`/`handle_call`/`handle_info` clause, emitting an edge from the dispatch site's enclosing
+function to that clause, labeled `synthesizedBy: 'actor-message'`. The key SHALL be namespaced by
+handler kind so a `cast` never pairs with a `handle_call` of the same tag. A dispatch whose message
+tag is not a static atom SHALL emit no edge. Actor/channel mechanisms that expose no named handler to
+pair — Go channels, and Akka/Scala `receive` blocks — SHALL NOT synthesize edges.
+
+#### Scenario: Elixir GenServer cast reaches its handle_cast clause
+
+- **GIVEN** `def handle_cast({:add, x}, state)` and a separate `GenServer.cast(pid, {:add, 1})`
+- **WHEN** the call graph is built
+- **THEN** a synthesized `actor-message` edge exists from the cast site's enclosing function to the
+  `handle_cast` clause
+
+#### Scenario: cast does not pair with a same-tag handle_call
+
+- **GIVEN** `def handle_call(:fetch, _from, state)` and a `GenServer.cast(pid, :fetch)`
+- **WHEN** the call graph is built
+- **THEN** no synthesized edge is created between them (cast pairs only with `handle_cast`)
+
 ### Requirement: EdgeProvenanceLabeling
 
 The system SHALL label every synthesized edge with a provenance distinct from directly-resolved

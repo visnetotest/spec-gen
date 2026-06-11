@@ -432,6 +432,7 @@ let _swiftParser: Parser | undefined;
 let _phpParser: Parser | undefined;
 let _csParser: Parser | undefined;
 let _ktParser: Parser | undefined;
+let _exParser: Parser | undefined;
 let _TsLanguage: object | undefined;
 let _PyLanguage: object | undefined;
 let _GoLanguage: object | undefined;
@@ -443,6 +444,7 @@ let _SwiftLanguage: object | undefined;
 let _PhpLanguage: object | undefined;
 let _CsLanguage: object | undefined;
 let _KtLanguage: object | undefined;
+let _ExLanguage: object | undefined;
 
 async function getTSParser(): Promise<{ parser: Parser; lang: object }> {
   if (!_tsParser) {
@@ -532,6 +534,16 @@ async function getKotlinParser(): Promise<{ parser: Parser; lang: object }> {
     (_ktParser as Parser).setLanguage(_KtLanguage as unknown as Parser.Language);
   }
   return { parser: _ktParser!, lang: _KtLanguage! };
+}
+
+async function getElixirParser(): Promise<{ parser: Parser; lang: object }> {
+  if (!_exParser) {
+    const exModule = await import('tree-sitter-elixir');
+    _ExLanguage = exModule.default;
+    _exParser = new Parser();
+    (_exParser as Parser).setLanguage(_ExLanguage as unknown as Parser.Language);
+  }
+  return { parser: _exParser!, lang: _ExLanguage! };
 }
 
 async function getCppParser(): Promise<{ parser: Parser; lang: object }> {
@@ -3700,6 +3712,81 @@ async function synthesizeCallbackRegistrationEdges(
   return out;
 }
 
+// ── Actor-message rule (Elixir GenServer) ─────────────────────────────────────
+// The one actor/channel model that is statically pairable to a named handler: a
+// GenServer dispatch (`GenServer.cast`/`call`, or `send` → `handle_info`) carries a
+// message whose tag (a leading atom, incl. the tag of a `{:tag, …}` tuple) matches a
+// `handle_cast`/`handle_call`/`handle_info` clause. Keyed by `{kind}:{tag}` so a cast
+// never pairs with a `handle_call` of the same tag. Go channels and Akka `receive`
+// blocks are NOT covered — they expose no named handler to pair, so the pass emits
+// nothing for them rather than guess.
+const ELIXIR_HANDLER_PREFIX: Record<string, string> = { handle_cast: 'excast', handle_call: 'excall', handle_info: 'exinfo' };
+const ELIXIR_DISPATCH_PREFIX: Record<string, string> = { cast: 'excast', call: 'excall', send: 'exinfo' };
+const ELIXIR_ACTOR_PREFILTER = /\b(?:handle_cast|handle_call|handle_info|GenServer)\b/;
+
+/** Message tag: a leading atom (`:tag`) or the first atom of a `{:tag, …}` tuple. */
+function elixirMsgTag(node: Parser.SyntaxNode | undefined): string | undefined {
+  if (!node) return undefined;
+  if (node.type === 'atom') return node.text.replace(/^:/, '');
+  if (node.type === 'tuple') {
+    const first = node.namedChildren[0];
+    if (first?.type === 'atom') return first.text.replace(/^:/, '');
+  }
+  return undefined;
+}
+
+/** Collect Elixir GenServer cast/call/send ↔ handle_cast/handle_call/handle_info sites. */
+function collectElixirActorSites(tree: Parser.Tree, fileNodes: FunctionNode[], _file: string, _resolveHandler: HandlerResolver, sites: EventSites): void {
+  const argsOf = (n: Parser.SyntaxNode) => n.namedChildren.find(c => c.type === 'arguments')?.namedChildren ?? [];
+  for (const call of tree.rootNode.descendantsOfType('call')) {
+    const callee = call.namedChildren[0];
+    if (!callee) continue;
+    // Registration: `def handle_cast(<msg>, …)` (or defp).
+    if (callee.type === 'identifier' && (callee.text === 'def' || callee.text === 'defp')) {
+      const target = argsOf(call)[0];
+      if (target?.type !== 'call') continue;
+      const hname = target.namedChildren[0]?.type === 'identifier' ? target.namedChildren[0].text : undefined;
+      const prefix = hname ? ELIXIR_HANDLER_PREFIX[hname] : undefined;
+      if (!prefix) continue;
+      const tag = elixirMsgTag(argsOf(target)[0]);
+      if (!tag) continue;
+      const handler = findEnclosingFunction(fileNodes, target.startIndex);
+      if (handler) sites.registrations.push({ key: `${prefix}:${tag}`, handlerIds: [handler.id] });
+      continue;
+    }
+    // Dispatch: `GenServer.cast(pid, <msg>)` / `call` / `send(pid, <msg>)`.
+    const method = callee.type === 'dot' ? callee.text.split('.').pop() : (callee.type === 'identifier' ? callee.text : undefined);
+    const prefix = method ? ELIXIR_DISPATCH_PREFIX[method] : undefined;
+    if (!prefix) continue;
+    const tag = elixirMsgTag(argsOf(call)[1]);
+    if (!tag) continue;
+    const caller = findEnclosingFunction(fileNodes, call.startIndex);
+    if (caller) sites.dispatches.push({ key: `${prefix}:${tag}`, callerId: caller.id, line: call.startPosition.row + 1 });
+  }
+}
+
+/** Actor-message rule across languages (Elixir GenServer). */
+async function synthesizeActorMessageEdges(
+  files: Array<{ path: string; content: string; language: string }>,
+  allNodes: Map<string, FunctionNode>,
+  resolveHandler: HandlerResolver,
+): Promise<CallEdge[]> {
+  const exFiles = files.filter(f => f.language === 'Elixir' && ELIXIR_ACTOR_PREFILTER.test(f.content));
+  if (exFiles.length === 0) return [];
+  const nodesByFile = new Map<string, FunctionNode[]>();
+  for (const n of allNodes.values()) {
+    if (n.isExternal) continue;
+    (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
+  }
+  const { parser } = await getElixirParser();
+  const sites: EventSites = { registrations: [], dispatches: [] };
+  for (const file of exFiles) {
+    try { collectElixirActorSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+    catch { /* skip */ }
+  }
+  return pairAndEmitEventEdges(sites, allNodes, 'actor-message');
+}
+
 export async function synthesizeDynamicDispatchEdges(
   files: Array<{ path: string; content: string; language: string }>,
   allNodes: Map<string, FunctionNode>,
@@ -3709,6 +3796,7 @@ export async function synthesizeDynamicDispatchEdges(
     synthesizeEventChannelEdges(files, allNodes, resolveHandler).catch(() => []),
     synthesizeRouteHandlerEdges(files, allNodes, resolveHandler).catch(() => []),
     synthesizeCallbackRegistrationEdges(files, allNodes, resolveHandler).catch(() => []),
+    synthesizeActorMessageEdges(files, allNodes, resolveHandler).catch(() => []),
   ];
   const results = await Promise.all(rules);
   return results.flat();

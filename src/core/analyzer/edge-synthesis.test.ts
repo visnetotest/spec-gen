@@ -705,6 +705,79 @@ describe('callback-registration synthesis', () => {
   });
 });
 
+describe('actor-message synthesis — Elixir GenServer', () => {
+  const buildEx = (content: string): Promise<Built> =>
+    new CallGraphBuilder().build([{ path: 'server.ex', content, language: 'Elixir' }]);
+
+  it('GenServer.cast reaches its handle_cast clause by message tag', async () => {
+    const b = await buildEx([
+      'defmodule MyServer do',
+      '  def handle_cast({:add, x}, state) do',
+      '    do_work(x)',
+      '    {:noreply, state}',
+      '  end',
+      'end',
+      'defmodule Client do',
+      '  def trigger(pid) do',
+      '    GenServer.cast(pid, {:add, 1})',
+      '  end',
+      'end',
+    ].join('\n'));
+    const edge = edgeBetween(b, 'trigger', 'handle_cast');
+    expect(edge?.confidence).toBe('synthesized');
+    expect(edge?.synthesizedBy).toBe('actor-message');
+  });
+
+  it('GenServer.call reaches its handle_call clause (atom message)', async () => {
+    const b = await buildEx([
+      'defmodule MyServer do',
+      '  def handle_call(:fetch, _from, state) do',
+      '    {:reply, state, state}',
+      '  end',
+      'end',
+      'defmodule Client do',
+      '  def trigger(pid) do',
+      '    GenServer.call(pid, :fetch)',
+      '  end',
+      'end',
+    ].join('\n'));
+    expect(edgeBetween(b, 'trigger', 'handle_call')?.synthesizedBy).toBe('actor-message');
+  });
+
+  it('cast does NOT pair with a same-tag handle_call', async () => {
+    const b = await buildEx([
+      'defmodule MyServer do',
+      '  def handle_call(:fetch, _from, state) do',
+      '    {:reply, state, state}',
+      '  end',
+      'end',
+      'defmodule Client do',
+      '  def trigger(pid) do',
+      '    GenServer.cast(pid, :fetch)',
+      '  end',
+      'end',
+    ].join('\n'));
+    expect(edgeBetween(b, 'trigger', 'handle_call')).toBeUndefined();
+    expect(synthEdges(b)).toHaveLength(0);
+  });
+
+  it('mismatched message tags produce no edge', async () => {
+    const b = await buildEx([
+      'defmodule MyServer do',
+      '  def handle_cast({:add, x}, state) do',
+      '    {:noreply, state}',
+      '  end',
+      'end',
+      'defmodule Client do',
+      '  def trigger(pid) do',
+      '    GenServer.cast(pid, {:remove, 1})',
+      '  end',
+      'end',
+    ].join('\n'));
+    expect(synthEdges(b)).toHaveLength(0);
+  });
+});
+
 describe('event-channel synthesis — per-language isolation', () => {
   it('does not pair a Python registration with a JS/TS dispatch on the same key', async () => {
     const b = await new CallGraphBuilder().build([
