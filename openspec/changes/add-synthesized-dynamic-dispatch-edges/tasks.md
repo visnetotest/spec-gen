@@ -36,6 +36,15 @@ step 1 (it extends a core data structure — `EdgeConfidence` / `CallEdge`).
 > - `directResolvedOnly` strict mode extended to `trace_execution_path` (now all six traversal tools);
 > - synthesized edges carry the dispatch-site `line` for provenance.
 > Verified end-to-end through the compiled CLI on a really-analyzed repo.
+>
+> **Structural-metric isolation (integration pass, same PR):** synthesis augments *reachability*
+> only — it must not perturb the directly-resolved graph's *structural* metrics, or one heuristic
+> edge could manufacture false hubs/bridges/surprises. So: `fanIn`/`fanOut` (and the hub/god/
+> entry-point classification + dashboards built on them) now EXCLUDE synthesized edges; the
+> betweenness/bridge and untested-hotspot signals and the surprising-connections scorer compute on
+> directly-resolved edges. Reachability, impact, dead-code, and the path tools still traverse the
+> full edge list (synthesized included) by default, with `directResolvedOnly` to opt out. New
+> invariant test: synthesized edges leave `fanIn`/`fanOut` unchanged.
 
 ## 1. Provenance on the edge model
 - [ ] Add `'synthesized'` to `EdgeConfidence` (`call-graph.ts:30`) and `synthesizedBy?: string` to
