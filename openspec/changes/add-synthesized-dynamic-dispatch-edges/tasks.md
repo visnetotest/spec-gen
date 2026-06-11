@@ -53,6 +53,15 @@ step 1 (it extends a core data structure — `EdgeConfidence` / `CallEdge`).
 > - event-channel keys now also pair on a **constant member reference** (`EVENTS.MOUNT`) and a
 >   **substitution-free template literal** (`` `mount` ``), namespaced (`str:` vs `const:`) so a
 >   string key never pairs with a same-text constant; a computed/dynamic key still emits nothing.
+>
+> **Multi-language event channels (spec: `MultiLanguageEventChannelSynthesis`; added one language at
+> a time, same PR):** the event-channel rule is now language-pluggable — a shared, language-agnostic
+> pairing/fan-out/provenance core plus a per-language site collector (its own AST node types). Sites
+> pair only WITHIN their own language (no cross-language pairing), and adding a language cannot change
+> another language's edges. In effect: **JavaScript/TypeScript** and **Python** (pyee `on`/`emit`,
+> pub/sub `subscribe`/`publish`; handler may be a function ref, `self.method` attribute, or inline
+> `lambda`; string + `Const.MEMBER` keys; f-strings ignored). Next languages (Ruby, Go, …) drop in as
+> additional collectors.
 
 ## 1. Provenance on the edge model
 - [ ] Add `'synthesized'` to `EdgeConfidence` (`call-graph.ts:30`) and `synthesizedBy?: string` to

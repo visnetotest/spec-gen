@@ -2839,67 +2839,23 @@ function resolveHandlerTargets(
   return [];
 }
 
+// Shared registration/dispatch site shapes produced by each language's collector.
+interface EventRegistration { key: string; handlerIds: string[] }
+interface EventDispatch { key: string; callerId: string; line: number }
+interface EventSites { registrations: EventRegistration[]; dispatches: EventDispatch[] }
+
 /**
- * Event-channel rule: pair handler registrations (`on`/`once`/`addEventListener`/
- * `subscribe`/… with a static-literal key) against dispatch sites (`emit`/`dispatch`/
- * `publish`/`dispatchEvent` on the same key), emitting an edge from each dispatch
- * site's enclosing function to each registered handler. Handler shapes covered:
- * bare/`this.`/`obj.` references, `.bind()`, and inline arrow/function bodies (wired
- * to the internal functions they call). Cross-file by key. Per-channel fan-out is
- * capped; over-cap channels are dropped. JS/TS only (both sites statically visible).
+ * Pair an EventSites set (from ONE language) into synthesized edges: group handlers
+ * by channel key, drop over-cap channels, and emit a dispatcher→handler edge per
+ * pair. Language-agnostic — only the collection of sites is language-specific, so
+ * pairing/fan-out/provenance stay identical across languages and adding a language
+ * cannot change another's edges.
  */
-async function synthesizeEventChannelEdges(
-  files: Array<{ path: string; content: string; language: string }>,
-  allNodes: Map<string, FunctionNode>,
-  resolveHandler: HandlerResolver,
-): Promise<CallEdge[]> {
-  interface Reg { key: string; handlerIds: string[] }
-  interface Disp { key: string; callerId: string; line: number }
-  const registrations: Reg[] = [];
-  const dispatches: Disp[] = [];
+function pairAndEmitEventEdges(sites: EventSites, allNodes: Map<string, FunctionNode>): CallEdge[] {
+  if (sites.dispatches.length === 0) return [];
 
-  const tsFiles = files.filter(f =>
-    (f.language === 'TypeScript' || f.language === 'JavaScript') && EVENT_PREFILTER.test(f.content),
-  );
-  if (tsFiles.length === 0) return [];
-
-  const { parser } = await getTSParser();
-  const nodesByFile = new Map<string, FunctionNode[]>();
-  for (const n of allNodes.values()) {
-    if (n.isExternal) continue;
-    (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
-  }
-
-  for (const file of tsFiles) {
-    let tree: Parser.Tree;
-    try { tree = (parser as Parser).parse(file.content); } catch { continue; }
-    const fileNodes = nodesByFile.get(file.path) ?? [];
-    for (const call of tree.rootNode.descendantsOfType('call_expression')) {
-      const method = calleeMethodName(call.childForFieldName('function'));
-      if (!method) continue;
-      const argsNode = call.childForFieldName('arguments');
-      if (!argsNode) continue;
-      const args = argsNode.namedChildren;
-      if (EVENT_REGISTER_METHODS.has(method)) {
-        const key = staticChannelKey(args[0]);
-        if (key !== undefined) {
-          const handlerIds = resolveHandlerTargets(args[1], file.path, resolveHandler);
-          if (handlerIds.length) registrations.push({ key, handlerIds });
-        }
-      } else if (EVENT_DISPATCH_METHODS.has(method)) {
-        const key = dispatchChannelKey(method, args);
-        if (key !== undefined) {
-          const caller = findEnclosingFunction(fileNodes, call.startIndex);
-          if (caller) dispatches.push({ key, callerId: caller.id, line: call.startPosition.row + 1 });
-        }
-      }
-    }
-  }
-  if (dispatches.length === 0) return [];
-
-  // Group resolved handler node-ids by channel key.
   const handlersByKey = new Map<string, Set<string>>();
-  for (const reg of registrations) {
+  for (const reg of sites.registrations) {
     let set = handlersByKey.get(reg.key);
     if (!set) handlersByKey.set(reg.key, (set = new Set()));
     for (const id of reg.handlerIds) set.add(id);
@@ -2917,7 +2873,7 @@ async function synthesizeEventChannelEdges(
 
   const edges: CallEdge[] = [];
   const seen = new Set<string>();
-  for (const disp of dispatches) {
+  for (const disp of sites.dispatches) {
     const handlers = handlersByKey.get(disp.key);
     if (!handlers) continue;
     for (const handlerId of handlers) {
@@ -2937,6 +2893,154 @@ async function synthesizeEventChannelEdges(
       });
     }
   }
+  return edges;
+}
+
+/** Collect JS/TS event-channel sites from one parsed file into `sites`. */
+function collectTsEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], filePath: string,
+  resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  for (const call of tree.rootNode.descendantsOfType('call_expression')) {
+    const method = calleeMethodName(call.childForFieldName('function'));
+    if (!method) continue;
+    const argsNode = call.childForFieldName('arguments');
+    if (!argsNode) continue;
+    const args = argsNode.namedChildren;
+    if (EVENT_REGISTER_METHODS.has(method)) {
+      const key = staticChannelKey(args[0]);
+      if (key !== undefined) {
+        const handlerIds = resolveHandlerTargets(args[1], filePath, resolveHandler);
+        if (handlerIds.length) sites.registrations.push({ key, handlerIds });
+      }
+    } else if (EVENT_DISPATCH_METHODS.has(method)) {
+      const key = dispatchChannelKey(method, args);
+      if (key !== undefined) {
+        const caller = findEnclosingFunction(fileNodes, call.startIndex);
+        if (caller) sites.dispatches.push({ key, callerId: caller.id, line: call.startPosition.row + 1 });
+      }
+    }
+  }
+}
+
+/** Method name of a Python call's callee: `x.method()` (attribute) or `method()` (identifier). */
+function pyCalleeMethodName(func: Parser.SyntaxNode | null): string | undefined {
+  if (!func) return undefined;
+  if (func.type === 'identifier') return func.text;
+  if (func.type === 'attribute') return func.childForFieldName('attribute')?.text;
+  return undefined;
+}
+
+/** Static channel key for a Python argument (string literal or `Const.MEMBER`), namespaced. */
+function pyChannelKey(node: Parser.SyntaxNode | undefined): string | undefined {
+  if (!node) return undefined;
+  if (node.type === 'string') {
+    if (node.descendantsOfType('interpolation').length > 0) return undefined; // f-string with {expr}
+    const m = node.text.match(/^[A-Za-z]*('''|"""|'|")([\s\S]*)\1$/);
+    return m ? `str:${m[2]}` : undefined;
+  }
+  if (node.type === 'attribute') {
+    const obj = node.childForFieldName('object');
+    const attr = node.childForFieldName('attribute');
+    if (obj?.type === 'identifier' && attr?.type === 'identifier') return `const:${obj.text}.${attr.text}`;
+    return undefined;
+  }
+  return undefined;
+}
+
+/** Resolve a Python handler argument to internal node-ids: `fn`, `self.fn`, or an inline `lambda`. */
+function pyHandlerTargets(arg: Parser.SyntaxNode | undefined, file: string, resolveHandler: HandlerResolver): string[] {
+  if (!arg) return [];
+  const out: string[] = [];
+  const add = (name: string | undefined): void => { if (name) { const n = resolveHandler(name, file); if (n) out.push(n.id); } };
+  if (arg.type === 'identifier') { add(arg.text); return out; }
+  if (arg.type === 'attribute') { add(arg.childForFieldName('attribute')?.text); return out; }
+  if (arg.type === 'lambda') {
+    const seen = new Set<string>();
+    for (const inner of arg.descendantsOfType('call')) {
+      const id = resolveHandler(pyCalleeMethodName(inner.childForFieldName('function')) ?? '', file)?.id;
+      if (id && !seen.has(id)) { seen.add(id); out.push(id); }
+    }
+    return out;
+  }
+  return [];
+}
+
+/** Collect Python event-channel sites (pyee-style `on`/`emit`, pub/sub `subscribe`/`publish`). */
+function collectPyEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], filePath: string,
+  resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  for (const call of tree.rootNode.descendantsOfType('call')) {
+    const method = pyCalleeMethodName(call.childForFieldName('function'));
+    if (!method) continue;
+    const args = call.childForFieldName('arguments')?.namedChildren ?? [];
+    if (EVENT_REGISTER_METHODS.has(method)) {
+      const key = pyChannelKey(args[0]);
+      if (key !== undefined) {
+        const handlerIds = pyHandlerTargets(args[1], filePath, resolveHandler);
+        if (handlerIds.length) sites.registrations.push({ key, handlerIds });
+      }
+    } else if (EVENT_DISPATCH_METHODS.has(method)) {
+      const key = pyChannelKey(args[0]); // Python has no dispatchEvent(new Event())
+      if (key !== undefined) {
+        const caller = findEnclosingFunction(fileNodes, call.startIndex);
+        if (caller) sites.dispatches.push({ key, callerId: caller.id, line: call.startPosition.row + 1 });
+      }
+    }
+  }
+}
+
+/**
+ * Event-channel rule: pair handler registrations (`on`/`once`/`addEventListener`/
+ * `subscribe`/… with a static key) against dispatch sites (`emit`/`dispatch`/
+ * `publish`/`dispatchEvent` on the same key), emitting an edge from each dispatch
+ * site's enclosing function to each registered handler. Handler shapes: bare /
+ * member (`this.`/`self.`/`obj.`) references, `.bind()`, and inline function/lambda
+ * bodies (wired to the internal functions they call). Cross-file by key; per-channel
+ * fan-out capped (over-cap dropped).
+ *
+ * Recovery is PER-LANGUAGE and added one language at a time: each language has its
+ * own collector (its AST node types), but pairing/fan-out/provenance are shared, and
+ * sites are paired only within their own language (no cross-language pairing). In
+ * effect: JavaScript/TypeScript and Python.
+ */
+async function synthesizeEventChannelEdges(
+  files: Array<{ path: string; content: string; language: string }>,
+  allNodes: Map<string, FunctionNode>,
+  resolveHandler: HandlerResolver,
+): Promise<CallEdge[]> {
+  const nodesByFile = new Map<string, FunctionNode[]>();
+  for (const n of allNodes.values()) {
+    if (n.isExternal) continue;
+    (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
+  }
+  const edges: CallEdge[] = [];
+
+  const tsFiles = files.filter(f =>
+    (f.language === 'TypeScript' || f.language === 'JavaScript') && EVENT_PREFILTER.test(f.content),
+  );
+  if (tsFiles.length > 0) {
+    const { parser } = await getTSParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of tsFiles) {
+      try { collectTsEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes));
+  }
+
+  const pyFiles = files.filter(f => f.language === 'Python' && EVENT_PREFILTER.test(f.content));
+  if (pyFiles.length > 0) {
+    const { parser } = await getPyParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of pyFiles) {
+      try { collectPyEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes));
+  }
+
   return edges;
 }
 

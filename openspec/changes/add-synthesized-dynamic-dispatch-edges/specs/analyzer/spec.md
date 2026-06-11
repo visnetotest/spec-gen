@@ -12,7 +12,10 @@ edge. At minimum the pass SHALL recover:
 
 - **Event channels** — an edge from a dispatch site (`emit(k)` / `dispatch(k)`) to every handler
   registered on the same channel key `k` (`on(k, fn)` / `addEventListener(k, fn)`), when the key is a
-  static literal shared by both sites.
+  static key (string literal, substitution-free template, or constant member reference) shared by
+  both sites. Event-channel recovery is **per-language**: it applies to each language whose
+  registration and dispatch sites are both statically visible, starting with JavaScript/TypeScript
+  and extending to further languages one at a time (see `MultiLanguageEventChannelSynthesis`).
 - **Route → handler** — an edge from a route node already detected by route inventory to the handler
   function the route binds.
 
@@ -44,6 +47,43 @@ isolation and adding a rule does not alter the output of existing rules.
 - **WHEN** the two graphs are compared
 - **THEN** every directly-resolved edge is identical in both, and the synthesis-enabled graph differs
   only by added edges
+
+### Requirement: MultiLanguageEventChannelSynthesis
+
+The system SHALL recover event-channel edges across the languages it parses, not only
+JavaScript/TypeScript, applying the same high-precision discipline per language: an edge is emitted
+only when a registration site (`on`/`once`/`addListener`/`subscribe`/… with a static key and a
+resolvable handler) and a dispatch site (`emit`/`dispatch`/`publish`/… on the same static key) are
+both statically visible in that language. Each language's collector resolves the channel key and the
+handler from that language's own AST; the pairing, fan-out cap, and provenance labeling are shared
+and language-agnostic. Adding a language SHALL NOT change the edges synthesized for any other
+language, and a language whose idioms are not statically pairable SHALL emit no edges rather than
+guess.
+
+Languages are added one at a time. The set in effect is JavaScript/TypeScript and Python; the
+handler may be a function reference, a member/attribute reference (`self.handler`), a bound
+reference, or an inline function/lambda (wired to the internal functions its body calls).
+
+#### Scenario: Python event handler is reachable through a synthesized edge
+
+- **GIVEN** a Python handler registered with `emitter.on('mount', handler)` and a separate site
+  calling `emitter.emit('mount')`, with no direct call to `handler`
+- **WHEN** the call graph is built
+- **THEN** a synthesized event-channel edge exists from the `emit('mount')` site's enclosing function
+  to `handler`
+
+#### Scenario: Python dispatch with a mismatched key produces no edge
+
+- **GIVEN** a Python handler registered on `'open'` and a dispatch site on `'close'`
+- **WHEN** the call graph is built
+- **THEN** no synthesized edge is created between them
+
+#### Scenario: Adding a language leaves other languages' edges unchanged
+
+- **GIVEN** a project mixing JavaScript/TypeScript and Python event channels
+- **WHEN** the call graph is built
+- **THEN** the JavaScript/TypeScript synthesized edges are identical to those produced when no Python
+  source is present, and the Python edges are added independently
 
 ### Requirement: EdgeProvenanceLabeling
 

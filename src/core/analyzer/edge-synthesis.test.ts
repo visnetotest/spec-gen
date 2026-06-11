@@ -248,6 +248,125 @@ function trigger(e: any) { e.emit('mount'); }`);
   });
 });
 
+describe('event-channel synthesis — Python', () => {
+  const buildPy = (content: string): Promise<Built> =>
+    new CallGraphBuilder().build([{ path: 'app.py', content, language: 'Python' }]);
+
+  it('Python event handler is reachable through a synthesized edge', async () => {
+    const b = await buildPy([
+      'def on_mount():',
+      '    return 1',
+      'def register(emitter):',
+      "    emitter.on('mount', on_mount)",
+      'def trigger(emitter):',
+      "    emitter.emit('mount')",
+    ].join('\n'));
+    const edge = edgeBetween(b, 'trigger', 'on_mount');
+    expect(edge?.confidence).toBe('synthesized');
+    expect(edge?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('Python mismatched channel keys produce no edge', async () => {
+    const b = await buildPy([
+      'def handler():',
+      '    return 1',
+      'def register(e):',
+      "    e.on('open', handler)",
+      'def trigger(e):',
+      "    e.emit('close')",
+    ].join('\n'));
+    expect(edgeBetween(b, 'trigger', 'handler')).toBeUndefined();
+    expect(synthEdges(b)).toHaveLength(0);
+  });
+
+  it('resolves a Python self.method handler (attribute)', async () => {
+    const b = await buildPy([
+      'class C:',
+      '    def on_mount(self):',
+      '        return 1',
+      '    def register(self, e):',
+      "        e.on('mount', self.on_mount)",
+      '    def trigger(self, e):',
+      "        e.emit('mount')",
+    ].join('\n'));
+    expect(edgeBetween(b, 'trigger', 'on_mount')?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('wires a Python inline lambda handler to the functions its body calls', async () => {
+    const b = await buildPy([
+      'def real_handler():',
+      '    return 1',
+      'def register(e):',
+      "    e.on('mount', lambda: real_handler())",
+      'def trigger(e):',
+      "    e.emit('mount')",
+    ].join('\n'));
+    expect(edgeBetween(b, 'trigger', 'real_handler')?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('supports Python pub/sub verbs (subscribe / publish)', async () => {
+    const b = await buildPy([
+      'def on_topic():',
+      '    return 1',
+      'def register(bus):',
+      "    bus.subscribe('topic', on_topic)",
+      'def fire(bus):',
+      "    bus.publish('topic')",
+    ].join('\n'));
+    expect(edgeBetween(b, 'fire', 'on_topic')?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('pairs on a Python constant member key (Events.MOUNT)', async () => {
+    const b = await buildPy([
+      'def on_mount():',
+      '    return 1',
+      'def register(e):',
+      '    e.on(Events.MOUNT, on_mount)',
+      'def trigger(e):',
+      '    e.emit(Events.MOUNT)',
+    ].join('\n'));
+    expect(edgeBetween(b, 'trigger', 'on_mount')?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('ignores a Python f-string (interpolated) key — no guess', async () => {
+    const b = await buildPy([
+      'def on_mount():',
+      '    return 1',
+      'def register(e, x):',
+      "    e.on(f'mount-{x}', on_mount)",
+      'def trigger(e, x):',
+      "    e.emit(f'mount-{x}')",
+    ].join('\n'));
+    expect(synthEdges(b)).toHaveLength(0);
+  });
+});
+
+describe('event-channel synthesis — per-language isolation', () => {
+  it('does not pair a Python registration with a JS/TS dispatch on the same key', async () => {
+    const b = await new CallGraphBuilder().build([
+      { path: 'a.ts', content: [
+        'function tsHandler() { return 1; }',
+        "function tsReg(e: any) { e.on('shared', tsHandler); }",
+        "function tsFire(e: any) { e.emit('shared'); }",
+      ].join('\n'), language: 'TypeScript' },
+      { path: 'a.py', content: [
+        'def py_handler():',
+        '    return 1',
+        'def py_reg(e):',
+        "    e.on('shared', py_handler)",
+        'def py_fire(e):',
+        "    e.emit('shared')",
+      ].join('\n'), language: 'Python' },
+    ]);
+    // Within-language edges exist...
+    expect(edgeBetween(b, 'tsFire', 'tsHandler')?.synthesizedBy).toBe('event-channel');
+    expect(edgeBetween(b, 'py_fire', 'py_handler')?.synthesizedBy).toBe('event-channel');
+    // ...but no cross-language pairing on the shared 'shared' key.
+    expect(edgeBetween(b, 'tsFire', 'py_handler')).toBeUndefined();
+    expect(edgeBetween(b, 'py_fire', 'tsHandler')).toBeUndefined();
+  });
+});
+
 describe('route-handler synthesis (on-disk fixtures)', () => {
   let root: string;
   beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'ol-route-')); await mkdir(join(root, 'src'), { recursive: true }); });
