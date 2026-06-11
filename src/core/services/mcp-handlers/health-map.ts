@@ -98,6 +98,11 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
   const limit = Math.max(1, Math.min(input.limit ?? DEFAULT_LIMIT, 50));
   const cg = ctx.callGraph as SerializedCallGraph;
   const codeNodes = cg.nodes.filter(n => !n.isExternal && !n.isTest);
+  // Structural-health signals are measured on the directly-resolved graph: synthesized
+  // dynamic-dispatch edges are heuristic shortcuts that can manufacture false betweenness
+  // chokepoints and mask untested hotspots, so they are excluded from centrality/coverage
+  // here. (Reachability, impact, and dead-code traverse them by default elsewhere.)
+  const directEdges = cg.edges.filter(e => e.confidence !== 'synthesized');
 
   // --- Hubs (high fan-in) ---
   const hubNodes = codeNodes
@@ -132,13 +137,13 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
   const volatileFileSet = new Set(allVolatileFiles.map(v => v.file));
 
   // --- Bridge nodes (sampled betweenness centrality on the call graph) ---
-  const { entries: bridgeNodes, sourcesUsed: betweennessSourceCount } = computeBridgeNodes(codeNodes, cg.edges, limit);
+  const { entries: bridgeNodes, sourcesUsed: betweennessSourceCount } = computeBridgeNodes(codeNodes, directEdges, limit);
   const bridgeNodeIds = new Set(bridgeNodes.map(b => b.id));
   const bridgeCount = bridgeNodes.filter(b => b.betweenness >= BRIDGE_MIN_BETWEENNESS).length;
   const bridgeMap = new Map(bridgeNodes.map(b => [b.id, b]));
 
   // --- Untested hotspots (high-degree nodes not directly called by any test) ---
-  const untestedHotspots = computeUntestedHotspots(cg.nodes, cg.edges, limit);
+  const untestedHotspots = computeUntestedHotspots(cg.nodes, directEdges, limit);
   const untestedHotspotIds = new Set(untestedHotspots.map(u => u.id));
   const untestedMap = new Map(untestedHotspots.map(u => [u.id, u]));
 

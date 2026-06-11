@@ -179,6 +179,19 @@ function trigger(e: any) { e.emit('mount'); }`);
     expect(edge!.line).toBeGreaterThan(0);
   });
 
+  it('synthesized edges do NOT perturb fanIn/fanOut (structural metrics stay directly-resolved)', async () => {
+    const b = await build(`
+      function onMount() { return 1; }
+      function register(e: any) { e.on('mount', onMount); }
+      function trigger(e: any) { e.emit('mount'); }
+    `);
+    // The synthesized edge exists (reachability preserved)...
+    expect(edgeBetween(b, 'trigger', 'onMount')?.confidence).toBe('synthesized');
+    // ...but onMount has no DIRECT caller, so its fanIn stays 0 (synthesized excluded).
+    const onMount = [...b.nodes.values()].find(n => n.name === 'onMount');
+    expect(onMount?.fanIn).toBe(0);
+  });
+
   it('Direct edges are unchanged by synthesis (only added edges differ)', async () => {
     const content = `
       function onMount() { return 1; }

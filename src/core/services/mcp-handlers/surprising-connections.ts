@@ -29,6 +29,10 @@ export async function handleGetSurprisingConnections(input: GetSurprisingConnect
   const edgeResults: EdgeResult[] = [];
 
   for (const e of cg.edges) {
+    // Synthesized dynamic-dispatch edges are heuristic, not direct dependencies — they
+    // would otherwise surface as false "cross-community surprises". They are reported
+    // with their own provenance elsewhere; this tool scores the directly-resolved graph.
+    if (e.confidence === 'synthesized') continue;
     const key = `${e.callerId}→${e.calleeId}`;
     if (seen.has(key)) continue;
     seen.add(key);

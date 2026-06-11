@@ -3276,9 +3276,15 @@ export class CallGraphBuilder {
       // Synthesis is best-effort; a failure must never abort the build.
     }
 
-    // Pass 3: Calculate fanIn / fanOut (count unique caller→callee pairs, not call sites)
+    // Pass 3: Calculate fanIn / fanOut (count unique caller→callee pairs, not call sites).
+    // Synthesized dynamic-dispatch edges are EXCLUDED: synthesis augments reachability
+    // (it adds traversable edges) but must not perturb the directly-resolved graph's
+    // structural metrics — fanIn/fanOut, hub/god/entry-point classification, and every
+    // dashboard built on them stay measured on certain edges only. Reachability, impact,
+    // and dead-code traverse the full edge list (incl. synthesized) separately.
     const seenPairs = new Set<string>();
     for (const edge of edges) {
+      if (edge.confidence === 'synthesized') continue;
       const pairKey = `${edge.callerId}\0${edge.calleeId}`;
       if (seenPairs.has(pairKey)) continue;
       seenPairs.add(pairKey);
