@@ -95,4 +95,32 @@ describe('provenance-aware reachability', () => {
     expect(handler!.confidence).toBe('low');
     expect(handler!.reason).toContain('event-channel');
   });
+
+  it('A route handler is a liveness root even when its registration site is unreached (default)', async () => {
+    // setup (unreached) →[route-handler synthesized]→ listUsers. listUsers is invoked
+    // by the framework, so it must be treated as live, not dead.
+    const nodes = [
+      node('a.ts::setup', 'setup'),
+      node('a.ts::listUsers', 'listUsers'),
+    ];
+    const edges: CallEdge[] = [
+      { callerId: 'a.ts::setup', calleeId: 'a.ts::listUsers', calleeName: 'listUsers', confidence: 'synthesized', kind: 'calls', synthesizedBy: 'route-handler' },
+    ];
+    await writeContext(nodes, edges);
+    const r = (await handleFindDeadCode({ directory: root })) as { candidateDead: Array<{ name: string }> };
+    expect(r.candidateDead.find(c => c.name === 'listUsers')).toBeUndefined();
+  });
+
+  it('Strict mode does NOT seed synthesized route handlers as roots → handler is candidate-dead', async () => {
+    const nodes = [
+      node('a.ts::setup', 'setup'),
+      node('a.ts::listUsers', 'listUsers'),
+    ];
+    const edges: CallEdge[] = [
+      { callerId: 'a.ts::setup', calleeId: 'a.ts::listUsers', calleeName: 'listUsers', confidence: 'synthesized', kind: 'calls', synthesizedBy: 'route-handler' },
+    ];
+    await writeContext(nodes, edges);
+    const r = (await handleFindDeadCode({ directory: root, directResolvedOnly: true })) as { candidateDead: Array<{ name: string }> };
+    expect(r.candidateDead.find(c => c.name === 'listUsers')).toBeDefined();
+  });
 });

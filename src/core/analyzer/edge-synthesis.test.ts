@@ -115,6 +115,70 @@ describe('event-channel synthesis', () => {
     expect(edge?.synthesizedBy).toBe('event-channel');
   });
 
+  it('resolves a member-expression handler (this.fn / obj.fn)', async () => {
+    const b = await build(`
+      function onMount() { return 1; }
+      function register(e: any) { e.on('mount', this.onMount); }
+      function trigger(e: any) { e.emit('mount'); }
+    `);
+    expect(edgeBetween(b, 'trigger', 'onMount')?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('unwraps a .bind() handler reference', async () => {
+    const b = await build(`
+      function onMount() { return 1; }
+      function register(e: any) { e.on('mount', onMount.bind(this)); }
+      function trigger(e: any) { e.emit('mount'); }
+    `);
+    expect(edgeBetween(b, 'trigger', 'onMount')?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('wires an inline arrow handler to the functions its body calls', async () => {
+    const b = await build(`
+      function realHandler() { return 1; }
+      function register(e: any) { e.on('mount', () => { realHandler(); }); }
+      function trigger(e: any) { e.emit('mount'); }
+    `);
+    expect(edgeBetween(b, 'trigger', 'realHandler')?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('supports pub/sub verbs (subscribe / publish)', async () => {
+    const b = await build(`
+      function onTopic() { return 1; }
+      function register(bus: any) { bus.subscribe('topic', onTopic); }
+      function fire(bus: any) { bus.publish('topic'); }
+    `);
+    expect(edgeBetween(b, 'fire', 'onTopic')?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('supports DOM dispatchEvent(new CustomEvent(k)) key extraction', async () => {
+    const b = await build(`
+      function onClick() { return 1; }
+      function wire(el: any) { el.addEventListener('click', onClick); }
+      function fire(el: any) { el.dispatchEvent(new CustomEvent('click')); }
+    `);
+    expect(edgeBetween(b, 'fire', 'onClick')?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('ignores a keyless RxJS-style subscribe(fn) (no false edge)', async () => {
+    const b = await build(`
+      function onNext() { return 1; }
+      function register(obs: any) { obs.subscribe(onNext); }
+      function fire(obs: any) { obs.emit('whatever'); }
+    `);
+    // subscribe(fn) has no string key → no registration → no synthesized edge.
+    expect(synthEdges(b)).toHaveLength(0);
+  });
+
+  it('sets the dispatch-site line on the synthesized edge', async () => {
+    const b = await build(`function onMount() { return 1; }
+function register(e: any) { e.on('mount', onMount); }
+function trigger(e: any) { e.emit('mount'); }`);
+    const edge = edgeBetween(b, 'trigger', 'onMount');
+    expect(typeof edge!.line).toBe('number');
+    expect(edge!.line).toBeGreaterThan(0);
+  });
+
   it('Direct edges are unchanged by synthesis (only added edges differ)', async () => {
     const content = `
       function onMount() { return 1; }

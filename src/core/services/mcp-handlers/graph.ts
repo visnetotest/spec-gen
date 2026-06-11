@@ -943,6 +943,7 @@ export async function handleTraceExecutionPath(
   targetFunction: string,
   maxDepth = TRACE_PATH_DEFAULT_MAX_DEPTH,
   maxPaths = TRACE_PATH_MAX_PATHS,
+  directResolvedOnly = false,
 ): Promise<unknown> {
   maxDepth = Math.max(1, Math.min(maxDepth, SUBGRAPH_MAX_DEPTH_LIMIT));
   maxPaths = Math.max(1, Math.min(maxPaths, 50));
@@ -954,7 +955,7 @@ export async function handleTraceExecutionPath(
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
 
   const cg = ctx.callGraph as SerializedCallGraph;
-  const { nodeMap, forward } = buildAdjacency(cg);
+  const { nodeMap, forward } = buildAdjacency(cg, { directResolvedOnly });
 
   const entryLower  = entryFunction.toLowerCase();
   const targetLower = targetFunction.toLowerCase();

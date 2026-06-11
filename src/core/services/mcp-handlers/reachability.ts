@@ -64,6 +64,26 @@ function isCodeNode(n: FunctionNode): boolean {
   return !n.isExternal && !isIacLanguage(n.language);
 }
 
+/**
+ * Node-ids invoked by something OUTSIDE the call graph — they are liveness roots,
+ * not dead code. Always includes cross-language HTTP handlers (`http_endpoint`
+ * edges). When `includeSynthesizedRoutes` is set (default reachability, not strict
+ * mode), also includes targets of synthesized `route-handler` edges: a framework
+ * invokes a route handler regardless of whether its registration site is itself
+ * reached, so a top-level/unenclosed route still keeps its handler live.
+ */
+function externallyInvokedHandlerIds(cg: SerializedCallGraph, includeSynthesizedRoutes = true): Set<string> {
+  const ids = new Set<string>();
+  for (const e of cg.edges) {
+    if (!e.calleeId) continue;
+    if (e.confidence === 'http_endpoint') ids.add(e.calleeId);
+    else if (includeSynthesizedRoutes && e.confidence === 'synthesized' && e.synthesizedBy === 'route-handler') {
+      ids.add(e.calleeId);
+    }
+  }
+  return ids;
+}
+
 interface DepSignals {
   /** Symbol names imported by name somewhere (`import { X }`). */
   names: Set<string>;
@@ -142,12 +162,10 @@ export async function deadCodeIds(absDir: string, cg: SerializedCallGraph): Prom
   const dep = await loadDepSignals(absDir);
   const importedNames = dep?.names ?? null;
   const { forward } = buildAdjacency(cg);
-  const httpHandlerIds = new Set(
-    cg.edges.filter(e => e.confidence === 'http_endpoint' && e.calleeId).map(e => e.calleeId),
-  );
+  const handlerRootIds = externallyInvokedHandlerIds(cg);
   const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'default';
   const isRoot = (n: FunctionNode): boolean =>
-    !!n.isTest || httpHandlerIds.has(n.id) || isMainLike(n) ||
+    !!n.isTest || handlerRootIds.has(n.id) || isMainLike(n) ||
     (importedNames !== null && importedNames.has(n.name));
   const codeNodes = cg.nodes.filter(isCodeNode);
   const seedIds = codeNodes.filter(isRoot).map(r => r.id).sort();
@@ -182,10 +200,9 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
 
   // ── Roots (liveness seeds) — conservative: prefer false-live over false-dead ──
   // tests (they invoke code) · symbols imported by another file · HTTP route
-  // handlers · main-like entry functions.
-  const httpHandlerIds = new Set(
-    cg.edges.filter(e => e.confidence === 'http_endpoint' && e.calleeId).map(e => e.calleeId),
-  );
+  // handlers · synthesized route handlers (framework-invoked entry points; omitted
+  // in strict mode) · main-like entry functions.
+  const httpHandlerIds = externallyInvokedHandlerIds(cg, !input.directResolvedOnly);
   const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'default';
   const isRoot = (n: FunctionNode): boolean =>
     !!n.isTest ||

@@ -362,6 +362,10 @@ export const TOOL_DEFINITIONS = [
           type: 'number',
           description: 'Maximum number of paths to return (default: 10, max: 50)',
         },
+        directResolvedOnly: {
+          type: 'boolean',
+          description: 'Traverse only directly-resolved edges, ignoring synthesized dynamic-dispatch edges (default false).',
+        },
       },
       required: ['directory', 'entryFunction', 'targetFunction'],
     },

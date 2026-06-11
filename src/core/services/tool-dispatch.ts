@@ -128,9 +128,9 @@ export async function dispatchTool(
       args as { directory: string; functionName: string; direction?: 'downstream' | 'upstream' | 'both'; maxDepth?: number; format?: 'json' | 'mermaid'; directResolvedOnly?: boolean };
     return handleGetSubgraph(directory, functionName, direction, maxDepth, format, directResolvedOnly);
   } else if (name === 'trace_execution_path') {
-    const { directory, entryFunction, targetFunction, maxDepth = 6, maxPaths = 10 } =
-      args as { directory: string; entryFunction: string; targetFunction: string; maxDepth?: number; maxPaths?: number };
-    return handleTraceExecutionPath(directory, entryFunction, targetFunction, maxDepth, maxPaths);
+    const { directory, entryFunction, targetFunction, maxDepth = 6, maxPaths = 10, directResolvedOnly = false } =
+      args as { directory: string; entryFunction: string; targetFunction: string; maxDepth?: number; maxPaths?: number; directResolvedOnly?: boolean };
+    return handleTraceExecutionPath(directory, entryFunction, targetFunction, maxDepth, maxPaths, directResolvedOnly);
   } else if (name === 'get_mapping') {
     const { directory, domain, orphansOnly } = args as { directory: string; domain?: string; orphansOnly?: boolean };
     return handleGetMapping(directory, domain, orphansOnly);

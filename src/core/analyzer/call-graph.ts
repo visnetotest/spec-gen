@@ -2711,10 +2711,20 @@ export function computeCyclomaticComplexity(body: string, language: string): num
 /** Per-channel handler fan-out cap. Over-cap channels are DROPPED, never guessed. */
 export const EVENT_CHANNEL_FANOUT_CAP = 8;
 
-/** JS/TS methods that register a handler on a channel key: `x.on('k', fn)`. */
-const EVENT_REGISTER_METHODS = new Set(['on', 'once', 'addListener', 'addEventListener']);
-/** JS/TS methods that dispatch on a channel key: `x.emit('k')`. */
-const EVENT_DISPATCH_METHODS = new Set(['emit', 'dispatch']);
+/**
+ * JS/TS methods that register a handler on a channel key: `x.on('k', fn)`. Covers
+ * Node EventEmitter (`on`/`once`/`addListener`/`prepend*`), the DOM
+ * (`addEventListener`), and pub/sub (`subscribe`). A bare `subscribe(fn)` (RxJS,
+ * no key) is naturally ignored — registration requires a string-literal first arg.
+ */
+const EVENT_REGISTER_METHODS = new Set([
+  'on', 'once', 'addListener', 'prependListener', 'prependOnceListener', 'addEventListener', 'subscribe',
+]);
+/** JS/TS methods that dispatch on a channel key: `x.emit('k')` / `x.dispatchEvent(new Event('k'))`. */
+const EVENT_DISPATCH_METHODS = new Set(['emit', 'dispatch', 'publish', 'dispatchEvent']);
+
+/** Single regex pre-filter so we only parse files that could contain a pattern. */
+const EVENT_PREFILTER = /\b(on|once|addListener|prependListener|prependOnceListener|addEventListener|subscribe|emit|dispatch|publish|dispatchEvent)\s*\(/;
 
 /** Resolve a referenced simple name to a single internal function node, or undefined
  *  when unknown or ambiguous (never guesses). Prefers a match in `preferFile`. */
@@ -2739,25 +2749,93 @@ function staticStringArg(node: Parser.SyntaxNode | undefined): string | undefine
 }
 
 /**
- * Event-channel rule: pair `on(k, fn)` / `addEventListener(k, fn)` registrations
- * with `emit(k)` / `dispatch(k)` dispatch sites on a shared static-literal key,
- * emitting an edge from each dispatch site's enclosing function to each handler.
- * Cross-file by key. Per-channel fan-out is capped; over-cap channels are dropped.
- * JS/TS only (registration + dispatch sites both statically visible).
+ * Channel key for a dispatch call. For `dispatchEvent(new Event('k'))` /
+ * `dispatchEvent(new CustomEvent('k'))` the key is the Event constructor's first
+ * string-literal argument; otherwise it is the call's first string-literal argument.
+ */
+function dispatchChannelKey(method: string, args: Parser.SyntaxNode[]): string | undefined {
+  if (method === 'dispatchEvent') {
+    const arg0 = args[0];
+    if (arg0?.type === 'new_expression') {
+      const ctorArgs = arg0.childForFieldName('arguments')?.namedChildren ?? [];
+      return staticStringArg(ctorArgs[0]);
+    }
+    return undefined;
+  }
+  return staticStringArg(args[0]);
+}
+
+/**
+ * Resolve the handler argument of a registration to the internal function node-ids
+ * it dispatches to. Handles, deterministically and without guessing:
+ *   - a bare identifier `fn`
+ *   - a member reference `this.fn` / `obj.fn`
+ *   - a bound reference `fn.bind(this)`
+ *   - an inline arrow / function expression — wired to the internal functions its
+ *     body actually calls (so `() => realHandler()` still connects the dispatcher
+ *     to `realHandler`).
+ * Every leaf resolves through {@link HandlerResolver} (exact, single-match only).
+ */
+function resolveHandlerTargets(
+  arg: Parser.SyntaxNode | undefined,
+  file: string,
+  resolveHandler: HandlerResolver,
+): string[] {
+  if (!arg) return [];
+  const add = (name: string | undefined, out: string[]): void => {
+    if (!name) return;
+    const node = resolveHandler(name, file);
+    if (node) out.push(node.id);
+  };
+
+  if (arg.type === 'identifier') {
+    const out: string[] = []; add(arg.text, out); return out;
+  }
+  if (arg.type === 'member_expression') {
+    const out: string[] = []; add(arg.childForFieldName('property')?.text, out); return out;
+  }
+  if (arg.type === 'call_expression') {
+    // `fn.bind(this)` — unwrap to the bound function reference.
+    const callee = arg.childForFieldName('function');
+    if (callee?.type === 'member_expression' && callee.childForFieldName('property')?.text === 'bind') {
+      return resolveHandlerTargets(callee.childForFieldName('object') ?? undefined, file, resolveHandler);
+    }
+    return [];
+  }
+  if (arg.type === 'arrow_function' || arg.type === 'function_expression' || arg.type === 'function' || arg.type === 'function_declaration') {
+    // Inline handler — wire to the internal functions its body calls.
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const inner of arg.descendantsOfType('call_expression')) {
+      const id = resolveHandler(calleeMethodName(inner.childForFieldName('function')) ?? '', file)?.id;
+      if (id && !seen.has(id)) { seen.add(id); out.push(id); }
+    }
+    return out;
+  }
+  return [];
+}
+
+/**
+ * Event-channel rule: pair handler registrations (`on`/`once`/`addEventListener`/
+ * `subscribe`/… with a static-literal key) against dispatch sites (`emit`/`dispatch`/
+ * `publish`/`dispatchEvent` on the same key), emitting an edge from each dispatch
+ * site's enclosing function to each registered handler. Handler shapes covered:
+ * bare/`this.`/`obj.` references, `.bind()`, and inline arrow/function bodies (wired
+ * to the internal functions they call). Cross-file by key. Per-channel fan-out is
+ * capped; over-cap channels are dropped. JS/TS only (both sites statically visible).
  */
 async function synthesizeEventChannelEdges(
   files: Array<{ path: string; content: string; language: string }>,
   allNodes: Map<string, FunctionNode>,
   resolveHandler: HandlerResolver,
 ): Promise<CallEdge[]> {
-  interface Reg { key: string; handlerName: string; file: string }
-  interface Disp { key: string; callerId: string }
+  interface Reg { key: string; handlerIds: string[] }
+  interface Disp { key: string; callerId: string; line: number }
   const registrations: Reg[] = [];
   const dispatches: Disp[] = [];
 
   const tsFiles = files.filter(f =>
-    (f.language === 'TypeScript' || f.language === 'JavaScript') &&
-    /\b(on|once|addListener|addEventListener|emit|dispatch)\s*\(/.test(f.content),
+    (f.language === 'TypeScript' || f.language === 'JavaScript') && EVENT_PREFILTER.test(f.content),
   );
   if (tsFiles.length === 0) return [];
 
@@ -2780,15 +2858,15 @@ async function synthesizeEventChannelEdges(
       const args = argsNode.namedChildren;
       if (EVENT_REGISTER_METHODS.has(method)) {
         const key = staticStringArg(args[0]);
-        const handlerArg = args[1];
-        if (key !== undefined && handlerArg?.type === 'identifier') {
-          registrations.push({ key, handlerName: handlerArg.text, file: file.path });
+        if (key !== undefined) {
+          const handlerIds = resolveHandlerTargets(args[1], file.path, resolveHandler);
+          if (handlerIds.length) registrations.push({ key, handlerIds });
         }
       } else if (EVENT_DISPATCH_METHODS.has(method)) {
-        const key = staticStringArg(args[0]);
+        const key = dispatchChannelKey(method, args);
         if (key !== undefined) {
           const caller = findEnclosingFunction(fileNodes, call.startIndex);
-          if (caller) dispatches.push({ key, callerId: caller.id });
+          if (caller) dispatches.push({ key, callerId: caller.id, line: call.startPosition.row + 1 });
         }
       }
     }
@@ -2798,11 +2876,9 @@ async function synthesizeEventChannelEdges(
   // Group resolved handler node-ids by channel key.
   const handlersByKey = new Map<string, Set<string>>();
   for (const reg of registrations) {
-    const handler = resolveHandler(reg.handlerName, reg.file);
-    if (!handler) continue;
     let set = handlersByKey.get(reg.key);
     if (!set) handlersByKey.set(reg.key, (set = new Set()));
-    set.add(handler.id);
+    for (const id of reg.handlerIds) set.add(id);
   }
 
   // Fan-out cap: DROP over-cap channels (typically generic keys) rather than guess.
@@ -2829,6 +2905,7 @@ async function synthesizeEventChannelEdges(
         callerId: disp.callerId,
         calleeId: handlerId,
         calleeName: allNodes.get(handlerId)?.name ?? '',
+        line: disp.line,
         confidence: 'synthesized',
         kind: 'calls',
         callType: 'direct',
@@ -2851,7 +2928,15 @@ function offsetOfLine(content: string, line: number): number {
  * Route→handler rule: wire each route detected by the existing route inventory to
  * the handler function it binds, as a synthesized `calls`-kind edge from the route
  * declaration's enclosing function to the handler. Reuses route detection; does not
- * extend it. A route with no statically-visible enclosing function is skipped.
+ * extend it.
+ *
+ * The edge is attributed to the route registration's enclosing function (e.g. a
+ * `setupRoutes(app)` / app-init function — the common Express/Fastify pattern), so a
+ * route registered at module top level with no enclosing function is skipped here.
+ * Dead-code analysis additionally seeds the *targets* of these edges as liveness
+ * roots (they are framework-invoked entry points), so an enclosed route whose setup
+ * function is itself unreached still keeps its handler live — see
+ * `externallyInvokedHandlerIds` in `reachability.ts`.
  */
 async function synthesizeRouteHandlerEdges(
   files: Array<{ path: string; content: string; language: string }>,
@@ -2879,7 +2964,10 @@ async function synthesizeRouteHandlerEdges(
   const seen = new Set<string>();
   for (const route of routes) {
     if (!route.handlerName) continue;
-    const handler = resolveHandler(route.handlerName, route.file);
+    // Handler may be a qualified `Controller.method` (decorator/class routers) —
+    // resolve on the method's simple name (the call-graph node name).
+    const simpleHandler = route.handlerName.split('.').pop() ?? route.handlerName;
+    const handler = resolveHandler(simpleHandler, route.file);
     if (!handler) continue;
     const content = contentByPath.get(route.file);
     if (content === undefined) continue;

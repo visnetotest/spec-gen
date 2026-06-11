@@ -22,6 +22,20 @@ step 1 (it extends a core data structure — `EdgeConfidence` / `CallEdge`).
 > `reachability-synthesis.test.ts` (no false dead, strict mode, downgrade), `call-graph.test.ts`
 > (distance exhaustiveness + synthesized > direct). No MCP tool added; default/minimal surface
 > unchanged in size.
+>
+> **Deepening pass (follow-up commit, same PR):** widened the logic where it stays deterministic and
+> high-precision —
+> - event-channel handler shapes: bare / `this.fn` / `obj.fn` member refs, `.bind()` unwrap, and
+>   inline arrow/function handlers (wired to the internal functions their body calls);
+> - more verbs: `prependListener`/`prependOnceListener`, pub/sub `subscribe`/`publish`, and DOM
+>   `dispatchEvent(new Event|CustomEvent('k'))` key extraction (a keyless `subscribe(fn)` is still
+>   ignored — no false edge);
+> - route-handler resolves qualified `Class.method` handler names; dead-code now seeds route-handler
+>   targets as liveness roots (framework-invoked), so an enclosed route whose setup is itself unreached
+>   still keeps its handler live (omitted in strict mode);
+> - `directResolvedOnly` strict mode extended to `trace_execution_path` (now all six traversal tools);
+> - synthesized edges carry the dispatch-site `line` for provenance.
+> Verified end-to-end through the compiled CLI on a really-analyzed repo.
 
 ## 1. Provenance on the edge model
 - [ ] Add `'synthesized'` to `EdgeConfidence` (`call-graph.ts:30`) and `synthesizedBy?: string` to
