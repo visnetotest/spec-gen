@@ -112,6 +112,14 @@ step 1 (it extends a core data structure — `EdgeConfidence` / `CallEdge`).
 > `actor-message` — each labeled distinctly via `synthesizedBy`, sharing the pairing/fan-out/
 > provenance core and the `directResolvedOnly` strict-mode opt-out, all isolated from the
 > directly-resolved graph's structural metrics.
+>
+> **Precision fix (adversarial review on the real OpenLore repo).** Reference-based handler
+> resolution now skips runtime/promise/middleware callback LOCALS (`resolve`, `reject`, `next`,
+> `done`, `callback`, `cb`, `err`, `error`, `fulfill`). These are never registered named handlers;
+> resolving them by name had wired `setTimeout(resolve, ms)` inside `new Promise((resolve) => …)` to a
+> coincidentally same-named function elsewhere (the only false positives the rules produced across the
+> repo's ~3,900 functions — now zero). Single chokepoint in the `resolveHandler` closure covers every
+> reference-based rule; regression-tested.
 
 ## 1. Provenance on the edge model
 - [ ] Add `'synthesized'` to `EdgeConfidence` (`call-graph.ts:30`) and `synthesizedBy?: string` to

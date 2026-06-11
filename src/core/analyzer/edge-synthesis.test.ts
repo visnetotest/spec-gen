@@ -704,6 +704,25 @@ describe('callback-registration synthesis', () => {
     expect(synthEdges(b).filter(e => e.synthesizedBy === 'callback-registration')).toHaveLength(0);
   });
 
+  it('does NOT wire a Promise resolve/reject local to a coincidentally same-named function', async () => {
+    // Regression: `setTimeout(resolve, ms)` inside `new Promise((resolve) => …)` — `resolve`
+    // is the executor parameter, NOT a registered handler. It must not wire to an unrelated
+    // function named `resolve` elsewhere (the real false positive found on the OpenLore repo).
+    const b = await new CallGraphBuilder().build([
+      { path: 'helpers.ts', language: 'TypeScript', content: 'export const resolve = (m: number) => m + 1;' },
+      { path: 'sleep.ts', language: 'TypeScript', content: 'export function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }' },
+    ]);
+    expect(synthEdges(b).filter(e => e.synthesizedBy === 'callback-registration')).toHaveLength(0);
+  });
+
+  it('still wires a genuinely-named handler (not a runtime-local name) to a scheduler', async () => {
+    const b = await new CallGraphBuilder().build([{ path: 'app.ts', language: 'TypeScript', content: [
+      'function pollStatus() { return 1; }',
+      'function start() { setInterval(pollStatus, 1000); }',
+    ].join('\n') }]);
+    expect(edgeBetween(b, 'start', 'pollStatus')?.synthesizedBy).toBe('callback-registration');
+  });
+
   it('C++: Qt connect wires the slot member function (not the signal)', async () => {
     const b = await new CallGraphBuilder().build([{ path: 'w.cpp', language: 'C++', content: [
       'class MyWidget {',

@@ -2760,6 +2760,16 @@ export function computeCyclomaticComplexity(body: string, language: string): num
 export const EVENT_CHANNEL_FANOUT_CAP = 8;
 
 /**
+ * Identifiers that are runtime/promise/middleware callback LOCALS, not registered named
+ * handlers — e.g. the `resolve`/`reject` parameters of a Promise executor, Express/Koa
+ * `next`, node-callback `err`/`callback`/`cb`/`done`. Resolving these by name to a
+ * coincidentally same-named function elsewhere produces false synthesized edges
+ * (observed: `setTimeout(resolve, ms)` inside `new Promise((resolve) => …)`). They are
+ * never legitimate handler references, so all reference-based handler resolution skips them.
+ */
+const RUNTIME_CALLBACK_LOCALS = new Set(['resolve', 'reject', 'next', 'done', 'callback', 'cb', 'err', 'error', 'fulfill']);
+
+/**
  * JS/TS methods that register a handler on a channel key: `x.on('k', fn)`. Covers
  * Node EventEmitter (`on`/`once`/`addListener`/`prepend*`), the DOM
  * (`addEventListener`), and pub/sub (`subscribe`). A bare `subscribe(fn)` (RxJS,
@@ -4094,6 +4104,11 @@ export class CallGraphBuilder {
     // resolution and only *adds* edges. Best-effort: synthesis never fails the build.
     try {
       const resolveHandler: HandlerResolver = (name, preferFile) => {
+        // Never resolve a runtime/promise/middleware callback LOCAL (e.g. the `resolve`
+        // parameter of `new Promise((resolve) => setTimeout(resolve, ms))`) to a
+        // coincidentally same-named function elsewhere. These names are never real
+        // registered handlers, and matching them produced false synthesized edges.
+        if (RUNTIME_CALLBACK_LOCALS.has(name)) return undefined;
         const candidates = trie.findBySimpleName(name).filter(n => !n.isExternal);
         if (candidates.length === 0) return undefined;
         const inFile = candidates.find(n => n.filePath === preferFile);
