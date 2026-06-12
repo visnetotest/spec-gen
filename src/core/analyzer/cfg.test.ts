@@ -31,6 +31,10 @@ async function goLang(): Promise<object> {
   const m = await import('tree-sitter-go');
   return m.default as object;
 }
+async function javaLang(): Promise<object> { return (await import('tree-sitter-java')).default as object; }
+async function cppLang(): Promise<object> { return (await import('tree-sitter-cpp')).default as object; }
+async function rustLang(): Promise<object> { return (await import('tree-sitter-rust')).default as object; }
+async function rubyLang(): Promise<object> { return (await import('tree-sitter-ruby')).default as object; }
 
 function cfgFor(content: string, lang: object, language: string, fnTypes: string[]): FunctionCfg {
   const tree = parse(content, lang);
@@ -127,8 +131,8 @@ describe('CFG control flow', () => {
     const lang = await tsLang();
     const tree = parse(`function f() {}`, lang);
     const fn = firstOfType(tree.rootNode, TS_FN)!;
-    expect(cfgSupportsLanguage('Rust')).toBe(false);
-    expect(buildFunctionCfg(fn as unknown as CfgNode, 'Rust')).toBeUndefined();
+    expect(cfgSupportsLanguage('Elixir')).toBe(false);
+    expect(buildFunctionCfg(fn as unknown as CfgNode, 'Elixir')).toBeUndefined();
   });
 });
 
@@ -525,5 +529,64 @@ describe('multi-language CFG', () => {
     expect(cfg.edges.some(e => e.kind === 'back')).toBe(true);
     expect(hasDefUse(cfg, 'x')).toBe(true);
     expect(cfg.params).toContain('n');
+  });
+});
+
+// ─── extended-language coverage (Java, C++, Rust, Ruby) ───────────────────────
+
+describe('Java overlay', () => {
+  const FN = ['method_declaration'];
+  it('branch + loop + switch, with sound switch (cases do not kill each other)', async () => {
+    const lang = await javaLang();
+    const cfg = cfgFor('class C{ int f(int a){\n  int x = 0;\n  if(a>0){ x=1; } else { x=2; }\n  for(int i=0;i<a;i++){ x = x + i; }\n  switch(a){\n    case 1: x = 10; break;\n    default: x = 20;\n  }\n  return x;\n} }', lang, 'Java', FN);
+    expect(cfg.blocks.some(b => b.kind === 'branch')).toBe(true);
+    expect(cfg.edges.some(e => e.kind === 'back')).toBe(true);
+    // both switch arms (line 6 case, line 7 default) reach the return — not killed.
+    expect(defLinesTo(cfg, 'x', 9)).toEqual([6, 7]);
+  });
+  it('field/array writes are may', async () => {
+    const lang = await javaLang();
+    const cfg = cfgFor('class C{ void f(O o, int[] arr, int i){\n  o.field = c();\n  int y = o.field;\n  arr[i] = 5;\n} }', lang, 'Java', FN);
+    expect(cfg.defUse.some(e => e.variable === 'o.field' && e.precision === 'may')).toBe(true);
+  });
+});
+
+describe('C++ overlay', () => {
+  const FN = ['function_definition'];
+  it('branch + loop + do/while + switch', async () => {
+    const lang = await cppLang();
+    const cfg = cfgFor('int f(int a){\n  int x = 0;\n  if(a>0){ x=1; } else { x=2; }\n  while(a>0){ x = x + a; a--; }\n  switch(a){\n    case 1: x = 10; break;\n    default: x = 20;\n  }\n  return x;\n}', lang, 'C++', FN);
+    expect(cfg.blocks.some(b => b.kind === 'branch')).toBe(true);
+    expect(cfg.edges.some(e => e.kind === 'back')).toBe(true);
+    expect(defLinesTo(cfg, 'x', 9)).toEqual([6, 7]); // both switch arms reach
+  });
+});
+
+describe('Rust overlay', () => {
+  const FN = ['function_item'];
+  it('branch + loop + match (expression-wrapped control flow)', async () => {
+    const lang = await rustLang();
+    const cfg = cfgFor('fn f(a: i32) -> i32 {\n  let mut x = 0;\n  if a > 0 {\n    x = 1;\n  } else {\n    x = 2;\n  }\n  while a > 0 {\n    x = x + 1;\n  }\n  return x;\n}', lang, 'Rust', FN);
+    expect(cfg.blocks.some(b => b.kind === 'branch')).toBe(true);
+    expect(cfg.edges.some(e => e.kind === 'back')).toBe(true);
+    expect(defLinesTo(cfg, 'x', 11)).toEqual([4, 6, 9]); // if/else/loop all reach
+  });
+  it('match arms both reach (sound); closure mutation is may', async () => {
+    const lang = await rustLang();
+    const m = cfgFor('fn f(a: i32) -> i32 {\n  let mut x = 0;\n  match a {\n    1 => x = 10,\n    _ => x = 20,\n  }\n  return x;\n}', lang, 'Rust', FN);
+    expect(defLinesTo(m, 'x', 7)).toEqual([4, 5]);
+    const cl = cfgFor('fn f() -> i32 {\n  let mut x = 0;\n  let g = || { x = 5; };\n  g();\n  return x;\n}', lang, 'Rust', FN);
+    expect(cl.defUse.find(e => e.variable === 'x' && e.useLine === 5)?.precision).toBe('may');
+  });
+});
+
+describe('Ruby overlay', () => {
+  const FN = ['method'];
+  it('if/else + while + case/else (alternative paths, no kill)', async () => {
+    const lang = await rubyLang();
+    const cfg = cfgFor('def f(a)\n  x = 0\n  if a > 0\n    x = 1\n  else\n    x = 2\n  end\n  case a\n  when 1\n    x = 10\n  else\n    x = 20\n  end\n  return x\nend', lang, 'Ruby', FN);
+    expect(cfg.blocks.some(b => b.kind === 'branch')).toBe(true);
+    // case/when (10) + case/else (12) reach the return; the if's defs were overwritten.
+    expect(defLinesTo(cfg, 'x', 14)).toEqual([10, 12]);
   });
 });

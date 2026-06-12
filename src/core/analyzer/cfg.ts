@@ -153,6 +153,10 @@ interface CfgLangSpec {
   identTypes: Set<string>;
   /** Call-expression node types (used to skip the callee name as a use). */
   callTypes: Set<string>;
+  /** Field name holding the callee/method name on a call node (so it is skipped
+   *  as a use while the receiver/args are still read). 'function' for most; Java
+   *  uses 'name', Ruby uses 'method'. */
+  callNameField: string;
   /** Increment/decrement node types (`x++`/`x--`) — a combined use+def of the operand. */
   updateTypes: Set<string>;
   /** Field name for the condition of an if/loop, when present. */
@@ -191,6 +195,7 @@ const TS_SPEC: CfgLangSpec = {
   subscriptTypes: new Set(['subscript_expression']),
   identTypes: new Set(['identifier', 'shorthand_property_identifier']),
   callTypes: new Set(['call_expression', 'new_expression']),
+  callNameField: 'function',
   updateTypes: new Set(['update_expression']),
   conditionField: 'condition',
   consequenceField: 'consequence',
@@ -223,6 +228,7 @@ const PY_SPEC: CfgLangSpec = {
   subscriptTypes: new Set(['subscript']),
   identTypes: new Set(['identifier']),
   callTypes: new Set(['call']),
+  callNameField: 'function',
   updateTypes: new Set([]),
   conditionField: 'condition',
   consequenceField: 'consequence',
@@ -255,7 +261,140 @@ const GO_SPEC: CfgLangSpec = {
   subscriptTypes: new Set(['index_expression']),
   identTypes: new Set(['identifier', 'field_identifier']),
   callTypes: new Set(['call_expression']),
+  callNameField: 'function',
   updateTypes: new Set(['inc_statement', 'dec_statement']),
+  conditionField: 'condition',
+  consequenceField: 'consequence',
+  alternativeField: 'alternative',
+  bodyField: 'body',
+  leftField: 'left',
+  rightField: 'right',
+  paramsField: 'parameters',
+};
+
+const JAVA_SPEC: CfgLangSpec = {
+  ifTypes: new Set(['if_statement']),
+  loopTypes: new Set(['while_statement', 'for_statement', 'enhanced_for_statement', 'do_statement']),
+  tryTypes: new Set(['try_statement', 'try_with_resources_statement']),
+  switchTypes: new Set(['switch_expression', 'switch_statement']),
+  nestedFnTypes: new Set(['lambda_expression']),
+  switchFallsThrough: true,
+  blockScoped: true,
+  comprehensionTypes: new Set([]),
+  returnTypes: new Set(['return_statement']),
+  breakTypes: new Set(['break_statement']),
+  continueTypes: new Set(['continue_statement']),
+  throwTypes: new Set(['throw_statement']),
+  blockTypes: new Set(['block']),
+  assignTypes: new Set(['assignment_expression']),
+  augAssignTypes: new Set([]),
+  declTypes: new Set(['variable_declarator']),
+  declContainerTypes: new Set(['local_variable_declaration']),
+  memberTypes: new Set(['field_access']),
+  subscriptTypes: new Set(['array_access']),
+  identTypes: new Set(['identifier']),
+  callTypes: new Set(['method_invocation', 'object_creation_expression']),
+  callNameField: 'name',
+  updateTypes: new Set(['update_expression']),
+  conditionField: 'condition',
+  consequenceField: 'consequence',
+  alternativeField: 'alternative',
+  bodyField: 'body',
+  leftField: 'left',
+  rightField: 'right',
+  paramsField: 'parameters',
+};
+
+const CPP_SPEC: CfgLangSpec = {
+  ifTypes: new Set(['if_statement']),
+  loopTypes: new Set(['while_statement', 'for_statement', 'for_range_loop', 'do_statement']),
+  tryTypes: new Set(['try_statement']),
+  switchTypes: new Set(['switch_statement']),
+  nestedFnTypes: new Set(['lambda_expression']),
+  switchFallsThrough: true,
+  blockScoped: true,
+  comprehensionTypes: new Set([]),
+  returnTypes: new Set(['return_statement']),
+  breakTypes: new Set(['break_statement']),
+  continueTypes: new Set(['continue_statement']),
+  throwTypes: new Set(['throw_statement']),
+  blockTypes: new Set(['compound_statement']),
+  assignTypes: new Set(['assignment_expression']),
+  augAssignTypes: new Set([]),
+  declTypes: new Set(['init_declarator']),
+  declContainerTypes: new Set(['declaration']),
+  memberTypes: new Set(['field_expression']),
+  subscriptTypes: new Set(['subscript_expression']),
+  identTypes: new Set(['identifier', 'field_identifier']),
+  callTypes: new Set(['call_expression']),
+  callNameField: 'function',
+  updateTypes: new Set(['update_expression']),
+  conditionField: 'condition',
+  consequenceField: 'consequence',
+  alternativeField: 'alternative',
+  bodyField: 'body',
+  leftField: 'left',
+  rightField: 'right',
+  paramsField: 'parameters',
+};
+
+const RUST_SPEC: CfgLangSpec = {
+  ifTypes: new Set(['if_expression']),
+  loopTypes: new Set(['while_expression', 'for_expression', 'loop_expression']),
+  tryTypes: new Set([]),
+  switchTypes: new Set(['match_expression']),
+  nestedFnTypes: new Set(['closure_expression', 'function_item']),
+  switchFallsThrough: false,
+  blockScoped: true,
+  comprehensionTypes: new Set([]),
+  returnTypes: new Set(['return_expression']),
+  breakTypes: new Set(['break_expression']),
+  continueTypes: new Set(['continue_expression']),
+  throwTypes: new Set([]),
+  blockTypes: new Set(['block']),
+  assignTypes: new Set(['assignment_expression']),
+  augAssignTypes: new Set(['compound_assignment_expr']),
+  declTypes: new Set(['let_declaration']),
+  declContainerTypes: new Set([]),
+  memberTypes: new Set(['field_expression']),
+  subscriptTypes: new Set(['index_expression']),
+  identTypes: new Set(['identifier']),
+  callTypes: new Set(['call_expression', 'macro_invocation']),
+  callNameField: 'function',
+  updateTypes: new Set([]),
+  conditionField: 'condition',
+  consequenceField: 'consequence',
+  alternativeField: 'alternative',
+  bodyField: 'body',
+  leftField: 'left',
+  rightField: 'right',
+  paramsField: 'parameters',
+};
+
+const RUBY_SPEC: CfgLangSpec = {
+  ifTypes: new Set(['if', 'unless']),
+  loopTypes: new Set(['while', 'until', 'for']),
+  tryTypes: new Set(['begin', 'rescue']),
+  switchTypes: new Set(['case']),
+  nestedFnTypes: new Set(['block', 'do_block', 'lambda', 'method', 'singleton_method']),
+  switchFallsThrough: false,
+  blockScoped: false,
+  comprehensionTypes: new Set([]),
+  returnTypes: new Set(['return']),
+  breakTypes: new Set(['break']),
+  continueTypes: new Set(['next']),
+  throwTypes: new Set(['raise']),
+  blockTypes: new Set(['body_statement', 'then', 'else', 'do', 'ensure']),
+  assignTypes: new Set(['assignment']),
+  augAssignTypes: new Set(['operator_assignment']),
+  declTypes: new Set([]),
+  declContainerTypes: new Set([]),
+  memberTypes: new Set(['call']),
+  subscriptTypes: new Set(['element_reference']),
+  identTypes: new Set(['identifier']),
+  callTypes: new Set(['call', 'method_call']),
+  callNameField: 'method',
+  updateTypes: new Set([]),
   conditionField: 'condition',
   consequenceField: 'consequence',
   alternativeField: 'alternative',
@@ -270,6 +409,10 @@ const SPEC_BY_LANGUAGE: Record<string, CfgLangSpec> = {
   JavaScript: TS_SPEC,
   Python: PY_SPEC,
   Go: GO_SPEC,
+  Java: JAVA_SPEC,
+  'C++': CPP_SPEC,
+  Rust: RUST_SPEC,
+  Ruby: RUBY_SPEC,
 };
 
 /** Languages for which CFG construction is implemented (spec v1 scope). */
@@ -377,6 +520,18 @@ class CfgBuilder {
       const inner = stmt.childForFieldName('body') ?? stmt.namedChildren[stmt.namedChildren.length - 1];
       if (inner && inner !== stmt) return this.processStmt(inner, current, loop);
       return current;
+    }
+
+    // Expression-oriented languages (Rust) wrap control-flow in an
+    // expression_statement: `if a { … }` is an expression_statement → if_expression.
+    // Unwrap so it is processed as control flow, not flattened to plain uses.
+    if (t === 'expression_statement' && stmt.namedChildren.length === 1) {
+      const inner = stmt.namedChildren[0];
+      if (
+        spec.ifTypes.has(inner.type) || spec.loopTypes.has(inner.type) || spec.switchTypes.has(inner.type) ||
+        spec.tryTypes.has(inner.type) || spec.returnTypes.has(inner.type) || spec.throwTypes.has(inner.type) ||
+        spec.breakTypes.has(inner.type) || spec.continueTypes.has(inner.type)
+      ) return this.processStmt(inner, current, loop);
     }
 
     if (spec.ifTypes.has(t)) return this.processIf(stmt, current, loop);
@@ -640,22 +795,23 @@ class CfgBuilder {
     const isCaseNode = (ty: string): boolean =>
       ty === 'switch_case' || ty === 'switch_default' ||      // TS
       ty === 'case_clause' || ty === 'case_block' ||           // Py match (case_clause)
-      ty === 'expression_case' || ty === 'default_case' || ty === 'type_case'; // Go
+      ty === 'expression_case' || ty === 'default_case' || ty === 'type_case' || // Go
+      ty === 'case_statement' ||                               // C/C++
+      ty === 'switch_block_statement_group' ||                 // Java
+      ty === 'match_arm' ||                                    // Rust
+      ty === 'when' || ty === 'else';                          // Ruby (when + else)
     const cases = caseContainer.namedChildren.filter(c => isCaseNode(c.type));
     let sawDefault = false;
     let prevFallthrough: number | null = null;
     for (const cs of cases) {
-      const isDefault = cs.type.includes('default');
+      const { labels, stmts, isDefault } = this.caseParts(cs);
       if (isDefault) sawDefault = true;
       const caseBlock = this.newBlock('normal');
       this.addEdge(current, caseBlock, isDefault ? 'false' : 'true');
       // C-style fall-through: a previous case that did not break/return flows in.
       if (spec.switchFallsThrough && prevFallthrough !== null) this.addEdge(prevFallthrough, caseBlock, 'normal');
       // The case label expression(s) are uses of the discriminant context.
-      const caseValue = cs.childForFieldName('value');
-      if (caseValue) this.recordUses(caseValue, current);
-      // Statements = the clause's children minus its label value.
-      const stmts = cs.namedChildren.filter(c => !sameNode(c, caseValue));
+      for (const lbl of labels) this.recordUses(lbl, current);
       const caseExit = this.processSeq(stmts, caseBlock, caseCtx);
       if (spec.switchFallsThrough) {
         prevFallthrough = caseExit;
@@ -668,6 +824,41 @@ class CfgBuilder {
     // No default: the discriminant can match nothing and skip to the merge.
     if (!sawDefault) this.addEdge(current, merge, 'false');
     return merge;
+  }
+
+  /**
+   * Decompose one case/arm/when clause into its label expression(s) (uses of the
+   * discriminant) and its body statements. The structure differs sharply per
+   * language: Rust `match_arm` and Ruby `when` put the body in a field, Java
+   * groups statements under switch_label markers, and C-family put the label in
+   * a `value` field with statements as siblings.
+   */
+  private caseParts(cs: CfgNode): { labels: CfgNode[]; stmts: CfgNode[]; isDefault: boolean } {
+    const t = cs.type;
+    if (t === 'match_arm') { // Rust: pattern => body
+      const pat = cs.childForFieldName('pattern');
+      const body = cs.childForFieldName('value');
+      const isDefault = !!pat && (pat.text === '_' || pat.text.includes('_'));
+      return { labels: pat ? [pat] : [], stmts: body ? this.stmtChildren(body) : [], isDefault };
+    }
+    if (t === 'when') { // Ruby: when <pattern> then <body>
+      const pats = cs.namedChildren.filter(c => c.type === 'pattern' || (c.type !== 'then' && c.type !== 'do'));
+      const body = cs.childForFieldName('then') ?? cs.namedChildren.find(c => c.type === 'then' || this.spec.blockTypes.has(c.type));
+      return { labels: pats, stmts: body ? body.namedChildren : [], isDefault: false };
+    }
+    if (t === 'else') { // Ruby case `else` clause = the default
+      return { labels: [], stmts: cs.namedChildren, isDefault: true };
+    }
+    if (t === 'switch_block_statement_group') { // Java: switch_label* + statements
+      const labels = cs.namedChildren.filter(c => c.type === 'switch_label');
+      const stmts = cs.namedChildren.filter(c => c.type !== 'switch_label');
+      const isDefault = labels.some(l => l.text.includes('default'));
+      return { labels, stmts, isDefault };
+    }
+    // TS switch_case/switch_default, C/C++ case_statement, Go expression_case/etc.
+    const value = cs.childForFieldName('value');
+    const stmts = cs.namedChildren.filter(c => !sameNode(c, value));
+    return { labels: value ? [value] : [], stmts, isDefault: t.includes('default') || (!value && (t === 'case_statement' || t === 'switch_case')) };
   }
 
   /**
@@ -687,7 +878,7 @@ class CfgBuilder {
       // Do not descend into a further-nested function — that is yet another scope.
       if (n !== fnNode && spec.nestedFnTypes.has(n.type)) { this.recordClosureCaptures(n, block); return; }
       if (spec.callTypes.has(n.type)) {
-        const fn = n.childForFieldName('function') ?? n.namedChildren[0];
+        const fn = n.childForFieldName(spec.callNameField) ?? n.childForFieldName('function') ?? n.namedChildren[0];
         for (const c of n.namedChildren) { if (sameNode(c, fn) && fn && spec.identTypes.has(fn.type)) continue; visit(c); }
         return;
       }
@@ -754,15 +945,18 @@ class CfgBuilder {
     const right = node.childForFieldName(spec.rightField) ?? node.namedChildren[node.namedChildren.length - 1];
     const line = node.startPosition.row + 1;
 
+    // Detect a compound operator (`+=`, `-=`, …) from its text, so languages that
+    // use ONE node type for `=` and `+=` (Java, C/C++) are handled correctly.
+    const op = node.childForFieldName('operator')?.text;
+    const compound = !!op && op.length >= 2 && op.endsWith('=') &&
+      op !== '==' && op !== '!=' && op !== '<=' && op !== '>=' && op !== '=>' && op !== '===' && op !== '!==';
+    const reads = augmented || compound; // a compound assignment reads the target first
+
     // Tag RHS uses with the line of the variable they feed (`left`), so a forward
     // value slice chains through a multi-line initializer.
     if (right) this.recordUses(right, block, line);
-    // Augmented assignment (x += 1) reads the target before writing it.
-    if (augmented && left) this.recordUses(left, block);
-
-    // Logical assignment (`x ||= e`, `&&=`, `??=`) writes only conditionally, so
-    // the prior value can survive — record a WEAK def that does not kill it.
-    const op = augmented ? node.childForFieldName('operator')?.text : undefined;
+    // Augmented/compound assignment (x += 1) reads the target before writing it.
+    if (reads && left) this.recordUses(left, block);
     const weak = op === '||=' || op === '&&=' || op === '??=';
 
     if (left) this.recordTarget(left, block, line, weak);
@@ -772,7 +966,8 @@ class CfgBuilder {
     const { spec } = this;
     const line = node.startPosition.row + 1;
     // Go short_var_declaration / var_spec: left & right are expression_lists.
-    const left = node.childForFieldName(spec.leftField) ?? node.childForFieldName('name');
+    // C/C++ init_declarator uses a `declarator` field for the binding target.
+    const left = node.childForFieldName(spec.leftField) ?? node.childForFieldName('name') ?? node.childForFieldName('declarator');
     const right = node.childForFieldName(spec.rightField) ?? node.childForFieldName('value');
     if (right) this.recordUses(right, block, line);
     if (left) {
@@ -852,9 +1047,9 @@ class CfgBuilder {
     if (init) this.recordStmt(init, block);
     const update = loopHeaderField(stmt, 'update') ?? loopHeaderField(stmt, 'increment');
     if (update) this.recordUses(update, block);
-    // for (const x of xs) / for x in xs / for i, v := range xs
-    const left = loopHeaderField(stmt, 'left');
-    const right = loopHeaderField(stmt, 'right');
+    // for (const x of xs) / for x in xs / for i, v := range xs / Rust `for i in xs`
+    const left = loopHeaderField(stmt, 'left') ?? loopHeaderField(stmt, 'pattern');
+    const right = loopHeaderField(stmt, 'right') ?? loopHeaderField(stmt, 'value');
     if (right) this.recordUses(right, block);
     if (left && (spec.identTypes.has(left.type) || left.type.includes('pattern') || left.type === 'expression_list')) {
       this.recordTarget(left, block, line);
@@ -911,7 +1106,7 @@ class CfgBuilder {
       }
       if (spec.callTypes.has(t)) {
         // Skip the callee identifier; collect uses from arguments and receiver.
-        const fn = n.childForFieldName('function') ?? n.namedChildren[0];
+        const fn = n.childForFieldName(spec.callNameField) ?? n.childForFieldName('function') ?? n.namedChildren[0];
         for (const c of n.namedChildren) {
           if (sameNode(c, fn) && fn && spec.identTypes.has(fn.type)) continue;
           visit(c);
@@ -939,12 +1134,13 @@ class CfgBuilder {
     return [node];
   }
 
-  /** Children of an else branch — unwrap else_clause / elif_clause wrappers. */
+  /** Children of an else branch — unwrap else_clause (TS/C++/Rust) / else (Ruby). */
   private elseChildren(node: CfgNode): CfgNode[] {
     if (node.type === 'else_clause') {
-      const body = node.childForFieldName(this.spec.bodyField) ?? node.namedChildren[0];
+      const body = node.childForFieldName(this.spec.bodyField) ?? node.namedChildren.find(c => this.spec.blockTypes.has(c.type)) ?? node.namedChildren[0];
       return body ? this.stmtChildren(body) : [];
     }
+    if (node.type === 'else') return node.namedChildren; // Ruby `else` directly holds statements
     // `else if`: the alternative is the nested if_statement itself.
     return [node];
   }

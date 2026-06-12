@@ -1304,7 +1304,7 @@ const RUST_CALL_QUERY = `
 async function extractRustGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const { parser, lang } = await getRustParser();
   const tree = (parser as Parser).parse(content);
 
@@ -1312,6 +1312,7 @@ async function extractRustGraph(
   const callQuery = new Parser.Query(lang as unknown as Parser.Language, RUST_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1347,6 +1348,9 @@ async function extractRustGraph(
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Rust'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Rust'),
     });
+
+    const fnCfg = buildCfgFor(fnNode, 'Rust');
+    if (fnCfg) cfg.set(id, fnCfg);
   }
 
   const rawEdges: RawEdge[] = [];
@@ -1365,7 +1369,7 @@ async function extractRustGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objectCapture?.node.text });
   }
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
@@ -1401,7 +1405,7 @@ const RUBY_BAREWORD_QUERY = `
 async function extractRubyGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const { parser, lang } = await getRubyParser();
   const tree = (parser as Parser).parse(content);
 
@@ -1410,6 +1414,7 @@ async function extractRubyGraph(
   const barewordQuery = new Parser.Query(lang as unknown as Parser.Language, RUBY_BAREWORD_QUERY);
 
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1441,6 +1446,9 @@ async function extractRubyGraph(
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Ruby'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Ruby'),
     });
+
+    const fnCfg = buildCfgFor(fnNode, 'Ruby');
+    if (fnCfg) cfg.set(id, fnCfg);
   }
 
   // Explicit calls: fn(), obj.method(). RUBY_CALL_QUERY has the same two-pattern
@@ -1462,7 +1470,7 @@ async function extractRubyGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nameCapture.node.startPosition.row + 1 });
   }
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
@@ -1547,7 +1555,7 @@ function dedupeOverlappingCalls(
 async function extractJavaGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const { parser, lang } = await getJavaParser();
   const tree = (parser as Parser).parse(content);
 
@@ -1555,6 +1563,7 @@ async function extractJavaGraph(
   const callQuery = new Parser.Query(lang as unknown as Parser.Language, JAVA_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1595,6 +1604,9 @@ async function extractJavaGraph(
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Java'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Java'),
     });
+
+    const fnCfg = buildCfgFor(fnNode, 'Java');
+    if (fnCfg) cfg.set(id, fnCfg);
   }
 
   // JAVA_CALL_QUERY has two patterns: a qualified `object.name(...)` pattern and a
@@ -1605,7 +1617,7 @@ async function extractJavaGraph(
   // preferring the qualified match (it carries the receiver).
   const rawEdges = dedupeOverlappingCalls(callQuery, tree.rootNode, nodes, 'Java');
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
@@ -1666,11 +1678,12 @@ const CPP_CALL_MEMBER_QUERY = `
 async function extractCppGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const { parser, lang } = await getCppParser();
   const tree = (parser as Parser).parse(content);
 
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   const seen = new Set<number>(); // deduplicate by name-node start position
 
   for (const queryStr of [CPP_FN_BASIC_QUERY, CPP_FN_QUALIFIED_QUERY]) {
@@ -1724,6 +1737,9 @@ async function extractCppGraph(
         docstring: extractDocstringBefore(content, fnNode.startIndex, 'C++'),
         signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'C++'),
       });
+
+      const fnCfg = buildCfgFor(fnNode, 'C++');
+      if (fnCfg) cfg.set(id, fnCfg);
     }
   }
 
@@ -1760,7 +1776,7 @@ async function extractCppGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objectCapture?.node.text });
   }
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
