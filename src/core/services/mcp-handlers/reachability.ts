@@ -11,11 +11,18 @@
  * Prior art: knip / ts-prune do mark-and-sweep, but TS/JS-only. This is the
  * cross-language version over the tree-sitter graph (15+ languages).
  *
- * HONEST LIMITS — output is *candidates*, never deletion authority. Dynamic entry
- * points, framework magic (routes, DI, plugin registries), reflection, and
- * externally-consumed public exports all produce false "dead" positives. Roots
- * therefore include tests, imported symbols, and detected framework entries; every
- * candidate carries a confidence level and a reason; nothing is ever auto-deleted.
+ * HONEST LIMITS — output is *candidates*, never deletion authority. Callback /
+ * event-channel and route→handler dispatch is now PARTIALLY recovered via
+ * synthesized edges (single-language, statically-paired registration+dispatch;
+ * spec: add-synthesized-dynamic-dispatch-edges), and a symbol reachable only
+ * through such an edge is no longer reported as high-confidence dead. What remains
+ * a blind spot: reflection, computed/string-built dispatch (`obj[name]()`),
+ * cross-language bridges, DI/plugin registries with no statically-visible binding,
+ * and externally-consumed public exports — these can still produce false "dead"
+ * positives. Roots include tests, imported symbols, and detected framework
+ * entries; every candidate carries a confidence level and a reason; nothing is
+ * ever auto-deleted. Pass `directResolvedOnly` to ignore synthesized edges and get
+ * the strict directly-resolved reachability instead.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -34,6 +41,13 @@ export interface FindDeadCodeInput {
   maxResults?: number;
   /** Only report candidates whose file path contains this substring. */
   filePattern?: string;
+  /**
+   * Restrict reachability to directly-resolved edges only: synthesized
+   * dynamic-dispatch edges are not traversed (spec: add-synthesized-dynamic-dispatch-edges).
+   * Trades completeness for certainty — a symbol reachable only through a
+   * synthesized edge is then treated as unreached. Default false.
+   */
+  directResolvedOnly?: boolean;
 }
 
 type Confidence = 'high' | 'medium' | 'low';
@@ -48,6 +62,26 @@ const DYNAMIC_LANGS = new Set(['Python', 'Ruby', 'PHP', 'Lua', 'Elixir', 'Bash']
 /** A code node we can reason about (not external, not infrastructure). */
 function isCodeNode(n: FunctionNode): boolean {
   return !n.isExternal && !isIacLanguage(n.language);
+}
+
+/**
+ * Node-ids invoked by something OUTSIDE the call graph — they are liveness roots,
+ * not dead code. Always includes cross-language HTTP handlers (`http_endpoint`
+ * edges). When `includeSynthesizedRoutes` is set (default reachability, not strict
+ * mode), also includes targets of synthesized `route-handler` edges: a framework
+ * invokes a route handler regardless of whether its registration site is itself
+ * reached, so a top-level/unenclosed route still keeps its handler live.
+ */
+function externallyInvokedHandlerIds(cg: SerializedCallGraph, includeSynthesizedRoutes = true): Set<string> {
+  const ids = new Set<string>();
+  for (const e of cg.edges) {
+    if (!e.calleeId) continue;
+    if (e.confidence === 'http_endpoint') ids.add(e.calleeId);
+    else if (includeSynthesizedRoutes && e.confidence === 'synthesized' && e.synthesizedBy === 'route-handler') {
+      ids.add(e.calleeId);
+    }
+  }
+  return ids;
 }
 
 interface DepSignals {
@@ -128,12 +162,10 @@ export async function deadCodeIds(absDir: string, cg: SerializedCallGraph): Prom
   const dep = await loadDepSignals(absDir);
   const importedNames = dep?.names ?? null;
   const { forward } = buildAdjacency(cg);
-  const httpHandlerIds = new Set(
-    cg.edges.filter(e => e.confidence === 'http_endpoint' && e.calleeId).map(e => e.calleeId),
-  );
-  const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'default';
+  const handlerRootIds = externallyInvokedHandlerIds(cg);
+  const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'Main' || n.name === 'default';
   const isRoot = (n: FunctionNode): boolean =>
-    !!n.isTest || httpHandlerIds.has(n.id) || isMainLike(n) ||
+    !!n.isTest || handlerRootIds.has(n.id) || isMainLike(n) ||
     (importedNames !== null && importedNames.has(n.name));
   const codeNodes = cg.nodes.filter(isCodeNode);
   const seedIds = codeNodes.filter(isRoot).map(r => r.id).sort();
@@ -151,15 +183,27 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   const dep = await loadDepSignals(absDir);
   const importedNames = dep?.names ?? null;
   const importedFiles = dep?.files ?? null;
-  const { nodeMap, forward } = buildAdjacency(cg);
+  const { nodeMap, forward } = buildAdjacency(cg, { directResolvedOnly: input.directResolvedOnly });
+
+  // Map each node reached *into* by a synthesized edge → the rule that produced it.
+  // Used (in non-strict mode) to cap confidence at `low` for any candidate-dead
+  // node that has an incoming synthesized edge whose source is itself unreached —
+  // so a synthesized-dispatch target is never reported as high-confidence dead.
+  const synthRuleByCallee = new Map<string, string>();
+  if (!input.directResolvedOnly) {
+    for (const e of cg.edges) {
+      if (e.confidence === 'synthesized' && e.calleeId) {
+        synthRuleByCallee.set(e.calleeId, e.synthesizedBy ?? 'synthesized');
+      }
+    }
+  }
 
   // ── Roots (liveness seeds) — conservative: prefer false-live over false-dead ──
   // tests (they invoke code) · symbols imported by another file · HTTP route
-  // handlers · main-like entry functions.
-  const httpHandlerIds = new Set(
-    cg.edges.filter(e => e.confidence === 'http_endpoint' && e.calleeId).map(e => e.calleeId),
-  );
-  const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'default';
+  // handlers · synthesized route handlers (framework-invoked entry points; omitted
+  // in strict mode) · main-like entry functions.
+  const httpHandlerIds = externallyInvokedHandlerIds(cg, !input.directResolvedOnly);
+  const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'Main' || n.name === 'default';
   const isRoot = (n: FunctionNode): boolean =>
     !!n.isTest ||
     httpHandlerIds.has(n.id) ||
@@ -223,6 +267,15 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       else if (moduleUsed) confidence = 'low';
       else if (exportSignal === 'none') confidence = 'medium';
       else confidence = noCaller ? 'high' : 'medium';
+
+      // A candidate reached into by a synthesized dynamic-dispatch edge (its
+      // dispatcher itself unreached) is never high-confidence dead — it is a known
+      // dynamic-dispatch blind spot, downgraded to low with the rule named.
+      const synthRule = synthRuleByCallee.get(n.id);
+      if (synthRule) {
+        confidence = 'low';
+        reasons.push(`reachable via a synthesized ${synthRule} edge whose dispatcher is not itself reached — likely live through dynamic dispatch`);
+      }
 
       return {
         name: n.name, file: n.filePath, language: n.language, className: n.className ?? null,

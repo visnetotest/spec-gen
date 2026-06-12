@@ -163,6 +163,20 @@ describe('EdgeStore', () => {
       const callers = store.getCallerFiles('src/a.ts');
       expect(callers).toContain('src/d.ts');
     });
+
+    it('round-trips synthesized-edge provenance (confidence + synthesizedBy)', () => {
+      const synth: CallEdge = {
+        callerId: 'src/x.ts::trigger', calleeId: 'src/x.ts::onMount', calleeName: 'onMount',
+        confidence: 'synthesized', kind: 'calls', synthesizedBy: 'event-channel',
+      };
+      store.insertEdges([synth]);
+      const out = store.getCallees('src/x.ts::trigger').find(e => e.calleeId === 'src/x.ts::onMount');
+      expect(out?.confidence).toBe('synthesized');
+      expect(out?.synthesizedBy).toBe('event-channel');
+      // A directly-resolved edge carries no synthesizedBy after the round-trip.
+      const direct = store.getCallees('src/c.ts::baz').find(e => e.calleeId === 'src/a.ts::foo');
+      expect(direct?.synthesizedBy).toBeUndefined();
+    });
   });
 
   describe('nodes', () => {

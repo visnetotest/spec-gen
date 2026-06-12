@@ -17,7 +17,13 @@ import Parser from 'tree-sitter';
 import { FunctionRegistryTrie } from './function-registry-trie.js';
 import type { ImportMap } from './import-resolver-bridge.js';
 import { inferTypesFromSource, resolveViaTypeInference } from './type-inference-engine.js';
-import { extractAllHttpEdges } from './http-route-parser.js';
+import {
+  extractAllHttpEdges,
+  extractTsRouteDefinitions,
+  extractRouteDefinitions,
+  extractJavaRouteDefinitions,
+  type RouteDefinition,
+} from './http-route-parser.js';
 import { buildProjectedIac } from './iac/index.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
@@ -35,6 +41,7 @@ export type EdgeConfidence =
   | 'same_file'      // multiple candidates; same-file wins
   | 'name_only'      // last-resort: pick first candidate by name
   | 'type_name'      // Swift/C++ capitalized receiver treated as type name
+  | 'synthesized'    // dynamic-dispatch edge recovered by AST pattern synthesis (not direct name resolution)
   | 'external';      // unresolved external/stdlib call (synthetic leaf node)
 
 /** Broad relationship kind */
@@ -115,6 +122,13 @@ export interface CallEdge {
   kind?: EdgeKind;
   /** Semantic call type; only set when kind === 'calls' */
   callType?: CallType;
+  /**
+   * Name of the synthesis rule that produced this edge (e.g. 'event-channel',
+   * 'route-handler'). Set only when `confidence === 'synthesized'`; absent on
+   * directly-resolved edges. Lets every consumer and agent see which conclusions
+   * lean on a heuristic and which rest on direct name resolution.
+   */
+  synthesizedBy?: string;
 }
 
 /**
@@ -137,6 +151,10 @@ export const CALL_DISTANCE_COSTS: Record<EdgeConfidence, number> = {
   type_name: 2,
   // Heuristic — last-resort first-candidate-by-name match.
   name_only: 3,
+  // Synthesized dynamic-dispatch edge — deliberately costlier than ANY directly-
+  // resolved confidence so find_path / call-distance scoping prefer a directly-
+  // resolved route when one exists, falling back to synthesized only when needed.
+  synthesized: 4,
   // Unresolved external/stdlib leaf — excluded from internal traversal.
   external: Infinity,
 };
@@ -163,6 +181,8 @@ export function callDistance(edge: CallEdge): number {
       return 2;
     case 'name_only':
       return 3;
+    case 'synthesized':
+      return 4;
     case 'external':
       return Infinity;
     default: {
@@ -409,6 +429,10 @@ let _rubyParser: Parser | undefined;
 let _javaParser: Parser | undefined;
 let _cppParser: Parser | undefined;
 let _swiftParser: Parser | undefined;
+let _phpParser: Parser | undefined;
+let _csParser: Parser | undefined;
+let _ktParser: Parser | undefined;
+let _exParser: Parser | undefined;
 let _TsLanguage: object | undefined;
 let _PyLanguage: object | undefined;
 let _GoLanguage: object | undefined;
@@ -417,6 +441,10 @@ let _RubyLanguage: object | undefined;
 let _JavaLanguage: object | undefined;
 let _CppLanguage: object | undefined;
 let _SwiftLanguage: object | undefined;
+let _PhpLanguage: object | undefined;
+let _CsLanguage: object | undefined;
+let _KtLanguage: object | undefined;
+let _ExLanguage: object | undefined;
 
 async function getTSParser(): Promise<{ parser: Parser; lang: object }> {
   if (!_tsParser) {
@@ -476,6 +504,46 @@ async function getJavaParser(): Promise<{ parser: Parser; lang: object }> {
     (_javaParser as Parser).setLanguage(_JavaLanguage as unknown as Parser.Language);
   }
   return { parser: _javaParser!, lang: _JavaLanguage! };
+}
+
+async function getPhpParser(): Promise<{ parser: Parser; lang: object }> {
+  if (!_phpParser) {
+    const phpModule = await import('tree-sitter-php');
+    _PhpLanguage = (phpModule.default as { php: object }).php;
+    _phpParser = new Parser();
+    (_phpParser as Parser).setLanguage(_PhpLanguage as unknown as Parser.Language);
+  }
+  return { parser: _phpParser!, lang: _PhpLanguage! };
+}
+
+async function getCSharpParser(): Promise<{ parser: Parser; lang: object }> {
+  if (!_csParser) {
+    const csModule = await import('tree-sitter-c-sharp');
+    _CsLanguage = csModule.default;
+    _csParser = new Parser();
+    (_csParser as Parser).setLanguage(_CsLanguage as unknown as Parser.Language);
+  }
+  return { parser: _csParser!, lang: _CsLanguage! };
+}
+
+async function getKotlinParser(): Promise<{ parser: Parser; lang: object }> {
+  if (!_ktParser) {
+    const ktModule = await import('tree-sitter-kotlin');
+    _KtLanguage = ktModule.default;
+    _ktParser = new Parser();
+    (_ktParser as Parser).setLanguage(_KtLanguage as unknown as Parser.Language);
+  }
+  return { parser: _ktParser!, lang: _KtLanguage! };
+}
+
+async function getElixirParser(): Promise<{ parser: Parser; lang: object }> {
+  if (!_exParser) {
+    const exModule = await import('tree-sitter-elixir');
+    _ExLanguage = exModule.default;
+    _exParser = new Parser();
+    (_exParser as Parser).setLanguage(_ExLanguage as unknown as Parser.Language);
+  }
+  return { parser: _exParser!, lang: _ExLanguage! };
 }
 
 async function getCppParser(): Promise<{ parser: Parser; lang: object }> {
@@ -2676,6 +2744,1109 @@ export function computeCyclomaticComplexity(body: string, language: string): num
 // CALL GRAPH BUILDER
 // ============================================================================
 
+// ============================================================================
+// DYNAMIC-DISPATCH EDGE SYNTHESIS (spec: add-synthesized-dynamic-dispatch-edges)
+//
+// A deterministic, additive post-resolution pass that recovers call edges direct
+// name resolution cannot: event channels and route→handler bindings. Every edge
+// it emits carries `confidence: 'synthesized'` + a `synthesizedBy` rule name, so
+// it is never silently mixed with directly-resolved edges. No LLM — pattern
+// matching over the same tree-sitter trees the graph is built from. Rules are
+// independent: each reads the inputs and returns edges; adding one cannot change
+// another's output.
+// ============================================================================
+
+/** Per-channel handler fan-out cap. Over-cap channels are DROPPED, never guessed. */
+export const EVENT_CHANNEL_FANOUT_CAP = 8;
+
+/**
+ * Identifiers that are runtime/promise/middleware callback LOCALS, not registered named
+ * handlers — e.g. the `resolve`/`reject` parameters of a Promise executor, Express/Koa
+ * `next`, node-callback `err`/`callback`/`cb`/`done`. Resolving these by name to a
+ * coincidentally same-named function elsewhere produces false synthesized edges
+ * (observed: `setTimeout(resolve, ms)` inside `new Promise((resolve) => …)`). They are
+ * never legitimate handler references, so all reference-based handler resolution skips them.
+ */
+const RUNTIME_CALLBACK_LOCALS = new Set(['resolve', 'reject', 'next', 'done', 'callback', 'cb', 'err', 'error', 'fulfill']);
+
+/**
+ * JS/TS methods that register a handler on a channel key: `x.on('k', fn)`. Covers
+ * Node EventEmitter (`on`/`once`/`addListener`/`prepend*`), the DOM
+ * (`addEventListener`), and pub/sub (`subscribe`). A bare `subscribe(fn)` (RxJS,
+ * no key) is naturally ignored — registration requires a string-literal first arg.
+ */
+const EVENT_REGISTER_METHODS = new Set([
+  'on', 'once', 'addListener', 'prependListener', 'prependOnceListener', 'addEventListener', 'subscribe',
+]);
+/** JS/TS methods that dispatch on a channel key: `x.emit('k')` / `x.dispatchEvent(new Event('k'))`. */
+const EVENT_DISPATCH_METHODS = new Set(['emit', 'dispatch', 'publish', 'dispatchEvent']);
+
+/** Ruby adds instrumentation/broadcast dispatch verbs (ActiveSupport::Notifications, pub/sub). */
+const RUBY_DISPATCH_METHODS = new Set([...EVENT_DISPATCH_METHODS, 'instrument', 'broadcast']);
+
+/** PHP register/dispatch verbs (Laravel `Event::listen`/`event()`, Symfony `addListener`/`dispatch`). */
+const PHP_REGISTER_METHODS = new Set(['listen', 'addListener', 'subscribe', 'on']);
+const PHP_DISPATCH_METHODS = new Set(['dispatch', 'emit', 'fire', 'publish', 'broadcast', 'event']);
+
+/** Single regex pre-filter so we only parse files that could contain a pattern. */
+const EVENT_PREFILTER = /\b(on|once|addListener|prependListener|prependOnceListener|addEventListener|subscribe|emit|dispatch|publish|dispatchEvent|instrument|broadcast|listen|fire|event)\s*\(/;
+
+/** Pre-filters for the type-based (Java/C#) rule: an annotation/interface or a dispatch verb. */
+const JAVA_TYPE_EVENT_PREFILTER = /@(?:Subscribe|EventListener|TransactionalEventListener|EventHandler)\b|\b(?:post|publishEvent|publish|fire|fireEvent|raise|send)\s*\(/;
+const CSHARP_TYPE_EVENT_PREFILTER = /\b(?:INotificationHandler|IRequestHandler|IConsumer|IEventHandler|IHandleMessages|IHandle)\b|\b(?:Publish|Send|Raise|RaiseEvent|Fire|Notify)\s*\(/;
+/** Swift NotificationCenter pre-filter: an observer registration or a post. */
+const SWIFT_EVENT_PREFILTER = /\b(?:addObserver|post)\s*\(/;
+
+/** Resolve a referenced simple name to a single internal function node, or undefined
+ *  when unknown or ambiguous (never guesses). Prefers a match in `preferFile`. */
+type HandlerResolver = (name: string, preferFile: string) => FunctionNode | undefined;
+
+/** Method name of a call's callee: property for `a.b()`, identifier for `b()`. */
+function calleeMethodName(callee: Parser.SyntaxNode | null): string | undefined {
+  if (!callee) return undefined;
+  if (callee.type === 'identifier') return callee.text;
+  if (callee.type === 'member_expression') return callee.childForFieldName('property')?.text;
+  return undefined;
+}
+
+/**
+ * Static channel key of an argument node, or undefined when not statically pairable.
+ * Accepts the forms that appear on BOTH a registration and a dispatch site so the two
+ * pair deterministically:
+ *   - a string literal `'mount'`                          → `str:mount`
+ *   - a substitution-free template literal `` `mount` ``  → `str:mount`
+ *   - a constant member reference `EVENTS.MOUNT`          → `const:EVENTS.MOUNT`
+ * The `str:`/`const:` namespace prefix keeps a string `'MOUNT'` from pairing with a
+ * constant `EVENTS.MOUNT`. A computed/dynamic key returns undefined (no guess).
+ */
+function staticChannelKey(node: Parser.SyntaxNode | undefined): string | undefined {
+  if (!node) return undefined;
+  if (node.type === 'string') {
+    // tree-sitter `string` text includes the surrounding quotes.
+    return `str:${node.text.length >= 2 ? node.text.slice(1, -1) : ''}`;
+  }
+  if (node.type === 'template_string') {
+    // Only a literal template with no ${…} substitution is a static key.
+    if (node.descendantsOfType('template_substitution').length === 0) {
+      return `str:${node.text.length >= 2 ? node.text.slice(1, -1) : ''}`;
+    }
+    return undefined;
+  }
+  if (node.type === 'member_expression') {
+    const obj = node.childForFieldName('object');
+    const prop = node.childForFieldName('property');
+    if (obj?.type === 'identifier' && prop?.type === 'property_identifier') {
+      return `const:${obj.text}.${prop.text}`;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Channel key for a dispatch call. For `dispatchEvent(new Event('k'))` /
+ * `dispatchEvent(new CustomEvent('k'))` the key is the Event constructor's first
+ * static argument; otherwise it is the call's first static argument.
+ */
+function dispatchChannelKey(method: string, args: Parser.SyntaxNode[]): string | undefined {
+  if (method === 'dispatchEvent') {
+    const arg0 = args[0];
+    if (arg0?.type === 'new_expression') {
+      const ctorArgs = arg0.childForFieldName('arguments')?.namedChildren ?? [];
+      return staticChannelKey(ctorArgs[0]);
+    }
+    return undefined;
+  }
+  return staticChannelKey(args[0]);
+}
+
+/**
+ * Resolve the handler argument of a registration to the internal function node-ids
+ * it dispatches to. Handles, deterministically and without guessing:
+ *   - a bare identifier `fn`
+ *   - a member reference `this.fn` / `obj.fn`
+ *   - a bound reference `fn.bind(this)`
+ *   - an inline arrow / function expression — wired to the internal functions its
+ *     body actually calls (so `() => realHandler()` still connects the dispatcher
+ *     to `realHandler`).
+ * Every leaf resolves through {@link HandlerResolver} (exact, single-match only).
+ */
+function resolveHandlerTargets(
+  arg: Parser.SyntaxNode | undefined,
+  file: string,
+  resolveHandler: HandlerResolver,
+): string[] {
+  if (!arg) return [];
+  const add = (name: string | undefined, out: string[]): void => {
+    if (!name) return;
+    const node = resolveHandler(name, file);
+    if (node) out.push(node.id);
+  };
+
+  if (arg.type === 'identifier') {
+    const out: string[] = []; add(arg.text, out); return out;
+  }
+  if (arg.type === 'member_expression') {
+    const out: string[] = []; add(arg.childForFieldName('property')?.text, out); return out;
+  }
+  if (arg.type === 'call_expression') {
+    // `fn.bind(this)` — unwrap to the bound function reference.
+    const callee = arg.childForFieldName('function');
+    if (callee?.type === 'member_expression' && callee.childForFieldName('property')?.text === 'bind') {
+      return resolveHandlerTargets(callee.childForFieldName('object') ?? undefined, file, resolveHandler);
+    }
+    return [];
+  }
+  if (arg.type === 'arrow_function' || arg.type === 'function_expression' || arg.type === 'function' || arg.type === 'function_declaration') {
+    // Inline handler — wire to the internal functions its body calls.
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const inner of arg.descendantsOfType('call_expression')) {
+      const id = resolveHandler(calleeMethodName(inner.childForFieldName('function')) ?? '', file)?.id;
+      if (id && !seen.has(id)) { seen.add(id); out.push(id); }
+    }
+    return out;
+  }
+  return [];
+}
+
+// Shared registration/dispatch site shapes produced by each language's collector.
+interface EventRegistration { key: string; handlerIds: string[] }
+interface EventDispatch { key: string; callerId: string; line: number }
+interface EventSites { registrations: EventRegistration[]; dispatches: EventDispatch[] }
+
+/**
+ * Pair an EventSites set (from ONE language) into synthesized edges: group handlers
+ * by channel key, drop over-cap channels, and emit a dispatcher→handler edge per
+ * pair. Language-agnostic — only the collection of sites is language-specific, so
+ * pairing/fan-out/provenance stay identical across languages and adding a language
+ * cannot change another's edges.
+ */
+function pairAndEmitEventEdges(sites: EventSites, allNodes: Map<string, FunctionNode>, ruleName: string): CallEdge[] {
+  if (sites.dispatches.length === 0) return [];
+
+  const handlersByKey = new Map<string, Set<string>>();
+  for (const reg of sites.registrations) {
+    let set = handlersByKey.get(reg.key);
+    if (!set) handlersByKey.set(reg.key, (set = new Set()));
+    for (const id of reg.handlerIds) set.add(id);
+  }
+
+  // Fan-out cap: DROP over-cap channels (typically generic keys) rather than guess.
+  for (const [key, set] of handlersByKey) {
+    if (set.size > EVENT_CHANNEL_FANOUT_CAP) {
+      logger.debug(
+        `[edge-synthesis] event-channel '${key}' dropped: ${set.size} handlers exceed cap ${EVENT_CHANNEL_FANOUT_CAP}`,
+      );
+      handlersByKey.delete(key);
+    }
+  }
+
+  const edges: CallEdge[] = [];
+  const seen = new Set<string>();
+  for (const disp of sites.dispatches) {
+    const handlers = handlersByKey.get(disp.key);
+    if (!handlers) continue;
+    for (const handlerId of handlers) {
+      if (handlerId === disp.callerId) continue; // no trivial self-edge
+      const pair = `${disp.callerId}\0${handlerId}`;
+      if (seen.has(pair)) continue;
+      seen.add(pair);
+      edges.push({
+        callerId: disp.callerId,
+        calleeId: handlerId,
+        calleeName: allNodes.get(handlerId)?.name ?? '',
+        line: disp.line,
+        confidence: 'synthesized',
+        kind: 'calls',
+        callType: 'direct',
+        synthesizedBy: ruleName,
+      });
+    }
+  }
+  return edges;
+}
+
+/** Collect JS/TS event-channel sites from one parsed file into `sites`. */
+function collectTsEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], filePath: string,
+  resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  for (const call of tree.rootNode.descendantsOfType('call_expression')) {
+    const method = calleeMethodName(call.childForFieldName('function'));
+    if (!method) continue;
+    const argsNode = call.childForFieldName('arguments');
+    if (!argsNode) continue;
+    const args = argsNode.namedChildren;
+    if (EVENT_REGISTER_METHODS.has(method)) {
+      const key = staticChannelKey(args[0]);
+      if (key !== undefined) {
+        const handlerIds = resolveHandlerTargets(args[1], filePath, resolveHandler);
+        if (handlerIds.length) sites.registrations.push({ key, handlerIds });
+      }
+    } else if (EVENT_DISPATCH_METHODS.has(method)) {
+      const key = dispatchChannelKey(method, args);
+      if (key !== undefined) {
+        const caller = findEnclosingFunction(fileNodes, call.startIndex);
+        if (caller) sites.dispatches.push({ key, callerId: caller.id, line: call.startPosition.row + 1 });
+      }
+    }
+  }
+}
+
+/** Method name of a Python call's callee: `x.method()` (attribute) or `method()` (identifier). */
+function pyCalleeMethodName(func: Parser.SyntaxNode | null): string | undefined {
+  if (!func) return undefined;
+  if (func.type === 'identifier') return func.text;
+  if (func.type === 'attribute') return func.childForFieldName('attribute')?.text;
+  return undefined;
+}
+
+/** Static channel key for a Python argument (string literal or `Const.MEMBER`), namespaced. */
+function pyChannelKey(node: Parser.SyntaxNode | undefined): string | undefined {
+  if (!node) return undefined;
+  if (node.type === 'string') {
+    if (node.descendantsOfType('interpolation').length > 0) return undefined; // f-string with {expr}
+    const m = node.text.match(/^[A-Za-z]*('''|"""|'|")([\s\S]*)\1$/);
+    return m ? `str:${m[2]}` : undefined;
+  }
+  if (node.type === 'attribute') {
+    const obj = node.childForFieldName('object');
+    const attr = node.childForFieldName('attribute');
+    if (obj?.type === 'identifier' && attr?.type === 'identifier') return `const:${obj.text}.${attr.text}`;
+    return undefined;
+  }
+  return undefined;
+}
+
+/** Resolve a Python handler argument to internal node-ids: `fn`, `self.fn`, or an inline `lambda`. */
+function pyHandlerTargets(arg: Parser.SyntaxNode | undefined, file: string, resolveHandler: HandlerResolver): string[] {
+  if (!arg) return [];
+  const out: string[] = [];
+  const add = (name: string | undefined): void => { if (name) { const n = resolveHandler(name, file); if (n) out.push(n.id); } };
+  if (arg.type === 'identifier') { add(arg.text); return out; }
+  if (arg.type === 'attribute') { add(arg.childForFieldName('attribute')?.text); return out; }
+  if (arg.type === 'lambda') {
+    const seen = new Set<string>();
+    for (const inner of arg.descendantsOfType('call')) {
+      const id = resolveHandler(pyCalleeMethodName(inner.childForFieldName('function')) ?? '', file)?.id;
+      if (id && !seen.has(id)) { seen.add(id); out.push(id); }
+    }
+    return out;
+  }
+  return [];
+}
+
+/** Collect Python event-channel sites (pyee-style `on`/`emit`, pub/sub `subscribe`/`publish`). */
+function collectPyEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], filePath: string,
+  resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  for (const call of tree.rootNode.descendantsOfType('call')) {
+    const method = pyCalleeMethodName(call.childForFieldName('function'));
+    if (!method) continue;
+    const args = call.childForFieldName('arguments')?.namedChildren ?? [];
+    if (EVENT_REGISTER_METHODS.has(method)) {
+      const key = pyChannelKey(args[0]);
+      if (key !== undefined) {
+        const handlerIds = pyHandlerTargets(args[1], filePath, resolveHandler);
+        if (handlerIds.length) sites.registrations.push({ key, handlerIds });
+      }
+    } else if (EVENT_DISPATCH_METHODS.has(method)) {
+      const key = pyChannelKey(args[0]); // Python has no dispatchEvent(new Event())
+      if (key !== undefined) {
+        const caller = findEnclosingFunction(fileNodes, call.startIndex);
+        if (caller) sites.dispatches.push({ key, callerId: caller.id, line: call.startPosition.row + 1 });
+      }
+    }
+  }
+}
+
+/** Static channel key for a Ruby argument: a symbol (`:mount`) or a string literal. */
+function rubyChannelKey(node: Parser.SyntaxNode | undefined): string | undefined {
+  if (!node) return undefined;
+  if (node.type === 'simple_symbol') return `sym:${node.text.replace(/^:/, '')}`;
+  if (node.type === 'string') {
+    if (node.descendantsOfType('interpolation').length > 0) return undefined;
+    const m = node.text.match(/^('|")([\s\S]*)\1$/);
+    return m ? `str:${m[2]}` : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve a Ruby handler to internal node-ids. Ruby handlers are usually a block
+ * (`on(:x) { … }` / `subscribe('x') { … }`) — wired to the internal functions the
+ * block calls, including paren-less bareword calls; the conservative resolver drops
+ * block params and locals. Also handles a block-pass `&handler` / trailing proc arg.
+ */
+function rubyHandlerTargets(call: Parser.SyntaxNode, file: string, resolveHandler: HandlerResolver): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (name: string | undefined): void => {
+    if (!name) return;
+    const n = resolveHandler(name, file);
+    if (n && !seen.has(n.id)) { seen.add(n.id); out.push(n.id); }
+  };
+  const block = call.childForFieldName('block');
+  if (block) {
+    for (const inner of block.descendantsOfType('call')) add(inner.childForFieldName('method')?.text);
+    // Paren-less bareword calls appear as bare identifiers; resolver gates to real fns.
+    for (const id of block.descendantsOfType('identifier')) add(id.text);
+  }
+  const args = call.childForFieldName('arguments')?.namedChildren ?? [];
+  for (const a of args.slice(1)) {
+    if (a.type === 'block_argument' || a.type === 'block_pass') {
+      const ref = a.namedChildren.find(c => c.type === 'identifier' || c.type === 'simple_symbol');
+      if (ref) add(ref.type === 'simple_symbol' ? ref.text.replace(/^:/, '') : ref.text);
+    } else if (a.type === 'identifier') {
+      add(a.text);
+    }
+  }
+  return out;
+}
+
+/** Collect Ruby event-channel sites (symbol/string-keyed on/emit, ActiveSupport::Notifications). */
+function collectRubyEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], filePath: string,
+  resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  for (const call of tree.rootNode.descendantsOfType('call')) {
+    const method = call.childForFieldName('method')?.text;
+    if (!method) continue;
+    const args = call.childForFieldName('arguments')?.namedChildren ?? [];
+    if (EVENT_REGISTER_METHODS.has(method)) {
+      const key = rubyChannelKey(args[0]);
+      if (key !== undefined) {
+        const handlerIds = rubyHandlerTargets(call, filePath, resolveHandler);
+        if (handlerIds.length) sites.registrations.push({ key, handlerIds });
+      }
+    } else if (RUBY_DISPATCH_METHODS.has(method)) {
+      const key = rubyChannelKey(args[0]);
+      if (key !== undefined) {
+        const caller = findEnclosingFunction(fileNodes, call.startIndex);
+        if (caller) sites.dispatches.push({ key, callerId: caller.id, line: call.startPosition.row + 1 });
+      }
+    }
+  }
+}
+
+/** Method name of a PHP call (`Cls::m()`, `$o->m()`, or `m()`). */
+function phpMethodName(call: Parser.SyntaxNode): string | undefined {
+  if (call.type === 'function_call_expression') return call.childForFieldName('function')?.text;
+  return call.childForFieldName('name')?.text; // scoped_/member_call_expression
+}
+
+/** Unwrap a PHP `arguments` node to its ordered argument VALUE nodes. */
+function phpArgValues(call: Parser.SyntaxNode): Parser.SyntaxNode[] {
+  const argsNode = call.childForFieldName('arguments');
+  return (argsNode?.namedChildren ?? []).map(a => (a.type === 'argument' ? a.namedChildren[0] ?? a : a));
+}
+
+/** Static string-literal channel key for a PHP value, or undefined. */
+function phpChannelKey(node: Parser.SyntaxNode | undefined): string | undefined {
+  if (!node || node.type !== 'string') return undefined; // encapsed_string (interpolated) excluded
+  const m = node.text.match(/^('|")([\s\S]*)\1$/);
+  return m ? `str:${m[2]}` : undefined;
+}
+
+/** Resolve a PHP handler value to node-ids: a `'fn'` string, `[Cls, 'method']`, or a closure. */
+function phpHandlerTargets(node: Parser.SyntaxNode | undefined, file: string, resolveHandler: HandlerResolver): string[] {
+  if (!node) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (raw: string | undefined): void => {
+    if (!raw) return;
+    const m = raw.match(/^('|")([\s\S]*)\1$/);
+    const name = (m ? m[2] : raw).split('\\').pop()?.split('::').pop();
+    if (!name) return;
+    const n = resolveHandler(name, file);
+    if (n && !seen.has(n.id)) { seen.add(n.id); out.push(n.id); }
+  };
+  if (node.type === 'string') { add(node.text); return out; }
+  if (node.type === 'array_creation_expression') {
+    // [$this, 'method'] / [Cls::class, 'method'] — the method name is a string element.
+    for (const el of node.descendantsOfType('string')) add(el.text);
+    return out;
+  }
+  if (node.type === 'anonymous_function' || node.type === 'anonymous_function_creation_expression' || node.type === 'arrow_function') {
+    for (const inner of node.descendantsOfType(['function_call_expression', 'scoped_call_expression', 'member_call_expression'])) {
+      add(phpMethodName(inner));
+    }
+    return out;
+  }
+  return [];
+}
+
+/** Collect PHP event-channel sites (Laravel `Event::listen`/`event()`, Symfony dispatcher). */
+function collectPhpEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], filePath: string,
+  resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  const calls = tree.rootNode.descendantsOfType(['scoped_call_expression', 'member_call_expression', 'function_call_expression']);
+  for (const call of calls) {
+    const method = phpMethodName(call);
+    if (!method) continue;
+    const args = phpArgValues(call);
+    if (PHP_REGISTER_METHODS.has(method)) {
+      const key = phpChannelKey(args[0]);
+      if (key !== undefined) {
+        const handlerIds = phpHandlerTargets(args[1], filePath, resolveHandler);
+        if (handlerIds.length) sites.registrations.push({ key, handlerIds });
+      }
+    } else if (PHP_DISPATCH_METHODS.has(method)) {
+      const key = phpChannelKey(args[0]);
+      if (key !== undefined) {
+        const caller = findEnclosingFunction(fileNodes, call.startIndex);
+        if (caller) sites.dispatches.push({ key, callerId: caller.id, line: call.startPosition.row + 1 });
+      }
+    }
+  }
+}
+
+// ── Type-based events (Java/C#): keyed on the event TYPE, not a string channel ──
+
+/** Java annotations that mark an event-handler method. */
+const JAVA_HANDLER_ANNOTATIONS = new Set(['Subscribe', 'EventListener', 'TransactionalEventListener', 'EventHandler']);
+/** Java dispatch verbs carrying a constructed event (Guava `post`, Spring `publishEvent`). */
+const JAVA_TYPE_DISPATCH_METHODS = new Set(['post', 'publishEvent', 'publish', 'fire', 'fireEvent', 'raise', 'send']);
+/** C# handler interfaces whose first type argument is the handled event type. */
+const CSHARP_HANDLER_INTERFACES = new Set(['INotificationHandler', 'IRequestHandler', 'IConsumer', 'IEventHandler', 'IHandleMessages', 'IHandle']);
+/** C# dispatch verbs carrying a constructed event (MediatR `Publish`/`Send`, aggregators `Publish`). */
+const CSHARP_TYPE_DISPATCH_METHODS = new Set(['Publish', 'Send', 'Raise', 'RaiseEvent', 'Fire', 'Notify']);
+
+/** Handler node-id for a declaration node (the call-graph node enclosing its name). */
+function handlerNodeIdAt(declNode: Parser.SyntaxNode, fileNodes: FunctionNode[]): string | undefined {
+  const pos = (declNode.childForFieldName('name') ?? declNode).startIndex;
+  return findEnclosingFunction(fileNodes, pos)?.id;
+}
+
+/** Collect Java type-based event sites (`@Subscribe`/`@EventListener` ↔ `post(new T())`). */
+function collectJavaTypeEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], _filePath: string, _resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  for (const method of tree.rootNode.descendantsOfType('method_declaration')) {
+    // `modifiers` is a child (not a named field) in tree-sitter-java; annotations live inside it.
+    const mods = method.namedChildren.find(c => c.type === 'modifiers');
+    if (!mods) continue;
+    const annotated = mods.namedChildren.some(
+      a => (a.type === 'marker_annotation' || a.type === 'annotation') &&
+        JAVA_HANDLER_ANNOTATIONS.has(a.childForFieldName('name')?.text ?? ''),
+    );
+    if (!annotated) continue;
+    const params = method.childForFieldName('parameters') ?? method.namedChildren.find(c => c.type === 'formal_parameters');
+    const firstParam = params?.namedChildren.find(c => c.type === 'formal_parameter');
+    const typeNode = firstParam?.childForFieldName('type');
+    if (typeNode?.type !== 'type_identifier') continue; // require a concrete type
+    const handlerId = handlerNodeIdAt(method, fileNodes);
+    if (handlerId) sites.registrations.push({ key: `type:${typeNode.text}`, handlerIds: [handlerId] });
+  }
+  for (const inv of tree.rootNode.descendantsOfType('method_invocation')) {
+    const name = inv.childForFieldName('name')?.text;
+    if (!name || !JAVA_TYPE_DISPATCH_METHODS.has(name)) continue;
+    const arg0 = inv.childForFieldName('arguments')?.namedChildren[0];
+    if (arg0?.type !== 'object_creation_expression') continue;
+    const t = arg0.childForFieldName('type')?.text;
+    if (!t) continue;
+    const caller = findEnclosingFunction(fileNodes, inv.startIndex);
+    if (caller) sites.dispatches.push({ key: `type:${t}`, callerId: caller.id, line: inv.startPosition.row + 1 });
+  }
+}
+
+/** C# invocation method name: `x.M()` (member access) or `M()` (identifier). */
+function csInvocationName(inv: Parser.SyntaxNode): string | undefined {
+  const fn = inv.childForFieldName('function');
+  if (!fn) return undefined;
+  if (fn.type === 'member_access_expression') return fn.childForFieldName('name')?.text;
+  if (fn.type === 'identifier') return fn.text;
+  return undefined;
+}
+
+/** First type argument of a handler interface in a C# class's base list, or undefined. */
+function csHandlerEventType(cls: Parser.SyntaxNode): string | undefined {
+  const bases = cls.childForFieldName('bases') ?? cls.namedChildren.find(c => c.type === 'base_list');
+  if (!bases) return undefined;
+  for (const g of bases.descendantsOfType('generic_name')) {
+    const base = g.namedChildren.find(c => c.type === 'identifier')?.text;
+    if (base && CSHARP_HANDLER_INTERFACES.has(base)) {
+      const arg = g.childForFieldName('type_arguments')?.namedChildren.find(c => c.type === 'identifier')
+        ?? g.namedChildren.find(c => c.type === 'type_argument_list')?.namedChildren.find(c => c.type === 'identifier');
+      if (arg) return arg.text;
+    }
+  }
+  return undefined;
+}
+
+/** First parameter type name of a C# method, or undefined. */
+function csFirstParamType(method: Parser.SyntaxNode): string | undefined {
+  const params = method.childForFieldName('parameters') ?? method.namedChildren.find(c => c.type === 'parameter_list');
+  const first = params?.namedChildren.find(c => c.type === 'parameter');
+  const t = first?.childForFieldName('type');
+  return t?.type === 'identifier' ? t.text : undefined;
+}
+
+/** Collect C# type-based event sites (`INotificationHandler<T>` ↔ `Publish(new T())`). */
+function collectCSharpTypeEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], _filePath: string, _resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  for (const cls of tree.rootNode.descendantsOfType('class_declaration')) {
+    const eventType = csHandlerEventType(cls);
+    if (!eventType) continue;
+    for (const method of cls.descendantsOfType('method_declaration')) {
+      if (csFirstParamType(method) !== eventType) continue;
+      const handlerId = handlerNodeIdAt(method, fileNodes);
+      if (handlerId) sites.registrations.push({ key: `type:${eventType}`, handlerIds: [handlerId] });
+    }
+  }
+  for (const inv of tree.rootNode.descendantsOfType('invocation_expression')) {
+    const name = csInvocationName(inv);
+    if (!name || !CSHARP_TYPE_DISPATCH_METHODS.has(name)) continue;
+    const arg0 = inv.childForFieldName('arguments')?.namedChildren[0]?.namedChildren?.[0]
+      ?? inv.childForFieldName('arguments')?.namedChildren[0];
+    const ctor = arg0?.type === 'object_creation_expression' ? arg0
+      : arg0?.descendantsOfType('object_creation_expression')[0];
+    const t = ctor?.childForFieldName('type')?.text;
+    if (!t) continue;
+    const caller = findEnclosingFunction(fileNodes, inv.startIndex);
+    if (caller) sites.dispatches.push({ key: `type:${t}`, callerId: caller.id, line: inv.startPosition.row + 1 });
+  }
+}
+
+/** Method name of a Kotlin call_expression: `recv.m(...)` (navigation) or `m(...)` (identifier). */
+function ktCallName(call: Parser.SyntaxNode): string | undefined {
+  const callee = call.namedChildren[0];
+  if (!callee) return undefined;
+  if (callee.type === 'simple_identifier') return callee.text;
+  if (callee.type === 'navigation_expression') {
+    const suffixes = callee.namedChildren.filter(c => c.type === 'navigation_suffix');
+    return suffixes[suffixes.length - 1]?.namedChildren.find(c => c.type === 'simple_identifier')?.text;
+  }
+  return undefined;
+}
+
+/** Ordered argument VALUE nodes of a Kotlin call (`call_suffix > value_arguments > value_argument`). */
+function ktArgValues(call: Parser.SyntaxNode): Parser.SyntaxNode[] {
+  const suffix = call.namedChildren.find(c => c.type === 'call_suffix');
+  const va = suffix?.namedChildren.find(c => c.type === 'value_arguments');
+  return (va?.namedChildren.filter(c => c.type === 'value_argument') ?? [])
+    .map(a => a.namedChildren[a.namedChildren.length - 1]);
+}
+
+/** Constructed type for a Kotlin value: `Foo(...)` is a call_expression with a Capitalized callee. */
+function ktConstructedType(value: Parser.SyntaxNode | undefined): string | undefined {
+  if (value?.type !== 'call_expression') return undefined;
+  const callee = value.namedChildren[0];
+  if (callee?.type === 'simple_identifier' && /^[A-Z]/.test(callee.text)) return callee.text;
+  return undefined;
+}
+
+/** Collect Kotlin type-based event sites (JVM annotation model, like Java; construction is `T(...)`). */
+function collectKotlinTypeEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], _filePath: string, _resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  for (const fn of tree.rootNode.descendantsOfType('function_declaration')) {
+    const mods = fn.namedChildren.find(c => c.type === 'modifiers');
+    const annotated = mods?.descendantsOfType('annotation').some(
+      a => JAVA_HANDLER_ANNOTATIONS.has(a.descendantsOfType('type_identifier')[0]?.text ?? ''),
+    );
+    if (!annotated) continue;
+    const params = fn.namedChildren.find(c => c.type === 'function_value_parameters');
+    const firstParam = params?.namedChildren.find(c => c.type === 'parameter');
+    const t = firstParam?.descendantsOfType('type_identifier')[0]?.text;
+    if (!t) continue;
+    const nameNode = fn.namedChildren.find(c => c.type === 'simple_identifier');
+    const handlerId = nameNode && findEnclosingFunction(fileNodes, nameNode.startIndex)?.id;
+    if (handlerId) sites.registrations.push({ key: `type:${t}`, handlerIds: [handlerId] });
+  }
+  for (const call of tree.rootNode.descendantsOfType('call_expression')) {
+    const name = ktCallName(call);
+    if (!name || !JAVA_TYPE_DISPATCH_METHODS.has(name)) continue;
+    const t = ktConstructedType(ktArgValues(call)[0]);
+    if (!t) continue;
+    const caller = findEnclosingFunction(fileNodes, call.startIndex);
+    if (caller) sites.dispatches.push({ key: `type:${t}`, callerId: caller.id, line: call.startPosition.row + 1 });
+  }
+}
+
+/** Swift NotificationCenter name → namespaced key: `Notification.Name("x")` / `NSNotification.Name("x")`. */
+function swiftNotificationKey(value: Parser.SyntaxNode | undefined): string | undefined {
+  if (value?.type !== 'call_expression') return undefined;
+  const callee = value.namedChildren[0];
+  const endsInName = callee?.type === 'navigation_expression' &&
+    callee.descendantsOfType('navigation_suffix').slice(-1)[0]?.text === '.Name';
+  if (!endsInName) return undefined;
+  const str = value.descendantsOfType('line_string_literal')[0];
+  if (!str) return undefined;
+  return `str:${str.text.replace(/^"|"$/g, '')}`;
+}
+
+/** The labeled argument value for `label:` in a Swift call's value_arguments, or undefined. */
+function swiftLabeledArg(call: Parser.SyntaxNode, label: string): Parser.SyntaxNode | undefined {
+  const suffix = call.namedChildren.find(c => c.type === 'call_suffix');
+  const va = suffix?.namedChildren.find(c => c.type === 'value_arguments');
+  for (const arg of va?.namedChildren.filter(c => c.type === 'value_argument') ?? []) {
+    if (arg.childForFieldName('name')?.text === label) return arg.namedChildren[arg.namedChildren.length - 1];
+  }
+  return undefined;
+}
+
+/** Collect Swift NotificationCenter sites (`addObserver(forName:…){closure}` ↔ `post(name:…)`). */
+function collectSwiftEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], filePath: string, resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  const callName = (call: Parser.SyntaxNode): string | undefined => {
+    const callee = call.namedChildren[0];
+    if (callee?.type === 'navigation_expression') {
+      return callee.descendantsOfType('navigation_suffix').slice(-1)[0]?.namedChildren.find(c => c.type === 'simple_identifier')?.text;
+    }
+    if (callee?.type === 'simple_identifier') return callee.text;
+    return undefined;
+  };
+  for (const call of tree.rootNode.descendantsOfType('call_expression')) {
+    const name = callName(call);
+    if (name === 'addObserver') {
+      const key = swiftNotificationKey(swiftLabeledArg(call, 'forName') ?? swiftLabeledArg(call, 'name'));
+      if (key === undefined) continue;
+      // Handler: the trailing closure's inner calls.
+      const lambda = call.namedChildren.find(c => c.type === 'call_suffix')?.namedChildren.find(c => c.type === 'lambda_literal');
+      const handlerIds: string[] = [];
+      const seen = new Set<string>();
+      for (const inner of lambda?.descendantsOfType('call_expression') ?? []) {
+        const id = resolveHandler(callName(inner) ?? '', filePath)?.id;
+        if (id && !seen.has(id)) { seen.add(id); handlerIds.push(id); }
+      }
+      if (handlerIds.length) sites.registrations.push({ key, handlerIds });
+    } else if (name === 'post') {
+      const key = swiftNotificationKey(swiftLabeledArg(call, 'name'));
+      if (key === undefined) continue;
+      const caller = findEnclosingFunction(fileNodes, call.startIndex);
+      if (caller) sites.dispatches.push({ key, callerId: caller.id, line: call.startPosition.row + 1 });
+    }
+  }
+}
+
+/**
+ * Event-channel rule: pair handler registrations (`on`/`once`/`addEventListener`/
+ * `subscribe`/… with a static key) against dispatch sites (`emit`/`dispatch`/
+ * `publish`/`dispatchEvent` on the same key), emitting an edge from each dispatch
+ * site's enclosing function to each registered handler. Handler shapes: bare /
+ * member (`this.`/`self.`/`obj.`) references, `.bind()`, and inline function/lambda
+ * bodies (wired to the internal functions they call). Cross-file by key; per-channel
+ * fan-out capped (over-cap dropped).
+ *
+ * Recovery is PER-LANGUAGE and added one language at a time: each language has its
+ * own collector (its AST node types), but pairing/fan-out/provenance are shared, and
+ * sites are paired only within their own language (no cross-language pairing). In
+ * effect: JavaScript/TypeScript, Python, Ruby, and PHP for the string-key rule.
+ *
+ * Java and C# use a TYPE-based rule (`synthesizedBy: 'type-event'`) instead: the key
+ * is the event type — an annotated/typed handler (`@Subscribe`/`@EventListener`,
+ * `INotificationHandler<T>`) paired with a constructed dispatch (`post(new T())`,
+ * `Publish(new T())`). Channel-based languages with no statically-pairable idiom (Go,
+ * Rust, …) have no collector — the pass emits nothing rather than guess.
+ */
+async function synthesizeEventChannelEdges(
+  files: Array<{ path: string; content: string; language: string }>,
+  allNodes: Map<string, FunctionNode>,
+  resolveHandler: HandlerResolver,
+): Promise<CallEdge[]> {
+  const nodesByFile = new Map<string, FunctionNode[]>();
+  for (const n of allNodes.values()) {
+    if (n.isExternal) continue;
+    (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
+  }
+  const edges: CallEdge[] = [];
+
+  const tsFiles = files.filter(f =>
+    (f.language === 'TypeScript' || f.language === 'JavaScript') && EVENT_PREFILTER.test(f.content),
+  );
+  if (tsFiles.length > 0) {
+    const { parser } = await getTSParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of tsFiles) {
+      try { collectTsEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
+  }
+
+  const pyFiles = files.filter(f => f.language === 'Python' && EVENT_PREFILTER.test(f.content));
+  if (pyFiles.length > 0) {
+    const { parser } = await getPyParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of pyFiles) {
+      try { collectPyEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
+  }
+
+  const rubyFiles = files.filter(f => f.language === 'Ruby' && EVENT_PREFILTER.test(f.content));
+  if (rubyFiles.length > 0) {
+    const { parser } = await getRubyParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of rubyFiles) {
+      try { collectRubyEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
+  }
+
+  const phpFiles = files.filter(f => f.language === 'PHP' && EVENT_PREFILTER.test(f.content));
+  if (phpFiles.length > 0) {
+    const { parser } = await getPhpParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of phpFiles) {
+      try { collectPhpEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
+  }
+
+  // ── Type-based events (keyed on the event TYPE, not a string channel) ──
+  const javaFiles = files.filter(f => f.language === 'Java' && JAVA_TYPE_EVENT_PREFILTER.test(f.content));
+  if (javaFiles.length > 0) {
+    const { parser } = await getJavaParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of javaFiles) {
+      try { collectJavaTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
+  }
+
+  const csFiles = files.filter(f => f.language === 'C#' && CSHARP_TYPE_EVENT_PREFILTER.test(f.content));
+  if (csFiles.length > 0) {
+    const { parser } = await getCSharpParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of csFiles) {
+      try { collectCSharpTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
+  }
+
+  const ktFiles = files.filter(f => f.language === 'Kotlin' && JAVA_TYPE_EVENT_PREFILTER.test(f.content));
+  if (ktFiles.length > 0) {
+    const { parser } = await getKotlinParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of ktFiles) {
+      try { collectKotlinTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
+  }
+
+  const swiftFiles = files.filter(f => f.language === 'Swift' && SWIFT_EVENT_PREFILTER.test(f.content));
+  if (swiftFiles.length > 0) {
+    const { parser } = await getSwiftParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of swiftFiles) {
+      try { collectSwiftEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
+  }
+
+  return edges;
+}
+
+/** Byte offset of the start of a 1-based line in `content`. */
+function offsetOfLine(content: string, line: number): number {
+  let offset = 0;
+  const lines = content.split('\n');
+  for (let i = 0; i < line - 1 && i < lines.length; i++) offset += lines[i].length + 1;
+  return offset;
+}
+
+/**
+ * Route→handler rule: wire each route detected by the existing route inventory to
+ * the handler function it binds, as a synthesized `calls`-kind edge from the route
+ * declaration's enclosing function to the handler. Reuses route detection; does not
+ * extend it.
+ *
+ * The edge is attributed to the route registration's enclosing function (e.g. a
+ * `setupRoutes(app)` / app-init function — the common Express/Fastify pattern), so a
+ * route registered at module top level with no enclosing function is skipped here.
+ * Dead-code analysis additionally seeds the *targets* of these edges as liveness
+ * roots (they are framework-invoked entry points), so an enclosed route whose setup
+ * function is itself unreached still keeps its handler live — see
+ * `externallyInvokedHandlerIds` in `reachability.ts`.
+ */
+async function synthesizeRouteHandlerEdges(
+  files: Array<{ path: string; content: string; language: string }>,
+  allNodes: Map<string, FunctionNode>,
+  resolveHandler: HandlerResolver,
+): Promise<CallEdge[]> {
+  const contentByPath = new Map(files.map(f => [f.path, f.content]));
+  const routes: RouteDefinition[] = [];
+  await Promise.all(files.map(async (f) => {
+    try {
+      if (/\.(py|pyw)$/.test(f.path)) routes.push(...await extractRouteDefinitions(f.path));
+      else if (/\.(ts|tsx|js|jsx|mjs)$/.test(f.path)) routes.push(...await extractTsRouteDefinitions(f.path));
+      else if (/\.java$/.test(f.path)) routes.push(...await extractJavaRouteDefinitions(f.path));
+    } catch { /* best-effort per file */ }
+  }));
+  if (routes.length === 0) return [];
+
+  const nodesByFile = new Map<string, FunctionNode[]>();
+  for (const n of allNodes.values()) {
+    if (n.isExternal) continue;
+    (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
+  }
+
+  const edges: CallEdge[] = [];
+  const seen = new Set<string>();
+  for (const route of routes) {
+    if (!route.handlerName) continue;
+    // Handler may be a qualified `Controller.method` (decorator/class routers) —
+    // resolve on the method's simple name (the call-graph node name).
+    const simpleHandler = route.handlerName.split('.').pop() ?? route.handlerName;
+    const handler = resolveHandler(simpleHandler, route.file);
+    if (!handler) continue;
+    const content = contentByPath.get(route.file);
+    if (content === undefined) continue;
+    const caller = findEnclosingFunction(nodesByFile.get(route.file) ?? [], offsetOfLine(content, route.line));
+    if (!caller || caller.id === handler.id) continue;
+    const pair = `${caller.id}\0${handler.id}`;
+    if (seen.has(pair)) continue;
+    seen.add(pair);
+    edges.push({
+      callerId: caller.id,
+      calleeId: handler.id,
+      calleeName: route.handlerName,
+      line: route.line,
+      confidence: 'synthesized',
+      kind: 'calls',
+      callType: 'direct',
+      synthesizedBy: 'route-handler',
+    });
+  }
+  return edges;
+}
+
+/**
+ * Run all dynamic-dispatch synthesis rules and return the combined synthesized
+ * edges. Rules are independent and order-insensitive; failures are isolated so one
+ * rule cannot abort the others (or the build).
+ */
+// ── Callback-registration rule ────────────────────────────────────────────────
+// A NAMED internal function passed to a curated registrar that the framework/runtime
+// will later invoke (Go HTTP handlers, JS/TS schedulers). The edge runs from the
+// registration's enclosing function to the handler — the same shape as route-handler,
+// generalized. Inline closures are deliberately NOT matched here: direct resolution
+// already attributes a closure body's calls to its enclosing function, so a synthesized
+// edge would be redundant. Only well-known registrars are matched, so a function passed
+// to an unrelated call is never mistaken for a callback (false-negatives over false-positives).
+
+/** Go registrars whose function argument is an invoked handler (net/http + gin/echo/chi). */
+const GO_CALLBACK_REGISTRARS = new Set(['HandleFunc', 'Handle', 'GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'Any', 'Use']);
+/** JS/TS scheduler/deferred registrars that reliably invoke their callback argument. */
+const TS_CALLBACK_REGISTRARS = new Set(['setTimeout', 'setInterval', 'setImmediate', 'queueMicrotask', 'requestAnimationFrame', 'requestIdleCallback', 'nextTick']);
+const GO_CALLBACK_PREFILTER = /\b(?:HandleFunc|Handle|GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|Any|Use)\s*\(/;
+const TS_CALLBACK_PREFILTER = /\b(?:setTimeout|setInterval|setImmediate|queueMicrotask|requestAnimationFrame|requestIdleCallback|nextTick)\s*\(/;
+/** C++ Qt signal/slot registrar. */
+const CPP_CALLBACK_REGISTRARS = new Set(['connect']);
+const CPP_CALLBACK_PREFILTER = /\bconnect\s*\(/;
+
+/** Append a callback-registration edge (deduped on caller→callee). */
+function pushCallbackEdge(out: CallEdge[], seen: Set<string>, callerId: string, handler: FunctionNode, line: number): void {
+  if (callerId === handler.id) return;
+  const pair = `${callerId}\0${handler.id}`;
+  if (seen.has(pair)) return;
+  seen.add(pair);
+  out.push({ callerId, calleeId: handler.id, calleeName: handler.name, line, confidence: 'synthesized', kind: 'calls', callType: 'direct', synthesizedBy: 'callback-registration' });
+}
+
+/** Collect Go HTTP-handler callback registrations. */
+function collectGoCallbackEdges(tree: Parser.Tree, fileNodes: FunctionNode[], file: string, resolveHandler: HandlerResolver, out: CallEdge[], seen: Set<string>): void {
+  for (const call of tree.rootNode.descendantsOfType('call_expression')) {
+    const fn = call.childForFieldName('function');
+    const name = fn?.type === 'selector_expression' ? fn.childForFieldName('field')?.text : (fn?.type === 'identifier' ? fn.text : undefined);
+    if (!name || !GO_CALLBACK_REGISTRARS.has(name)) continue;
+    const caller = findEnclosingFunction(fileNodes, call.startIndex);
+    if (!caller) continue;
+    for (const arg of call.childForFieldName('arguments')?.namedChildren ?? []) {
+      const hname = arg.type === 'identifier' ? arg.text : (arg.type === 'selector_expression' ? arg.childForFieldName('field')?.text : undefined);
+      if (!hname) continue;
+      const h = resolveHandler(hname, file);
+      if (h) pushCallbackEdge(out, seen, caller.id, h, call.startPosition.row + 1);
+    }
+  }
+}
+
+/** Collect JS/TS scheduler callback registrations (named-function arguments only). */
+function collectTsCallbackEdges(tree: Parser.Tree, fileNodes: FunctionNode[], file: string, resolveHandler: HandlerResolver, out: CallEdge[], seen: Set<string>): void {
+  for (const call of tree.rootNode.descendantsOfType('call_expression')) {
+    const name = calleeMethodName(call.childForFieldName('function'));
+    if (!name || !TS_CALLBACK_REGISTRARS.has(name)) continue;
+    const caller = findEnclosingFunction(fileNodes, call.startIndex);
+    if (!caller) continue;
+    for (const arg of call.childForFieldName('arguments')?.namedChildren ?? []) {
+      const hname = arg.type === 'identifier' ? arg.text : (arg.type === 'member_expression' ? arg.childForFieldName('property')?.text : undefined);
+      if (!hname) continue; // skip inline arrow/function args — covered by direct resolution
+      const h = resolveHandler(hname, file);
+      if (h) pushCallbackEdge(out, seen, caller.id, h, call.startPosition.row + 1);
+    }
+  }
+}
+
+/** Collect C++ Qt signal/slot registrations: `connect(sender, &S::sig, recv, &R::slot)`. The slot's
+ *  member function resolves to an internal node; the signal (a Qt declaration) does not, so only the
+ *  slot is wired. Both the `connect(...)` and `QObject::connect(...)` forms are matched. */
+function collectCppCallbackEdges(tree: Parser.Tree, fileNodes: FunctionNode[], file: string, resolveHandler: HandlerResolver, out: CallEdge[], seen: Set<string>): void {
+  for (const call of tree.rootNode.descendantsOfType('call_expression')) {
+    const fn = call.childForFieldName('function');
+    const name = fn?.type === 'identifier' ? fn.text : (fn?.type === 'qualified_identifier' ? fn.text.split('::').pop() : undefined);
+    if (!name || !CPP_CALLBACK_REGISTRARS.has(name)) continue;
+    const caller = findEnclosingFunction(fileNodes, call.startIndex);
+    if (!caller) continue;
+    for (const arg of call.childForFieldName('arguments')?.namedChildren ?? []) {
+      // A pointer-to-member `&Class::method` (slot/signal); take the member name.
+      const qual = arg.type === 'pointer_expression' ? arg.namedChildren.find(c => c.type === 'qualified_identifier') : undefined;
+      if (!qual) continue;
+      const ids = qual.descendantsOfType('identifier');
+      const mname = ids[ids.length - 1]?.text;
+      if (!mname) continue;
+      const h = resolveHandler(mname, file);
+      if (h) pushCallbackEdge(out, seen, caller.id, h, call.startPosition.row + 1);
+    }
+  }
+}
+
+/** Callback-registration rule across languages (Go HTTP handlers, JS/TS schedulers, C++ Qt slots). */
+async function synthesizeCallbackRegistrationEdges(
+  files: Array<{ path: string; content: string; language: string }>,
+  allNodes: Map<string, FunctionNode>,
+  resolveHandler: HandlerResolver,
+): Promise<CallEdge[]> {
+  const nodesByFile = new Map<string, FunctionNode[]>();
+  for (const n of allNodes.values()) {
+    if (n.isExternal) continue;
+    (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
+  }
+  const out: CallEdge[] = [];
+  const seen = new Set<string>();
+
+  const tsFiles = files.filter(f => (f.language === 'TypeScript' || f.language === 'JavaScript') && TS_CALLBACK_PREFILTER.test(f.content));
+  if (tsFiles.length > 0) {
+    const { parser } = await getTSParser();
+    for (const file of tsFiles) {
+      try { collectTsCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
+      catch { /* skip */ }
+    }
+  }
+
+  const goFiles = files.filter(f => f.language === 'Go' && GO_CALLBACK_PREFILTER.test(f.content));
+  if (goFiles.length > 0) {
+    const { parser } = await getGoParser();
+    for (const file of goFiles) {
+      try { collectGoCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
+      catch { /* skip */ }
+    }
+  }
+
+  const cppFiles = files.filter(f => f.language === 'C++' && CPP_CALLBACK_PREFILTER.test(f.content));
+  if (cppFiles.length > 0) {
+    const { parser } = await getCppParser();
+    for (const file of cppFiles) {
+      try { collectCppCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
+      catch { /* skip */ }
+    }
+  }
+  return out;
+}
+
+// ── Actor-message rule (Elixir GenServer) ─────────────────────────────────────
+// The one actor/channel model that is statically pairable to a named handler: a
+// GenServer dispatch (`GenServer.cast`/`call`, or `send` → `handle_info`) carries a
+// message whose tag (a leading atom, incl. the tag of a `{:tag, …}` tuple) matches a
+// `handle_cast`/`handle_call`/`handle_info` clause. Keyed by `{kind}:{tag}` so a cast
+// never pairs with a `handle_call` of the same tag. Go channels and Akka `receive`
+// blocks are NOT covered — they expose no named handler to pair, so the pass emits
+// nothing for them rather than guess.
+const ELIXIR_HANDLER_PREFIX: Record<string, string> = { handle_cast: 'excast', handle_call: 'excall', handle_info: 'exinfo' };
+const ELIXIR_DISPATCH_PREFIX: Record<string, string> = { cast: 'excast', call: 'excall', send: 'exinfo' };
+const ELIXIR_ACTOR_PREFILTER = /\b(?:handle_cast|handle_call|handle_info|GenServer)\b/;
+
+/** Message tag: a leading atom (`:tag`) or the first atom of a `{:tag, …}` tuple. */
+function elixirMsgTag(node: Parser.SyntaxNode | undefined): string | undefined {
+  if (!node) return undefined;
+  if (node.type === 'atom') return node.text.replace(/^:/, '');
+  if (node.type === 'tuple') {
+    const first = node.namedChildren[0];
+    if (first?.type === 'atom') return first.text.replace(/^:/, '');
+  }
+  return undefined;
+}
+
+/** Collect Elixir GenServer cast/call/send ↔ handle_cast/handle_call/handle_info sites. */
+function collectElixirActorSites(tree: Parser.Tree, fileNodes: FunctionNode[], _file: string, _resolveHandler: HandlerResolver, sites: EventSites): void {
+  const argsOf = (n: Parser.SyntaxNode) => n.namedChildren.find(c => c.type === 'arguments')?.namedChildren ?? [];
+  for (const call of tree.rootNode.descendantsOfType('call')) {
+    const callee = call.namedChildren[0];
+    if (!callee) continue;
+    // Registration: `def handle_cast(<msg>, …)` (or defp).
+    if (callee.type === 'identifier' && (callee.text === 'def' || callee.text === 'defp')) {
+      const target = argsOf(call)[0];
+      if (target?.type !== 'call') continue;
+      const hname = target.namedChildren[0]?.type === 'identifier' ? target.namedChildren[0].text : undefined;
+      const prefix = hname ? ELIXIR_HANDLER_PREFIX[hname] : undefined;
+      if (!prefix) continue;
+      const tag = elixirMsgTag(argsOf(target)[0]);
+      if (!tag) continue;
+      const handler = findEnclosingFunction(fileNodes, target.startIndex);
+      if (handler) sites.registrations.push({ key: `${prefix}:${tag}`, handlerIds: [handler.id] });
+      continue;
+    }
+    // Dispatch: `GenServer.cast(pid, <msg>)` / `call` / `send(pid, <msg>)`.
+    const method = callee.type === 'dot' ? callee.text.split('.').pop() : (callee.type === 'identifier' ? callee.text : undefined);
+    const prefix = method ? ELIXIR_DISPATCH_PREFIX[method] : undefined;
+    if (!prefix) continue;
+    const tag = elixirMsgTag(argsOf(call)[1]);
+    if (!tag) continue;
+    const caller = findEnclosingFunction(fileNodes, call.startIndex);
+    if (caller) sites.dispatches.push({ key: `${prefix}:${tag}`, callerId: caller.id, line: call.startPosition.row + 1 });
+  }
+}
+
+/** Actor-message rule across languages (Elixir GenServer). */
+async function synthesizeActorMessageEdges(
+  files: Array<{ path: string; content: string; language: string }>,
+  allNodes: Map<string, FunctionNode>,
+  resolveHandler: HandlerResolver,
+): Promise<CallEdge[]> {
+  const exFiles = files.filter(f => f.language === 'Elixir' && ELIXIR_ACTOR_PREFILTER.test(f.content));
+  if (exFiles.length === 0) return [];
+  const nodesByFile = new Map<string, FunctionNode[]>();
+  for (const n of allNodes.values()) {
+    if (n.isExternal) continue;
+    (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
+  }
+  const { parser } = await getElixirParser();
+  const sites: EventSites = { registrations: [], dispatches: [] };
+  for (const file of exFiles) {
+    try { collectElixirActorSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+    catch { /* skip */ }
+  }
+  return pairAndEmitEventEdges(sites, allNodes, 'actor-message');
+}
+
+export async function synthesizeDynamicDispatchEdges(
+  files: Array<{ path: string; content: string; language: string }>,
+  allNodes: Map<string, FunctionNode>,
+  resolveHandler: HandlerResolver,
+): Promise<CallEdge[]> {
+  const rules: Array<Promise<CallEdge[]>> = [
+    synthesizeEventChannelEdges(files, allNodes, resolveHandler).catch(() => []),
+    synthesizeRouteHandlerEdges(files, allNodes, resolveHandler).catch(() => []),
+    synthesizeCallbackRegistrationEdges(files, allNodes, resolveHandler).catch(() => []),
+    synthesizeActorMessageEdges(files, allNodes, resolveHandler).catch(() => []),
+  ];
+  const results = await Promise.all(rules);
+  return results.flat();
+}
+
 export class CallGraphBuilder {
   /**
    * Build a call graph from a list of source files.
@@ -2928,9 +4099,36 @@ export class CallGraphBuilder {
       // IaC extraction is best-effort; never fail the whole build
     }
 
-    // Pass 3: Calculate fanIn / fanOut (count unique caller→callee pairs, not call sites)
+    // Pass 2d: synthesized dynamic-dispatch edges (spec: add-synthesized-dynamic-dispatch-edges).
+    // Additive and provenance-labeled (confidence: 'synthesized'); runs after direct
+    // resolution and only *adds* edges. Best-effort: synthesis never fails the build.
+    try {
+      const resolveHandler: HandlerResolver = (name, preferFile) => {
+        // Never resolve a runtime/promise/middleware callback LOCAL (e.g. the `resolve`
+        // parameter of `new Promise((resolve) => setTimeout(resolve, ms))`) to a
+        // coincidentally same-named function elsewhere. These names are never real
+        // registered handlers, and matching them produced false synthesized edges.
+        if (RUNTIME_CALLBACK_LOCALS.has(name)) return undefined;
+        const candidates = trie.findBySimpleName(name).filter(n => !n.isExternal);
+        if (candidates.length === 0) return undefined;
+        const inFile = candidates.find(n => n.filePath === preferFile);
+        if (inFile) return inFile;
+        return candidates.length === 1 ? candidates[0] : undefined;
+      };
+      edges.push(...await synthesizeDynamicDispatchEdges(files, allNodes, resolveHandler));
+    } catch {
+      // Synthesis is best-effort; a failure must never abort the build.
+    }
+
+    // Pass 3: Calculate fanIn / fanOut (count unique caller→callee pairs, not call sites).
+    // Synthesized dynamic-dispatch edges are EXCLUDED: synthesis augments reachability
+    // (it adds traversable edges) but must not perturb the directly-resolved graph's
+    // structural metrics — fanIn/fanOut, hub/god/entry-point classification, and every
+    // dashboard built on them stay measured on certain edges only. Reachability, impact,
+    // and dead-code traverse the full edge list (incl. synthesized) separately.
     const seenPairs = new Set<string>();
     for (const edge of edges) {
+      if (edge.confidence === 'synthesized') continue;
       const pairKey = `${edge.callerId}\0${edge.calleeId}`;
       if (seenPairs.has(pairKey)) continue;
       seenPairs.add(pairKey);

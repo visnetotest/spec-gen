@@ -51,7 +51,7 @@ function runTransaction(db: DatabaseSync, fn: () => void): void {
 }
 
 /** Bump when schema changes. Old DBs are dropped and rebuilt on next analyze --force. */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 export class EdgeStore {
   /**
@@ -93,15 +93,16 @@ export class EdgeStore {
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS edges (
-        caller_id   TEXT NOT NULL,
-        caller_file TEXT NOT NULL,
-        callee_id   TEXT NOT NULL,
-        callee_file TEXT,
-        callee_name TEXT NOT NULL,
-        line        INTEGER,
-        confidence  TEXT,
-        kind        TEXT,
-        call_type   TEXT
+        caller_id      TEXT NOT NULL,
+        caller_file    TEXT NOT NULL,
+        callee_id      TEXT NOT NULL,
+        callee_file    TEXT,
+        callee_name    TEXT NOT NULL,
+        line           INTEGER,
+        confidence     TEXT,
+        kind           TEXT,
+        call_type      TEXT,
+        synthesized_by TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_caller_id   ON edges(caller_id);
       CREATE INDEX IF NOT EXISTS idx_callee_id   ON edges(callee_id);
@@ -275,8 +276,8 @@ export class EdgeStore {
   /** Bulk-insert edges in a single transaction. */
   insertEdges(edges: CallEdge[]): void {
     const stmt: StatementSync = this.db.prepare(`
-      INSERT INTO edges (caller_id, caller_file, callee_id, callee_file, callee_name, line, confidence, kind, call_type)
-      VALUES (@callerId, @callerFile, @calleeId, @calleeFile, @calleeName, @line, @confidence, @kind, @callType)
+      INSERT INTO edges (caller_id, caller_file, callee_id, callee_file, callee_name, line, confidence, kind, call_type, synthesized_by)
+      VALUES (@callerId, @callerFile, @calleeId, @calleeFile, @calleeName, @line, @confidence, @kind, @callType, @synthesizedBy)
     `);
     runTransaction(this.db, () => {
       for (const e of edges) {
@@ -292,6 +293,7 @@ export class EdgeStore {
           '@confidence': e.confidence,
           '@kind':       e.kind ?? null,
           '@callType':   e.callType ?? null,
+          '@synthesizedBy': e.synthesizedBy ?? null,
         });
       }
     });
@@ -691,6 +693,7 @@ interface RawEdge {
   confidence:  string;
   kind:        string | null;
   call_type:   string | null;
+  synthesized_by: string | null;
 }
 
 interface RawNode {
@@ -808,6 +811,7 @@ function rawToCallEdge(r: RawEdge): CallEdge {
     confidence: r.confidence as CallEdge['confidence'],
     ...(r.kind      && { kind:     r.kind     as CallEdge['kind'] }),
     ...(r.call_type && { callType: r.call_type as CallEdge['callType'] }),
+    ...(r.synthesized_by && { synthesizedBy: r.synthesized_by }),
   };
 }
 

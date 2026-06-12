@@ -159,8 +159,11 @@ describe('tools/list payload budget (spec-28)', () => {
   // two tools stay out of the default/minimal surface; only the full surface widens.
   // Bumped 52_000 → 53_000 when get_surprising_connections and get_health_map were added
   // to the full surface — conscious budget decision.
+  // Bumped 53_000 → 54_000 when the `directResolvedOnly` strict-traversal option was added
+  // to find_dead_code/analyze_impact/get_subgraph/find_path/select_tests/trace_execution_path
+  // (one boolean prop per tool) — conscious budget decision, not silent drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({})).toBeLessThan(53_000);
+    expect(payloadBytes({})).toBeLessThan(54_000);
   });
 
   it('navigation preset stays lean (the low-overhead surface that wins the benchmark)', () => {
