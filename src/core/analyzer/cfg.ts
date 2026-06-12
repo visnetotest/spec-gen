@@ -759,6 +759,48 @@ export function buildFunctionCfg(fnNode: CfgNode, language: string): FunctionCfg
   }
 }
 
+/**
+ * Forward data-flow slice: the set of source lines a value reaches through
+ * def-use edges within one function (a Weiser forward slice = the value's impact
+ * set). Seeds from `target` (a parameter or local variable name) or, when
+ * omitted, from every parameter. Propagates through chained assignments: a line
+ * that defines a variable from a tainted read becomes tainted itself.
+ *
+ * Used by the value-level opt-in on `analyze_impact`/`trace_execution_path` to
+ * narrow downstream results to the calls whose arguments are data-dependent on
+ * the targeted value. Over-approximating (line-granular for chained defs) and
+ * therefore sound toward "may affect".
+ */
+export function valueReachableLines(cfg: FunctionCfg, target?: string): Set<number> {
+  const seedVars = target ? [target] : cfg.params;
+  const tainted = new Set<string>(); // "variable|defLine"
+  for (const v of seedVars) tainted.add(`${v}|${cfg.paramLine}`);
+  // A targeted local (non-parameter) is seeded from all of its definition sites.
+  if (target && !cfg.params.includes(target)) {
+    for (const e of cfg.defUse) if (e.variable === target) tainted.add(`${e.variable}|${e.defLine}`);
+  }
+
+  const defsAtLine = new Map<number, Set<string>>();
+  for (const e of cfg.defUse) {
+    (defsAtLine.get(e.defLine) ?? defsAtLine.set(e.defLine, new Set()).get(e.defLine)!).add(e.variable);
+  }
+
+  const reached = new Set<number>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const e of cfg.defUse) {
+      if (!tainted.has(`${e.variable}|${e.defLine}`)) continue;
+      if (!reached.has(e.useLine)) { reached.add(e.useLine); changed = true; }
+      for (const w of defsAtLine.get(e.useLine) ?? []) {
+        const key = `${w}|${e.useLine}`;
+        if (!tainted.has(key)) { tainted.add(key); changed = true; }
+      }
+    }
+  }
+  return reached;
+}
+
 function findBody(fnNode: CfgNode, spec: CfgLangSpec): CfgNode | undefined {
   const direct = fnNode.childForFieldName(spec.bodyField);
   if (direct) return direct;

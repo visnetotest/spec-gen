@@ -130,16 +130,16 @@ export async function dispatchTool(
       args as { directory: string; functionName: string; direction?: 'downstream' | 'upstream' | 'both'; maxDepth?: number; format?: 'json' | 'mermaid'; directResolvedOnly?: boolean };
     return handleGetSubgraph(directory, functionName, direction, maxDepth, format, directResolvedOnly);
   } else if (name === 'trace_execution_path') {
-    const { directory, entryFunction, targetFunction, maxDepth = 6, maxPaths = 10, directResolvedOnly = false } =
-      args as { directory: string; entryFunction: string; targetFunction: string; maxDepth?: number; maxPaths?: number; directResolvedOnly?: boolean };
-    return handleTraceExecutionPath(directory, entryFunction, targetFunction, maxDepth, maxPaths, directResolvedOnly);
+    const { directory, entryFunction, targetFunction, maxDepth = 6, maxPaths = 10, directResolvedOnly = false, valueLevel = false, valueParam } =
+      args as { directory: string; entryFunction: string; targetFunction: string; maxDepth?: number; maxPaths?: number; directResolvedOnly?: boolean; valueLevel?: boolean; valueParam?: string };
+    return handleTraceExecutionPath(directory, entryFunction, targetFunction, maxDepth, maxPaths, directResolvedOnly, valueLevel, valueParam);
   } else if (name === 'get_mapping') {
     const { directory, domain, orphansOnly } = args as { directory: string; domain?: string; orphansOnly?: boolean };
     return handleGetMapping(directory, domain, orphansOnly);
   } else if (name === 'analyze_impact') {
-    const { directory, symbol, depth = 2, directResolvedOnly = false } =
-      args as { directory: string; symbol: string; depth?: number; directResolvedOnly?: boolean };
-    return handleAnalyzeImpact(directory, symbol, depth, directResolvedOnly);
+    const { directory, symbol, depth = 2, directResolvedOnly = false, valueLevel = false, valueParam } =
+      args as { directory: string; symbol: string; depth?: number; directResolvedOnly?: boolean; valueLevel?: boolean; valueParam?: string };
+    return handleAnalyzeImpact(directory, symbol, depth, directResolvedOnly, valueLevel, valueParam);
   } else if (name === 'select_tests') {
     const { directory, changedSymbols, diffRef, maxDepth, directResolvedOnly } =
       args as { directory: string; changedSymbols?: string[]; diffRef?: string; maxDepth?: number; directResolvedOnly?: boolean };

@@ -697,6 +697,78 @@ describe('handleAnalyzeImpact — edgeStore fast path', () => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Value-level opt-in (spec: add-intraprocedural-cfg-dataflow-overlay).
+// `entry(a, b)` calls used(a) on a's data-dependence line and unused(b) on b's;
+// a value-level request targeting `a` must narrow downstream to `used` only, while
+// the default (no flag) keeps the full function-granularity blast radius.
+// ──────────────────────────────────────────────────────────────────────────────
+describe('handleAnalyzeImpact — value-level opt-in', () => {
+  let dir: string;
+  let store: EdgeStore;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'graph-valuelevel-test-'));
+    store = EdgeStore.open(join(dir, 'call-graph.db'));
+    store.insertNodes([
+      makeNode({ id: 'src/a.ts::entry',  fanOut: 2 }),
+      makeNode({ id: 'src/u.ts::used',   fanIn: 1 }),
+      makeNode({ id: 'src/n.ts::unused', fanIn: 1 }),
+    ]);
+    // entry calls `used` at line 3 and `unused` at line 4.
+    store.insertEdges([
+      { callerId: 'src/a.ts::entry', calleeId: 'src/u.ts::used',   calleeName: 'used',   confidence: 'import', line: 3 },
+      { callerId: 'src/a.ts::entry', calleeId: 'src/n.ts::unused', calleeName: 'unused', confidence: 'import', line: 4 },
+    ]);
+    // Overlay: param `a` is read at line 3 (used(a)); param `b` at line 4 (unused(b)).
+    store.insertCfgs([{
+      functionId: 'src/a.ts::entry',
+      filePath: 'src/a.ts',
+      cfg: {
+        blocks: [{ id: 0, kind: 'entry' }, { id: 1, kind: 'exit' }, { id: 2, kind: 'normal' }],
+        edges: [{ from: 0, to: 2, kind: 'normal' }, { from: 2, to: 1, kind: 'normal' }],
+        params: ['a', 'b'],
+        paramLine: 1,
+        defUse: [
+          { variable: 'a', defLine: 1, useLine: 3, precision: 'exact' },
+          { variable: 'b', defLine: 1, useLine: 4, precision: 'exact' },
+        ],
+      },
+    }]);
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('default impact (no flag) includes both callees', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+    const result = await handleAnalyzeImpact(dir, 'entry', 2) as Record<string, unknown>;
+    const blast = result.blastRadius as { downstream: number };
+    expect(blast.downstream).toBe(2);
+    expect(result.valueLevel).toBeUndefined();
+  });
+
+  it('value-level on param `a` narrows downstream to the data-dependent callee', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+    const result = await handleAnalyzeImpact(dir, 'entry', 2, false, true, 'a') as Record<string, unknown>;
+    const blast = result.blastRadius as { downstream: number };
+    const downstream = result.downstreamCriticalPath as Array<{ name: string }>;
+    expect(blast.downstream).toBe(1);
+    expect(downstream.map(d => d.name)).toEqual(['used']);
+    expect((result.valueLevel as { applied: boolean }).applied).toBe(true);
+  });
+
+  it('falls back to function granularity when the function has no overlay', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+    // `used` has no overlay row → value-level request must fall back, not error.
+    const result = await handleAnalyzeImpact(dir, 'used', 2, false, true, 'x') as Record<string, unknown>;
+    expect((result.valueLevel as { applied: boolean }).applied).toBe(false);
+    expect(result.symbol).toBe('used');
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Symbol resolution — exact-name match is preferred over fuzzy FTS hits.
 // searchNodes uses an fts5 trigram index, so a query like "auth" substring-matches
 // "authenticate"/"authorize" too. A request for a symbol that DOES exist exactly

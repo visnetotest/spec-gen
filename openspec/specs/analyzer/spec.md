@@ -5044,3 +5044,13 @@ Surface 'which functions are structural anchors and why' as a set of labeled sig
 Parse trees are freed per-extractor before later passes (WASM path calls tree.delete), so a CFG/def-use pass cannot run as a late pass over already-built FunctionNodes — the AST is gone. The overlay must be computed inside each extractor while the tree is live. A shared cfg.ts module builds per-function basic blocks and runs an intra-procedural reaching-definitions fixpoint to produce labeled (exact|may) def-use edges, all from AST shape with no LLM.
 
 **Consequences:** Every in-scope extractor (TS/JS, Python, Go in v1) gains an optional cfg build call; CallGraphResult carries a transient cfgs map threaded to the DB writer. The overlay is DB-only (new tables, SCHEMA_VERSION bump 6→7) and is NOT added to SerializedCallGraph or the hot cache, so resident memory is unchanged. Unsupported languages return cfg undefined (fail-soft).
+
+### Expose value-level precision as opt-in valueLevel/valueParam flags reusing the directResolvedOnly pattern
+
+**Status:** Approved
+**Date:** 2026-06-12
+**ID:** b6f04199
+
+The reaching-definitions overlay enables value/parameter-granularity impact, but the default function-granularity answer must stay byte-for-byte unchanged (spec ValueLevelImpactOptIn). Rather than new tools (mcp-quality minimize-surface), add two opt-in params — valueLevel (boolean) and valueParam (string) — to the existing analyze_impact and trace_execution_path, mirroring the established directResolvedOnly opt-in. With the flag absent the traversal is identical to before; with it set, the consumer loads the seed function's overlay (EdgeStore.getCfg), computes a forward data-flow slice (valueReachableLines) over the def-use edges, and restricts downstream/first-hop to calls whose argument lines are data-dependent on the targeted value. The cross-call hop is labeled may. When the function has no overlay (unsupported language / no CFG) the tool falls back to function granularity rather than erroring.
+
+**Consequences:** analyze_impact gains params 4-5 (valueLevel, valueParam); trace_execution_path gains params 7-8. tools/list payload grows by two opt-in props per tool — navigation preset ceiling bumped 11800->12300 (conscious, per spec-28 precedent). No default output changes. valueReachableLines is a pure exported overlay function in cfg.ts.
