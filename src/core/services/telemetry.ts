@@ -9,6 +9,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { OPENLORE_DIR } from '../../constants.js';
+import { redactSecrets } from './secret-redaction.js';
 
 const TELEMETRY_SUBDIR = 'telemetry';
 const _createdDirs = new Set<string>();
@@ -30,7 +31,10 @@ export function emit(
   try {
     const dir = join(directory, OPENLORE_DIR, TELEMETRY_SUBDIR);
     if (!_createdDirs.has(dir)) { mkdirSync(dir, { recursive: true }); _createdDirs.add(dir); }
-    const line = JSON.stringify({ ts: new Date().toISOString(), ...payload }) + '\n';
+    // Defense in depth: a telemetry payload must never carry a credential to disk
+    // (mcp-security: Secret Confinement Across All Output Paths).
+    const safe = redactSecrets(payload);
+    const line = JSON.stringify({ ts: new Date().toISOString(), ...safe }) + '\n';
     appendFileSync(join(dir, `${domain}.jsonl`), line, 'utf-8');
   } catch {
     // never crash the hot path

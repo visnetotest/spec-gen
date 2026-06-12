@@ -11,7 +11,8 @@ import { tmpdir } from 'node:os';
 import { join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateGitRef } from '../../drift/git-diff.js';
-import { safeJoin } from './utils.js';
+import { safeJoin, sanitizeMcpError } from './utils.js';
+import { redactSecrets, redactSecretString } from '../secret-redaction.js';
 
 const SRC = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 // Server + analysis + daemon surface. Excludes src/pi (the VS Code extension launcher,
@@ -110,3 +111,46 @@ describe('Symlink-Aware Path Confinement (mcp-security)', () => {
 function realpathRoot(p: string): string {
   return realpathSync(p);
 }
+
+// ── Secret Confinement Across All Output Paths ────────────────────────────────
+
+describe('Secret Confinement (mcp-security)', () => {
+  const KEY = 'sk-ant-api03-AbCdEf0123456789ghijklmnop';
+
+  it('redactSecrets scrubs secret-named fields anywhere in a structured result', () => {
+    const result = redactSecrets({
+      ok: true,
+      provider: { baseUrl: 'https://api.anthropic.com', apiKey: KEY, model: 'claude' },
+      headers: { Authorization: `Bearer ${KEY}` },
+      nested: [{ token: 'abcd1234efgh5678' }, { harmless: 'value' }],
+    }) as Record<string, any>;
+    expect(result.provider.apiKey).toBe('[REDACTED]');
+    expect(result.nested[0].token).toBe('[REDACTED]');
+    expect(result.nested[1].harmless).toBe('value');
+    expect(result.provider.model).toBe('claude'); // non-secret field untouched
+    // And no copy of the raw key survives anywhere in the serialized output.
+    expect(JSON.stringify(result)).not.toContain(KEY);
+  });
+
+  it('redactSecretString scrubs credential-shaped substrings in free text', () => {
+    expect(redactSecretString(`failed with key ${KEY}`)).not.toContain(KEY);
+    expect(redactSecretString('Authorization: Bearer abcdefghijklmnop')).toContain('[REDACTED]');
+    expect(redactSecretString('GET https://x/v1?key=AbCdEf0123456789')).not.toContain('AbCdEf0123456789');
+  });
+
+  it('sanitizeMcpError redacts a key embedded in an error message', () => {
+    const msg = sanitizeMcpError(new Error(`401 from provider using ${KEY}`)) as string;
+    expect(msg).not.toContain(KEY);
+    expect(msg).toContain('[REDACTED]');
+  });
+
+  it('env-var extraction records names only, never values (no secret capture)', () => {
+    // Guards the get_env_vars surface: EnvVar carries name/hasDefault/description,
+    // never the value — so a secret in a scanned .env cannot ride out in a result.
+    const src = readFileSync(join(SRC, 'core', 'analyzer', 'env-extractor.ts'), 'utf-8');
+    const ifaceMatch = src.match(/export interface EnvVar \{([\s\S]*?)\n\}/);
+    expect(ifaceMatch, 'EnvVar interface should exist').toBeTruthy();
+    // No `value`/`secret` field declaration (prose mentioning "value" is fine).
+    expect(ifaceMatch![1]).not.toMatch(/^\s*(value|secret|defaultValue)\s*[?:]/m);
+  });
+});

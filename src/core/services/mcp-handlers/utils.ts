@@ -14,6 +14,7 @@ import { ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_FINGERPRINT, ARTIFACT_LLM_CONTEXT
 export type CachedContext = LLMContext & { edgeStore?: EdgeStore };
 import { logger } from '../../../utils/logger.js';
 import { emit } from '../telemetry.js';
+import { redactSecretString } from '../secret-redaction.js';
 
 /**
  * Resolve and validate a user-supplied directory path.
@@ -79,13 +80,10 @@ export function validateDirectoryDepth(absDir: string, maxDepth: number): void {
  */
 export function sanitizeMcpError(err: unknown, format: 'string' | 'json' = 'string'): string | { message: string; code: number } {
   const rawMessage = err instanceof Error ? err.message : String(err);
-  const sanitized = rawMessage
-    .replace(/sk-ant-[A-Za-z0-9\-_]{10,}/g, '[REDACTED]')
-    .replace(/sk-[A-Za-z0-9\-_]{20,}/g, '[REDACTED]')
-    .replace(/Bearer\s+\S{10,}/g, 'Bearer [REDACTED]')
-    .replace(/Authorization:\s*\S+/gi, 'Authorization: [REDACTED]')
-    .replace(/api[_-]?key[=:]\s*\S{8,}/gi, 'api_key=[REDACTED]');
-  
+  // Shared credential-redaction patterns (see secret-redaction.ts) so error text
+  // and every other output channel scrub the same set.
+  const sanitized = redactSecretString(rawMessage);
+
   if (format === 'json') {
     const errCode = err instanceof Error ? (err as Error & { code?: unknown }).code : undefined;
     const code = typeof errCode === 'number' ? errCode : 500;
