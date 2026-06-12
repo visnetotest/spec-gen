@@ -8,11 +8,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { readFileSync, readdirSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, realpathSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, extname } from 'node:path';
+import { join, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateGitRef } from '../../drift/git-diff.js';
 import {
   safeJoin,
+  safeOpenspecDir,
   sanitizeMcpError,
   readCachedContext,
   loadMappingIndex,
@@ -130,6 +131,18 @@ describe('Symlink-Aware Path Confinement (mcp-security)', () => {
     // ...but a new file under an escaping symlink is blocked even though it doesn't exist yet.
     symlinkSync(outside, join(root, 'inside', 'esc'));
     expect(() => safeJoin(root, 'inside/esc/new-file.json')).toThrow(/escape|traversal/i);
+  });
+
+  it('safeOpenspecDir confines a poisoned config openspecPath to the root', () => {
+    // Legit values (default + in-root custom) pass through.
+    expect(safeOpenspecDir(root, undefined)).toBe(join(root, 'openspec'));
+    expect(safeOpenspecDir(root, 'openspec')).toBe(join(root, 'openspec'));
+    expect(safeOpenspecDir(root, 'docs/spec')).toBe(join(root, 'docs', 'spec'));
+    // Escaping values fall back to the default (never escape the root).
+    for (const evil of ['../../../etc', '../../outside', '/etc']) {
+      const resolved = safeOpenspecDir(root, evil);
+      expect(resolved === root || resolved.startsWith(root + sep), `"${evil}" must stay in root`).toBe(true);
+    }
   });
 });
 

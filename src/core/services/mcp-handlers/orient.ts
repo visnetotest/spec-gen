@@ -17,12 +17,12 @@
 import { join, relative } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, queryTooLongError } from './utils.js';
+import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError } from './utils.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
 import type { RagManifest } from '../../generator/rag-manifest-generator.js';
-import { OPENSPEC_DIR, ARTIFACT_RAG_MANIFEST } from '../../../constants.js';
+import { ARTIFACT_RAG_MANIFEST } from '../../../constants.js';
 import { loadArchitectureRules } from '../../architecture/rules.js';
 import { scanViolations } from '../../architecture/check.js';
 import {
@@ -352,8 +352,8 @@ export async function handleOrient(
   if (!lean && specDomains.length > 0) {
     try {
       const cfg = await readOpenLoreConfig(absDir);
-      const openspecRelPath = cfg?.openspecPath ?? OPENSPEC_DIR;
-      const manifestPath = join(absDir, openspecRelPath, ARTIFACT_RAG_MANIFEST);
+      // Confine the configured openspec dir to the root (config is untrusted input).
+      const manifestPath = join(safeOpenspecDir(absDir, cfg?.openspecPath), ARTIFACT_RAG_MANIFEST);
       const manifestCache = await loadManifestCached(manifestPath, absDir);
       if (manifestCache) {
         const { manifest } = manifestCache;

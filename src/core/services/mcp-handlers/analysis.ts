@@ -45,7 +45,7 @@ import {
   validateGitRef,
 } from '../../drift/index.js';
 import { readOpenLoreConfig } from '../config-manager.js';
-import { validateDirectory, readCachedContext, isCacheFresh, safeJoin } from './utils.js';
+import { validateDirectory, readCachedContext, isCacheFresh, safeJoin, safeOpenspecDir } from './utils.js';
 import { buildWeightedAdjacency, weightedBfs } from './graph.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import type { MappingArtifact } from '../../generator/mapping-generator.js';
@@ -291,7 +291,8 @@ export async function handleCheckSpecDrift(
     return { error: 'No openlore configuration found. Run "openlore init" first.' };
   }
 
-  const openspecPath = join(absDir, openloreConfig.openspecPath ?? OPENSPEC_DIR);
+  // Confine the configured openspec dir to the root (config is untrusted input).
+  const openspecPath = safeOpenspecDir(absDir, openloreConfig.openspecPath);
   const specsPath = join(openspecPath, 'specs');
   try {
     await stat(specsPath);
@@ -502,7 +503,8 @@ export async function handleGetDecisions(
     if (cfg.openspecPath) openspecRelPath = cfg.openspecPath;
   } catch { /* use default */ }
 
-  const decisionsDir = pjoin(absDir, openspecRelPath, 'decisions');
+  // Confine the configured openspec dir to the root (config is untrusted input).
+  const decisionsDir = pjoin(safeOpenspecDir(absDir, openspecRelPath), 'decisions');
   if (!existsSync(decisionsDir)) {
     return { decisions: [], note: `No decisions directory found at ${openspecRelPath}/decisions/. Run "openlore generate --adrs" first.` };
   }

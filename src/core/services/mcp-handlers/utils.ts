@@ -8,7 +8,7 @@ import { realpathSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve, sep } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
 import { EdgeStore } from '../edge-store.js';
-import { ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_FINGERPRINT, ARTIFACT_LLM_CONTEXT, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../../constants.js';
+import { ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_FINGERPRINT, ARTIFACT_LLM_CONTEXT, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, OPENSPEC_DIR } from '../../../constants.js';
 
 /** LLMContext with optional SQLite edge store attached (present when call-graph.db exists). */
 export type CachedContext = LLMContext & { edgeStore?: EdgeStore };
@@ -154,6 +154,25 @@ export function queryTooLongError(query: unknown, field = 'query'): { error: str
     return { error: `${field} too long: ${query.length} characters (max ${MAX_QUERY_LENGTH}). Shorten the ${field}.` };
   }
   return null;
+}
+
+/**
+ * Resolve the project's openspec directory, confined to the validated root.
+ *
+ * `config.openspecPath` is read from `.openlore/config.json` — an untrusted on-disk
+ * artifact (mcp-security threat model). A poisoned value (`../../etc`, an absolute
+ * escape) must not redirect the reads/writes that derive from it (spec/manifest
+ * reads, decision ADR reads, decision sync writes) outside the project root. We
+ * confine via safeJoin; a value that escapes the root falls back to the default
+ * `openspec/` dir — a legitimate in-root path (default or custom) passes through
+ * unchanged, so only an escaping value is neutralized.
+ */
+export function safeOpenspecDir(absRoot: string, configuredPath: string | undefined): string {
+  try {
+    return safeJoin(absRoot, configuredPath && configuredPath.length > 0 ? configuredPath : OPENSPEC_DIR);
+  } catch {
+    return safeJoin(absRoot, OPENSPEC_DIR);
+  }
 }
 
 interface ContextCacheEntry {
