@@ -6,7 +6,7 @@
  * tests for the argument-injection guards. Kept in a plain .test.ts so CI runs it.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { readFileSync, readdirSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, realpathSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,7 +20,8 @@ import {
   clearMappingCache,
 } from './utils.js';
 import { redactSecrets, redactSecretString } from '../secret-redaction.js';
-import { TOOL_DEFINITIONS } from '../../../cli/commands/mcp.js';
+import { TOOL_DEFINITIONS, toolAnnotations } from '../../../cli/commands/mcp.js';
+import { handleAnnotateStory } from './change.js';
 
 const SRC = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 // Server + analysis + daemon surface. Excludes src/pi (the VS Code extension launcher,
@@ -366,5 +367,47 @@ describe('Untrusted Artifact Deserialization Safety (mcp-security)', () => {
     const src = readFileSync(join(SRC, 'core', 'services', 'mcp-handlers', 'utils.ts'), 'utf-8');
     expect(src).toMatch(/ARTIFACT_MAX_BYTES\s*=\s*[\d *]+/);
     expect(src).toMatch(/st\.size\s*>\s*ARTIFACT_MAX_BYTES/);
+  });
+});
+
+// ── Write Confinement for Mutating Tools ──────────────────────────────────────
+
+describe('Write Confinement for Mutating Tools (mcp-security)', () => {
+  // Every tool that writes to disk or mutates persistent state must be annotated
+  // non-read-only (mcp-quality Tool Behavior Annotations). Keeps the annotation
+  // table honest as new mutators are added.
+  const MUTATORS = [
+    'record_decision', 'sync_decisions', 'annotate_story', 'generate_change_proposal',
+    'generate_tests', 'remember', 'approve_decision', 'reject_decision',
+  ];
+
+  it('all mutating tools are annotated readOnlyHint:false', () => {
+    for (const name of MUTATORS) {
+      const ann = toolAnnotations(name);
+      expect(ann.readOnlyHint, `${name} must be readOnlyHint:false`).toBe(false);
+    }
+  });
+
+  it('read-only graph tools are annotated readOnlyHint:true (negative control)', () => {
+    for (const name of ['orient', 'search_code', 'get_subgraph', 'trace_execution_path']) {
+      expect(toolAnnotations(name).readOnlyHint, `${name} should be read-only`).toBe(true);
+    }
+  });
+
+  it('annotate_story cannot write through a traversal path (confined to the root)', async () => {
+    const root = realpathRoot(mkdtempSync(join(tmpdir(), 'ol-sec-write-')));
+    const outside = realpathRoot(mkdtempSync(join(tmpdir(), 'ol-sec-wout-')));
+    try {
+      // A storyFilePath that escapes the root must be rejected by safeJoin before
+      // any read/write — nothing is created outside the project root.
+      await expect(
+        handleAnnotateStory(root, '../../' + 'escape.md', 'desc'),
+      ).rejects.toThrow(/traversal|escape/i);
+      // Sanity: the escape target was never created.
+      expect(existsSync(join(outside, 'escape.md'))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });
