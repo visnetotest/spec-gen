@@ -11,8 +11,9 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile, access, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { request as httpRequest } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
-import { startServe, type ServeHandle } from './serve.js';
+import { startServe, readDescriptor, type ServeHandle } from './serve.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { openloreAnalyze } from '../../api/analyze.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
@@ -48,6 +49,28 @@ function fileExists(p: string): Promise<boolean> {
 // to a loose record so the assertions below read cleanly.
 async function jsonOf(res: Response): Promise<Record<string, unknown>> {
   return (await res.json()) as Record<string, unknown>;
+}
+
+/**
+ * Raw HTTP GET with arbitrary headers. `fetch` forbids overriding `Host`/`Origin`,
+ * so the DNS-rebinding tests drop to node:http (setHost:false to keep our Host).
+ */
+function rawGet(
+  port: number,
+  path: string,
+  headers: Record<string, string>,
+): Promise<{ status: number }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { host: '127.0.0.1', port, path, method: 'GET', headers, setHost: false },
+      (res) => {
+        res.resume(); // drain
+        res.on('end', () => resolve({ status: res.statusCode ?? 0 }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 describe('openlore serve', () => {
@@ -156,6 +179,38 @@ describe('openlore serve', () => {
     expect(await fileExists(descPath)).toBe(false); // stale descriptor cleaned up
   });
 
+  it('rejects a poisoned serve.json (untrusted artifact) — fails closed', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-'));
+    const descPath = join(root, '.openlore', 'serve.json');
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    const write = (o: unknown) => writeFile(descPath, JSON.stringify(o), 'utf-8');
+
+    // A non-loopback host must be rejected — otherwise daemonAlive would fetch it
+    // (arbitrary-host egress) and stopDaemon could SIGTERM its pid.
+    await write({ port: 8080, pid: 99999, host: 'evil.example.com', version: 'x', startedAt: '' });
+    expect(await readDescriptor(root)).toBeNull();
+
+    // Shape violations fail closed too.
+    for (const bad of [
+      null, 42, '[]', [],
+      { port: 'not-a-number', pid: 1, host: '127.0.0.1' },
+      { port: 70000, pid: 1, host: '127.0.0.1' },        // out-of-range port
+      { port: 8080, pid: -1, host: '127.0.0.1' },         // bad pid
+      { port: 8080, pid: 1 },                              // missing host
+      { port: 8080, pid: 1, host: '127.0.0.1', token: 5 },// non-string token
+    ]) {
+      await write(bad);
+      expect(await readDescriptor(root), `should reject ${JSON.stringify(bad)}`).toBeNull();
+    }
+
+    // A well-formed loopback descriptor is accepted.
+    await write({ port: 8080, pid: 1, host: '127.0.0.1', version: 'x', startedAt: '', token: 't' });
+    const ok = await readDescriptor(root);
+    expect(ok).not.toBeNull();
+    expect(ok!.host).toBe('127.0.0.1');
+    expect(ok!.token).toBe('t');
+  });
+
   it('reuses a live daemon instead of starting a second one for the same root', async () => {
     const h1 = await boot();
     // Second start for the same root must detect the live daemon and return its
@@ -221,6 +276,34 @@ describe('openlore serve', () => {
     }
     expect(nodes).toBeGreaterThan(0); // rebuilt, not left empty
   }, 30_000);
+
+  it('rejects a spoofed (DNS-rebinding) Host header before dispatch', async () => {
+    const h = await boot();
+    // An attacker domain resolved to 127.0.0.1 still sends its name in Host.
+    const spoofed = await rawGet(h.port, '/health', { Host: 'attacker.example.com' });
+    expect(spoofed.status).toBe(403);
+    // A loopback Host is accepted.
+    const ok = await rawGet(h.port, '/health', { Host: `127.0.0.1:${h.port}` });
+    expect(ok.status).toBe(200);
+  });
+
+  it('rejects a cross-site Origin', async () => {
+    const h = await boot();
+    const cross = await rawGet(h.port, '/health', {
+      Host: `127.0.0.1:${h.port}`,
+      Origin: 'https://evil.example.com',
+    });
+    expect(cross.status).toBe(403);
+  });
+
+  it('refuses a non-loopback bind without a token', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-'));
+    const prev = process.exitCode;
+    const h = await startServe({ directory: root, port: '0', watch: false, host: '0.0.0.0' });
+    expect(h).toBeUndefined();
+    expect(process.exitCode).toBe(1);
+    process.exitCode = prev; // don't fail the suite
+  });
 
   it('rejects an unknown preset at startup', async () => {
     root = await mkdtemp(join(tmpdir(), 'openlore-serve-'));

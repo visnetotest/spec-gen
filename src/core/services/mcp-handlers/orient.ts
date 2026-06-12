@@ -17,12 +17,12 @@
 import { join, relative } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext } from './utils.js';
+import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError } from './utils.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
 import type { RagManifest } from '../../generator/rag-manifest-generator.js';
-import { OPENSPEC_DIR, ARTIFACT_RAG_MANIFEST } from '../../../constants.js';
+import { ARTIFACT_RAG_MANIFEST } from '../../../constants.js';
 import { loadArchitectureRules } from '../../architecture/rules.js';
 import { scanViolations } from '../../architecture/check.js';
 import {
@@ -164,6 +164,7 @@ export async function handleOrient(
   tokenBudget?: number,
   lean = false,
 ): Promise<unknown> {
+  const tooLong = queryTooLongError(task, 'task'); if (tooLong) return tooLong;
   const absDir = await validateDirectory(directory);
   const outputDir = join(absDir, '.openlore', 'analysis');
 
@@ -351,8 +352,8 @@ export async function handleOrient(
   if (!lean && specDomains.length > 0) {
     try {
       const cfg = await readOpenLoreConfig(absDir);
-      const openspecRelPath = cfg?.openspecPath ?? OPENSPEC_DIR;
-      const manifestPath = join(absDir, openspecRelPath, ARTIFACT_RAG_MANIFEST);
+      // Confine the configured openspec dir to the root (config is untrusted input).
+      const manifestPath = join(safeOpenspecDir(absDir, cfg?.openspecPath), ARTIFACT_RAG_MANIFEST);
       const manifestCache = await loadManifestCached(manifestPath, absDir);
       if (manifestCache) {
         const { manifest } = manifestCache;
@@ -360,7 +361,15 @@ export async function handleOrient(
           specDomains.slice(0, 3).map(async sd => {
             const entry = manifest.domains.find(d => d.domain.toLowerCase() === sd.domain.toLowerCase());
             if (!entry) return null;
-            const absSpecPath = join(absDir, entry.specPath);
+            // entry.specPath comes from the RAG manifest (a .openlore artifact —
+            // untrusted per the threat model). Confine it to the root so a poisoned
+            // manifest can't redirect this read outside the project (mcp-security).
+            let absSpecPath: string;
+            try {
+              absSpecPath = safeJoin(absDir, entry.specPath);
+            } catch {
+              return null;
+            }
             const content = await loadCondensedCached(manifestCache, absSpecPath, entry.specPath);
             if (!content) return null;
             const MAX_SOURCE_FILES = 8;

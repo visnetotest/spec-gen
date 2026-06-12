@@ -9,7 +9,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { validateDirectory, sanitizeMcpError } from './utils.js';
+import { validateDirectory, sanitizeMcpError, safeOpenspecDir } from './utils.js';
 import { emit } from '../telemetry.js';
 import {
   loadDecisionStore,
@@ -23,7 +23,6 @@ import { buildSpecMap, matchFileToDomains } from '../../../core/drift/spec-mappe
 import { AnchorContext } from '../../decisions/anchor-adapter.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { join } from 'node:path';
-import { OPENSPEC_DIR } from '../../../constants.js';
 import type { PendingDecision, DecisionScope } from '../../../types/index.js';
 
 function spawnConsolidateBackground(rootPath: string): void {
@@ -76,7 +75,7 @@ export async function handleRecordDecision(
     if (affectedFiles?.length) {
       try {
         const openloreConfig = await readOpenLoreConfig(rootPath);
-        const openspecPath = join(rootPath, openloreConfig?.openspecPath ?? OPENSPEC_DIR);
+        const openspecPath = safeOpenspecDir(rootPath, openloreConfig?.openspecPath);
         const specMap = await buildSpecMap({ rootPath, openspecPath });
         const domainSet = new Set<string>();
         for (const file of affectedFiles) {
@@ -283,7 +282,7 @@ export async function handleSyncDecisions(
     const openloreConfig = await readOpenLoreConfig(rootPath);
     if (!openloreConfig) return { error: 'No openlore configuration found. Run openlore init first.' };
 
-    const openspecPath = join(rootPath, openloreConfig.openspecPath ?? OPENSPEC_DIR);
+    const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
     const specMap = await buildSpecMap({ rootPath, openspecPath });
 
     let store = await loadDecisionStore(rootPath);

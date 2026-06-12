@@ -1,6 +1,6 @@
 {
   "name": "openlore",
-  "version": "2.0.16",
+  "version": "2.0.17",
   "description": "Persistent architectural memory and structural cognition for AI coding agents.",
   "type": "module",
   "main": "dist/api/index.js",
@@ -37,6 +37,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:live": "vitest run --config vitest.integration.config.ts live-data --reporter=verbose",
     "build:watch": "tsc --watch",
+    "homebrew:formula": "node scripts/update-homebrew-formula.mjs",
     "clean": "rm -rf dist coverage",
     "skill:install-local": "node scripts/install-skill.js",
     "format": "eslint src --fix",

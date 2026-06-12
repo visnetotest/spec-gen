@@ -11,7 +11,7 @@
  */
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, sep } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
 import type { GeneratedTestFile } from '../../types/test-generator.js';
 
@@ -111,6 +111,15 @@ export async function writeTestFiles(opts: {
 
   for (const file of files) {
     const absPath = resolve(rootPath, file.outputPath);
+    // Write confinement (mcp-security): outputPath is derived from spec domain /
+    // requirement names — repo content. Most case-converters strip separators,
+    // but the junit path (toPascalCase) does not, so a crafted requirement title
+    // ("../../etc/x") could otherwise escape the root on write. Refuse any path
+    // that resolves outside the project root.
+    if (absPath !== rootPath && !absPath.startsWith(rootPath + sep)) {
+      result.skipped++;
+      continue;
+    }
     const exists = await fileExists(absPath);
 
     if (dryRun) {

@@ -9,7 +9,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import {
   DEFAULT_MAX_FILES,
@@ -29,6 +29,7 @@ import {
   ARTIFACT_ENV_INVENTORY,
   ARTIFACT_EXTERNAL_PACKAGES,
   TRANSITIVE_SCORE_MAX,
+  REPO_CONTENT_PROVENANCE,
 } from '../../../constants.js';
 import { runAnalysis } from '../../../cli/commands/analyze.js';
 import { analyzeForRefactoring } from '../../analyzer/refactor-analyzer.js';
@@ -41,9 +42,10 @@ import {
   buildSpecMap,
   buildADRMap,
   detectDrift,
+  validateGitRef,
 } from '../../drift/index.js';
 import { readOpenLoreConfig } from '../config-manager.js';
-import { validateDirectory, readCachedContext, isCacheFresh, safeJoin } from './utils.js';
+import { validateDirectory, readCachedContext, isCacheFresh, safeJoin, safeOpenspecDir } from './utils.js';
 import { buildWeightedAdjacency, weightedBfs } from './graph.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import type { MappingArtifact } from '../../generator/mapping-generator.js';
@@ -289,7 +291,8 @@ export async function handleCheckSpecDrift(
     return { error: 'No openlore configuration found. Run "openlore init" first.' };
   }
 
-  const openspecPath = join(absDir, openloreConfig.openspecPath ?? OPENSPEC_DIR);
+  // Confine the configured openspec dir to the root (config is untrusted input).
+  const openspecPath = safeOpenspecDir(absDir, openloreConfig.openspecPath);
   const specsPath = join(openspecPath, 'specs');
   try {
     await stat(specsPath);
@@ -390,6 +393,7 @@ export async function handleGetFunctionSkeleton(
     reductionPct: Math.round((1 - skeleton.length / source.length) * 100),
     worthIncluding,
     skeleton,
+    provenance: REPO_CONTENT_PROVENANCE,
   };
 }
 
@@ -437,6 +441,7 @@ export async function handleGetFunctionBody(
           endIndex: node.endIndex,
           body,
           lineCount: body.split('\n').length,
+          provenance: REPO_CONTENT_PROVENANCE,
         };
       }
     }
@@ -474,6 +479,7 @@ export async function handleGetFunctionBody(
     body,
     lineCount: endLine - startLine + 1,
     note: 'Extracted via line scan (no call graph available). Run analyze_codebase for exact extraction.',
+    provenance: REPO_CONTENT_PROVENANCE,
   };
 }
 
@@ -497,7 +503,8 @@ export async function handleGetDecisions(
     if (cfg.openspecPath) openspecRelPath = cfg.openspecPath;
   } catch { /* use default */ }
 
-  const decisionsDir = pjoin(absDir, openspecRelPath, 'decisions');
+  // Confine the configured openspec dir to the root (config is untrusted input).
+  const decisionsDir = pjoin(safeOpenspecDir(absDir, openspecRelPath), 'decisions');
   if (!existsSync(decisionsDir)) {
     return { decisions: [], note: `No decisions directory found at ${openspecRelPath}/decisions/. Run "openlore generate --adrs" first.` };
   }
@@ -566,10 +573,16 @@ export async function handleGetRouteInventory(
   // Try reading cached artifact first
   try {
     const raw = await readFile(artifactPath, 'utf-8');
-    const inventory = JSON.parse(raw) as Record<string, unknown>;
-    return { cached: true, ...inventory };
+    const inventory = JSON.parse(raw);
+    // Untrusted artifact: only serve it if the top-level shape is a plain object;
+    // a malformed/poisoned artifact falls through to live re-extraction instead of
+    // being spread into the result (mcp-security: fail closed, no attacker shape).
+    if (inventory === null || typeof inventory !== 'object' || Array.isArray(inventory)) {
+      throw new Error('malformed cached route inventory');
+    }
+    return { cached: true, ...(inventory as Record<string, unknown>) };
   } catch {
-    // Artifact not present — run live extraction
+    // Artifact not present or malformed — run live extraction
   }
 
   const { buildRouteInventory } = await import('../../analyzer/http-route-parser.js');
@@ -607,10 +620,11 @@ export async function handleGetMiddlewareInventory(
   // Try reading cached artifact first
   try {
     const raw = await readFile(artifactPath, 'utf-8');
-    const inventory = JSON.parse(raw) as unknown[];
+    const inventory = JSON.parse(raw);
+    if (!Array.isArray(inventory)) throw new Error('malformed cached middleware inventory');
     return { cached: true, total: inventory.length, entries: inventory };
   } catch {
-    // Artifact not present — run live extraction
+    // Artifact not present or malformed — run live extraction
   }
 
   const { extractMiddleware } = await import('../../analyzer/middleware-extractor.js');
@@ -647,10 +661,11 @@ export async function handleGetSchemaInventory(
 
   try {
     const raw = await readFile(artifactPath, 'utf-8');
-    const schemas = JSON.parse(raw) as unknown[];
+    const schemas = JSON.parse(raw);
+    if (!Array.isArray(schemas)) throw new Error('malformed cached schema inventory');
     return { cached: true, total: schemas.length, schemas };
   } catch {
-    // Artifact not present — run live extraction
+    // Artifact not present or malformed — run live extraction
   }
 
   const { extractSchemas } = await import('../../analyzer/schema-extractor.js');
@@ -687,10 +702,11 @@ export async function handleGetUIComponents(
 
   try {
     const raw = await readFile(artifactPath, 'utf-8');
-    const components = JSON.parse(raw) as unknown[];
+    const components = JSON.parse(raw);
+    if (!Array.isArray(components)) throw new Error('malformed cached UI inventory');
     return { cached: true, total: components.length, components };
   } catch {
-    // Artifact not present — run live extraction
+    // Artifact not present or malformed — run live extraction
   }
 
   const { extractUIComponents } = await import('../../analyzer/ui-component-extractor.js');
@@ -727,10 +743,11 @@ export async function handleGetEnvVars(
 
   try {
     const raw = await readFile(artifactPath, 'utf-8');
-    const envVars = JSON.parse(raw) as unknown[];
+    const envVars = JSON.parse(raw);
+    if (!Array.isArray(envVars)) throw new Error('malformed cached env inventory');
     return { cached: true, total: envVars.length, envVars };
   } catch {
-    // Artifact not present — run live extraction
+    // Artifact not present or malformed — run live extraction
   }
 
   const { extractEnvVars } = await import('../../analyzer/env-extractor.js');
@@ -768,9 +785,12 @@ export async function handleGetExternalPackages(
 
   try {
     const raw = await readFile(artifactPath, 'utf-8');
-    const result = JSON.parse(raw) as Record<string, unknown>;
-    return { cached: true, ...result };
-  } catch { /* not cached */ }
+    const result = JSON.parse(raw);
+    if (result === null || typeof result !== 'object' || Array.isArray(result)) {
+      throw new Error('malformed cached external-packages inventory');
+    }
+    return { cached: true, ...(result as Record<string, unknown>) };
+  } catch { /* not cached or malformed — run live extraction */ }
 
   const { extractExternalPackages } = await import('../../analyzer/external-packages.js');
   const result = await extractExternalPackages(absDir);
@@ -1131,23 +1151,32 @@ export function buildClusterView(cg: SerializedCallGraph, absDir: string, commun
 // detect_changes
 // ============================================================================
 
-/** Run git with explicit stdio pipes — safe inside MCP server (which owns stdin/stdout). */
+/** Run git with output redirected to file descriptors — safe inside the MCP
+ * server (which owns stdin/stdout). */
 function runGit(args: string[], cwd: string): Promise<string> {
-  // Use shell file-redirect to temp files instead of pipes — libuv pipe() calls
-  // fail with EBADF inside the MCP server because its FD 0/1 are the JSON-RPC
-  // protocol sockets; avoiding pipe creation altogether sidesteps the issue.
+  // Redirect git's stdout/stderr straight to temp files via file descriptors.
+  // This sidesteps libuv's pipe() (which fails EBADF inside the MCP server,
+  // whose FD 0/1 are the JSON-RPC protocol sockets) WITHOUT a shell: git is
+  // invoked with an argv array, so an arg can never be reinterpreted as a shell
+  // token (mcp-security: Subprocess Argument Safety — no shell-string calls).
   return new Promise((resolve, reject) => {
     const PATH = (process.env.PATH ?? '') + ':/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin';
     const tmp = mkdtempSync(join(tmpdir(), 'sg-git-'));
     const outPath = join(tmp, 'o');
     const errPath = join(tmp, 'e');
-    const escaped = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-    const cmd = `/usr/bin/git ${escaped} >'${outPath}' 2>'${errPath}'`;
-    const r = spawnSync('/bin/sh', ['-c', cmd], {
-      cwd,
-      stdio: 'ignore',
-      env: { ...process.env, PATH },
-    });
+    const outFd = openSync(outPath, 'w');
+    const errFd = openSync(errPath, 'w');
+    let r: ReturnType<typeof spawnSync>;
+    try {
+      r = spawnSync('git', args, {
+        cwd,
+        stdio: ['ignore', outFd, errFd],
+        env: { ...process.env, PATH },
+      });
+    } finally {
+      try { closeSync(outFd); } catch { /* already closed */ }
+      try { closeSync(errFd); } catch { /* already closed */ }
+    }
     let stdout = '';
     let stderr = '';
     try { stdout = readFileSync(outPath, 'utf8'); } catch { /* no output */ }
@@ -1240,6 +1269,9 @@ export async function handleDetectChanges(
   if (!ctx?.callGraph) return { error: 'No call graph. Run analyze_codebase first.' };
 
   const ref = base ?? 'HEAD';
+  // Validate the caller-supplied base ref against argument injection before it
+  // reaches git (mcp-security: Subprocess Argument Safety).
+  validateGitRef(ref);
   let diffOutput: string;
   try {
     diffOutput = await runGit(['diff', '--unified=0', ref, '--', '.'], absDir);

@@ -17,8 +17,12 @@
  * Discovery: writes `.openlore/serve.json` { port, pid, host, token?, startedAt }
  * in the served root so a client can find and reuse a running daemon.
  *
- * Security: binds 127.0.0.1 only. An optional --token must be presented as the
- * `x-openlore-token` header, keeping other local users off the port.
+ * Security: defaults to 127.0.0.1. Every request is checked against a DNS-rebinding
+ * guard (Host must be a loopback name or the bound host; a cross-site Origin is
+ * rejected) before any dispatch. An optional --token must be presented as the
+ * `x-openlore-token` header and is compared in constant time; binding a non-loopback
+ * host requires a token (the daemon refuses to start otherwise), and a tokenless
+ * loopback bind warns that other local processes can reach the port.
  *
  * Freshness (watcher + continuous re-analyze) is layered on separately; this
  * module is the transport + lifecycle core.
@@ -27,6 +31,7 @@
 import { Command } from 'commander';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
+import { timingSafeEqual } from 'node:crypto';
 import { writeFile, readFile, unlink, mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
@@ -82,6 +87,77 @@ export interface ServeHandle {
 const SERVE_FILE = 'serve.json';
 const MAX_BODY_BYTES = 1_000_000; // tool args are small; reject anything larger
 
+/** Hostnames that denote the loopback interface (no DNS resolution involved). */
+const LOOPBACK_HOSTNAMES = new Set([
+  'localhost',
+  '127.0.0.1',
+  '::1',
+  '0:0:0:0:0:0:0:1',
+  '0000:0000:0000:0000:0000:0000:0000:0001',
+]);
+
+/** True if `host` is a loopback literal/name (127.0.0.0/8, ::1, localhost). */
+function isLoopbackHost(host: string): boolean {
+  const h = host.trim().replace(/^\[|\]$/g, '').toLowerCase();
+  if (LOOPBACK_HOSTNAMES.has(h)) return true;
+  // Any 127.x.y.z address is loopback.
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
+/** Extract the hostname (sans port, sans brackets) from a Host/Origin authority. */
+function hostnameOf(authority: string): string {
+  let a = authority.trim();
+  // Strip scheme if this came from an Origin (e.g. http://host:port).
+  const scheme = a.indexOf('://');
+  if (scheme !== -1) a = a.slice(scheme + 3);
+  // Bracketed IPv6: [::1]:port
+  if (a.startsWith('[')) {
+    const close = a.indexOf(']');
+    if (close !== -1) return a.slice(1, close).toLowerCase();
+  }
+  // host:port → host (IPv4 / name only; bare IPv6 has no port form here)
+  const colon = a.indexOf(':');
+  if (colon !== -1 && a.indexOf(':') === a.lastIndexOf(':')) a = a.slice(0, colon);
+  return a.toLowerCase();
+}
+
+/**
+ * Constant-time string equality. Returns false for length mismatch, but still
+ * runs a same-length compare first so timing does not leak the secret's length.
+ */
+function constantTimeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a, 'utf-8');
+  const bb = Buffer.from(b, 'utf-8');
+  if (ab.length !== bb.length) {
+    // Compare ab to itself to burn comparable time, then fail.
+    timingSafeEqual(ab, ab);
+    return false;
+  }
+  return timingSafeEqual(ab, bb);
+}
+
+/**
+ * DNS-rebinding / cross-origin defense for the loopback daemon. A browser tricked
+ * into resolving an attacker domain to 127.0.0.1 still sends the attacker's name in
+ * the `Host` header (and an attacker page sends a cross-site `Origin`). We accept a
+ * request only when both the Host and any Origin name the loopback interface or the
+ * exact bound host. Returns an error string to reject with, or null to allow.
+ */
+function originDefenseError(req: IncomingMessage, boundHost: string): string | null {
+  const boundName = hostnameOf(boundHost);
+  const allowed = (name: string): boolean => isLoopbackHost(name) || name === boundName;
+
+  const hostHeader = req.headers.host;
+  if (hostHeader === undefined || !allowed(hostnameOf(hostHeader))) {
+    return `Host header "${hostHeader ?? ''}" is not an allowed loopback name (DNS-rebinding guard)`;
+  }
+  const origin = req.headers.origin;
+  if (origin !== undefined && origin !== 'null' && !allowed(hostnameOf(origin))) {
+    return `cross-site Origin "${origin}" is not permitted`;
+  }
+  return null;
+}
+
 function serveFilePath(root: string): string {
   return join(root, OPENLORE_DIR, SERVE_FILE);
 }
@@ -122,13 +198,39 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(text);
 }
 
-/** Read <root>/.openlore/serve.json if present. */
-async function readDescriptor(root: string): Promise<ServeDescriptor | null> {
+/**
+ * Read + validate <root>/.openlore/serve.json. The discovery file is an untrusted
+ * on-disk artifact (mcp-security: Untrusted Artifact Deserialization): a hostile repo
+ * could ship a poisoned serve.json. We fail closed unless every field has the expected
+ * type AND the host is a loopback name — otherwise `daemonAlive` would fetch an
+ * arbitrary host (egress / SSRF) and `stopDaemon` could SIGTERM an arbitrary pid.
+ *
+ * Exported for the serve.json validation tests.
+ */
+export async function readDescriptor(root: string): Promise<ServeDescriptor | null> {
+  let parsed: unknown;
   try {
-    return JSON.parse(await readFile(serveFilePath(root), 'utf-8')) as ServeDescriptor;
+    parsed = JSON.parse(await readFile(serveFilePath(root), 'utf-8'));
   } catch {
     return null;
   }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const d = parsed as Record<string, unknown>;
+  const portOk = typeof d.port === 'number' && Number.isInteger(d.port) && d.port >= 1 && d.port <= 65535;
+  const pidOk = typeof d.pid === 'number' && Number.isInteger(d.pid) && d.pid > 0;
+  // Confine host to loopback: a recorded non-loopback host must never become an
+  // outbound fetch target during liveness probing.
+  const hostOk = typeof d.host === 'string' && isLoopbackHost(d.host);
+  const tokenOk = d.token === undefined || typeof d.token === 'string';
+  if (!portOk || !pidOk || !hostOk || !tokenOk) return null;
+  return {
+    port: d.port as number,
+    pid: d.pid as number,
+    host: d.host as string,
+    token: d.token as string | undefined,
+    startedAt: typeof d.startedAt === 'string' ? d.startedAt : '',
+    version: typeof d.version === 'string' ? d.version : '',
+  };
 }
 
 /**
@@ -184,6 +286,27 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   }
 
   const host = options.host ?? '127.0.0.1';
+  const token = options.token ?? (process.env.OPENLORE_SERVE_TOKEN || undefined);
+
+  // A non-loopback bind exposes the tool surface to other hosts on the network;
+  // refuse it without a token (mcp-security: Local Daemon Authentication).
+  if (!isLoopbackHost(host) && !token) {
+    logger.error(
+      `Refusing to bind non-loopback host "${host}" without a token. ` +
+      `A non-loopback bind exposes openlore tools to the network; pass --token <secret> ` +
+      `(or set OPENLORE_SERVE_TOKEN) to require authentication.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  // A loopback bind with no token is still reachable by other local processes.
+  if (isLoopbackHost(host) && !token) {
+    logger.warning(
+      `[serve] No token configured — any local process on this machine can call openlore tools ` +
+      `on ${host}. Pass --token to restrict access.`,
+    );
+  }
+
   const presetName = options.preset ?? 'navigation';
   if (presetName !== 'all' && !TOOL_PRESETS[presetName]) {
     logger.error(`Unknown --preset "${presetName}". Known: ${Object.keys(TOOL_PRESETS).join(', ')}, all.`);
@@ -215,7 +338,6 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     };
   }
 
-  const token = options.token ?? (process.env.OPENLORE_SERVE_TOKEN || undefined);
   const startedAt = new Date().toISOString();
   const startMs = Date.now();
 
@@ -267,9 +389,19 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', `http://${host}`);
 
-    // Token gate (skips /health so liveness checks need no secret).
+    // DNS-rebinding / cross-origin defense — runs before ANY dispatch, including
+    // /health, so a malicious page can't even probe the daemon's existence.
+    const originErr = originDefenseError(req, host);
+    if (originErr) {
+      sendJson(res, 403, { error: originErr });
+      return;
+    }
+
+    // Token gate (skips /health so liveness checks need no secret). Compared in
+    // constant time so a timing oracle can't recover the token byte-by-byte.
     if (token && url.pathname !== '/health') {
-      if (req.headers['x-openlore-token'] !== token) {
+      const presented = req.headers['x-openlore-token'];
+      if (typeof presented !== 'string' || !constantTimeEqual(presented, token)) {
         sendJson(res, 401, { error: 'invalid or missing x-openlore-token' });
         return;
       }
