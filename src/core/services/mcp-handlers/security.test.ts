@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { validateGitRef } from '../../drift/git-diff.js';
 import { safeJoin, sanitizeMcpError } from './utils.js';
 import { redactSecrets, redactSecretString } from '../secret-redaction.js';
+import { TOOL_DEFINITIONS } from '../../../cli/commands/mcp.js';
 
 const SRC = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 // Server + analysis + daemon surface. Excludes src/pi (the VS Code extension launcher,
@@ -219,5 +220,79 @@ describe('LLM Provider Egress Discipline (mcp-security)', () => {
       }
     }
     expect(offenders, `analytics/telemetry SDK imported in: ${offenders.join(', ')}`).toEqual([]);
+  });
+});
+
+// ── Path-Parameter Coverage Gate ──────────────────────────────────────────────
+
+describe('Path-Parameter Coverage Gate (mcp-security)', () => {
+  // Every tool input field whose NAME implies a filesystem path, with the
+  // confinement category we have verified for it. A path-like field that is not
+  // in this registry fails the gate below — so a newly added path argument cannot
+  // silently bypass confinement. Categories:
+  //   'root'     → the project root, confined by validateDirectory()
+  //   'disk'     → joined to the root and read/written; MUST route through safeJoin()
+  //   'lookup'   → matched against already-analyzed in-memory data; never hits the fs
+  //   'metadata' → stored/echoed as data; never used to access the fs
+  const PATH_FIELD_REGISTRY: Record<string, 'root' | 'disk' | 'lookup' | 'metadata'> = {
+    directory: 'root',
+    filePath: 'disk',        // get_function_body/skeleton read via safeJoin; lookup elsewhere
+    storyFilePath: 'disk',   // annotate_story writes via safeJoin
+    filePattern: 'lookup',   // substring filter over node.filePath in memory
+    file: 'lookup',          // edge-store change-coupling key
+    files: 'lookup',         // in-memory pathFilter over already-discovered files
+    affectedFiles: 'metadata', // recorded on a decision; used for domain inference only
+  };
+
+  /** A string (or string[]) field whose NAME implies a filesystem path. The type
+   * check excludes numeric bounds like maxFiles/maxPaths; the name check excludes
+   * "direction"/"directResolvedOnly". */
+  function isPathParam(name: string, schema: unknown): boolean {
+    const nameHints = /file|path/i.test(name) || name === 'directory' || name === 'dir';
+    if (!nameHints) return false;
+    const s = schema as { type?: string; items?: { type?: string } } | undefined;
+    const isStringy = s?.type === 'string' || (s?.type === 'array' && s.items?.type === 'string');
+    return !!isStringy;
+  }
+
+  it('every path-like tool field is a known, classified path parameter', () => {
+    const discovered = new Map<string, string[]>(); // field → tools using it
+    for (const tool of TOOL_DEFINITIONS) {
+      const props = (tool.inputSchema?.properties ?? {}) as Record<string, unknown>;
+      for (const [field, schema] of Object.entries(props)) {
+        if (!isPathParam(field, schema)) continue;
+        if (!discovered.has(field)) discovered.set(field, []);
+        discovered.get(field)!.push(tool.name);
+      }
+    }
+    const unknown = [...discovered.keys()].filter(f => !(f in PATH_FIELD_REGISTRY));
+    expect(
+      unknown,
+      `Unclassified path-like tool field(s): ${unknown
+        .map(f => `${f} (in ${discovered.get(f)!.join(', ')})`)
+        .join('; ')}. Route through safeJoin and add to PATH_FIELD_REGISTRY.`,
+    ).toEqual([]);
+
+    // Keep the registry honest: no stale entry for a field no tool declares anymore.
+    const stale = Object.keys(PATH_FIELD_REGISTRY).filter(f => !discovered.has(f));
+    expect(stale, `Stale PATH_FIELD_REGISTRY entries (no tool declares them): ${stale.join(', ')}`).toEqual([]);
+  });
+
+  it('handlers that read/write a disk path route it through safeJoin', () => {
+    // Each disk-category field → the handler module that joins it to the root.
+    const DISK_FIELD_HANDLERS: Record<string, string> = {
+      filePath: join(SRC, 'core', 'services', 'mcp-handlers', 'analysis.ts'),
+      storyFilePath: join(SRC, 'core', 'services', 'mcp-handlers', 'change.ts'),
+    };
+    for (const [field, cat] of Object.entries(PATH_FIELD_REGISTRY)) {
+      if (cat !== 'disk') continue;
+      const handlerFile = DISK_FIELD_HANDLERS[field];
+      expect(handlerFile, `no handler mapped for disk field "${field}"`).toBeTruthy();
+      const src = readFileSync(handlerFile, 'utf-8');
+      expect(
+        src.includes('safeJoin'),
+        `${handlerFile.replace(SRC, 'src')} reads disk field "${field}" but does not call safeJoin`,
+      ).toBe(true);
+    }
   });
 });
