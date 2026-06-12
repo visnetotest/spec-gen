@@ -151,6 +151,11 @@ interface CfgLangSpec {
   memberTypes: Set<string>;
   /** Subscript/index node types — a write/read through these is a `may` dependence. */
   subscriptTypes: Set<string>;
+  /** Pointer-dereference node types (C/C++ `*p`). A write through these (`*p = x`)
+   *  mutates the pointee, not the pointer binding, so the base pointer is a *use*
+   *  and the l-value is a `may` def — never an exact reassignment of `p`.
+   *  Optional: only C/C++ have pointer-deref l-values. */
+  derefTypes?: Set<string>;
   /** Identifier node type for variable names. */
   identTypes: Set<string>;
   /** Call-expression node types (used to skip the callee name as a use). */
@@ -327,6 +332,7 @@ const CPP_SPEC: CfgLangSpec = {
   declContainerTypes: new Set(['declaration']),
   memberTypes: new Set(['field_expression']),
   subscriptTypes: new Set(['subscript_expression']),
+  derefTypes: new Set(['pointer_expression']),
   identTypes: new Set(['identifier', 'field_identifier']),
   callTypes: new Set(['call_expression']),
   callNameField: 'function',
@@ -1135,10 +1141,20 @@ class CfgBuilder {
       this.block(block).ops.push({ op: 'def', variable: target.text, key: this.keyFor(target, target.text), line, precision: 'exact', weak });
       return;
     }
-    if (spec.memberTypes.has(target.type) || spec.subscriptTypes.has(target.type)) {
-      // obj.field = ... / arr[i] = ... — the base object is read, the whole
-      // l-value is a conservatively over-approximated (`may`) definition keyed
-      // by its source text (e.g. "obj.field").
+    if (
+      spec.memberTypes.has(target.type) ||
+      spec.subscriptTypes.has(target.type) ||
+      // `*p = x` (C/C++): a write through the pointer mutates the pointee, not the
+      // binding `p`. Treating it like obj.field keeps `p` a *use* (we read it to
+      // dereference) and the l-value `*p` a `may` def — never an exact reassign of
+      // `p`, which would falsely kill `p`'s real def and mislabel its provenance.
+      // Guard against `&x` (address-of shares the node type but never appears as an
+      // assignment target in valid code).
+      (spec.derefTypes?.has(target.type) && !target.text.startsWith('&'))
+    ) {
+      // obj.field = ... / arr[i] = ... / *p = ... — the base object is read, the
+      // whole l-value is a conservatively over-approximated (`may`) definition
+      // keyed by its source text (e.g. "obj.field", "*p").
       const base = target.namedChildren[0];
       if (base && spec.identTypes.has(base.type)) {
         this.block(block).ops.push({ op: 'use', variable: base.text, key: this.keyFor(base, base.text), line, precision: 'exact' });

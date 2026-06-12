@@ -642,6 +642,18 @@ describe('C overlay (via C++ spec)', () => {
     expect(cfg.edges.some(e => e.kind === 'back')).toBe(true);
     expect(defLinesTo(cfg, 'x', 9)).toEqual([6, 7]); // both switch arms reach
   });
+
+  it('write through a pointer (`*p = x`) is not an exact reassignment of `p`', async () => {
+    const lang = await cLang();
+    // `ns = base` (L2), `*ns = 0` (L3) writes the pointee not the binding, `return ns` (L4).
+    // The real def of `ns` is L2; `*ns = 0` must NOT kill it or claim provenance.
+    const cfg = cfgFor('char* f(char* base){\n  char* ns = base;\n  *ns = 0;\n  return ns;\n}', lang, 'C', ['function_definition']);
+    const nsAtReturn = cfg.defUse.filter(e => e.variable === 'ns' && e.useLine === 4);
+    expect(nsAtReturn.map(e => e.defLine)).toEqual([2]); // provenance is the real def, not L3
+    expect(nsAtReturn.every(e => e.precision === 'exact')).toBe(true);
+    // `*ns = 0` writes the pointee, so it must never appear as a def of `ns` itself
+    expect(cfg.defUse.some(e => e.variable === 'ns' && e.defLine === 3)).toBe(false);
+  });
 });
 
 describe('C# overlay', () => {
