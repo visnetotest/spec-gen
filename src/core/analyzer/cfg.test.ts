@@ -241,6 +241,33 @@ describe('elif chains and destructuring', () => {
   });
 });
 
+// ─── conditional/embedded assignment completeness (no dropped dependence) ─────
+
+describe('logical-assignment and walrus do not drop dependences', () => {
+  it('logical assignment (||=) keeps the prior def reaching (conditional write)', async () => {
+    const lang = await tsLang();
+    const cfg = cfgFor(`function f(a:any){\n  let x = a;\n  x ||= def();\n  return x;\n}`, lang, 'TypeScript', TS_FN);
+    const defLines = new Set(cfg.defUse.filter(e => e.variable === 'x' && e.useLine === 4).map(e => e.defLine));
+    expect(defLines.has(2)).toBe(true); // prior value survives when x was truthy
+    expect(defLines.has(3)).toBe(true); // the ||= value
+  });
+
+  it('plain (=) and augmented (+=) assignment still kill the prior def', async () => {
+    const lang = await tsLang();
+    const eq = cfgFor(`function f(){\n  let x = a();\n  x = b();\n  return x;\n}`, lang, 'TypeScript', TS_FN);
+    expect([...new Set(eq.defUse.filter(e => e.variable === 'x' && e.useLine === 4).map(e => e.defLine))]).toEqual([3]);
+    const aug = cfgFor(`function f(){\n  let x = 1;\n  x += 2;\n  return x;\n}`, lang, 'TypeScript', TS_FN);
+    expect([...new Set(aug.defUse.filter(e => e.variable === 'x' && e.useLine === 4).map(e => e.defLine))]).toEqual([3]);
+  });
+
+  it('Python walrus (:=) records the embedded definition', async () => {
+    const lang = await pyLang();
+    const cfg = cfgFor(`def f(a):\n    if (n := len(a)) > 0:\n        return n\n    return 0`, lang, 'Python', PY_FN);
+    const e = cfg.defUse.find(d => d.variable === 'n' && d.defLine === 2 && d.useLine === 3);
+    expect(e?.precision).toBe('exact');
+  });
+});
+
 // ─── structural-validity safety net ───────────────────────────────────────────
 
 describe('structural validity guard', () => {

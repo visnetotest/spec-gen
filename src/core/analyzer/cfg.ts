@@ -251,7 +251,10 @@ interface InternalBlock extends CfgBlock {
 }
 
 type Op =
-  | { op: 'def'; variable: string; line: number; precision: DataFlowPrecision; seq?: number }
+  // `weak` defs (logical-assignment `||=`/`&&=`/`??=`, which assign only
+  // conditionally) do NOT kill prior defs — the old value can survive, so both
+  // reach a later use.
+  | { op: 'def'; variable: string; line: number; precision: DataFlowPrecision; seq?: number; weak?: boolean }
   | { op: 'use'; variable: string; line: number; precision: DataFlowPrecision };
 
 interface LoopCtx {
@@ -623,7 +626,12 @@ class CfgBuilder {
     // Augmented assignment (x += 1) reads the target before writing it.
     if (augmented && left) this.recordUses(left, block);
 
-    if (left) this.recordTarget(left, block, line);
+    // Logical assignment (`x ||= e`, `&&=`, `??=`) writes only conditionally, so
+    // the prior value can survive — record a WEAK def that does not kill it.
+    const op = augmented ? node.childForFieldName('operator')?.text : undefined;
+    const weak = op === '||=' || op === '&&=' || op === '??=';
+
+    if (left) this.recordTarget(left, block, line, weak);
   }
 
   private recordDeclaration(node: CfgNode, block: number): void {
@@ -643,8 +651,10 @@ class CfgBuilder {
     }
   }
 
-  /** Record an assignment/declaration target as a definition (exact for scalars, may for member/subscript). */
-  private recordTarget(target: CfgNode, block: number, line: number): void {
+  /** Record an assignment/declaration target as a definition (exact for scalars,
+   *  may for member/subscript). `weak` marks a conditional (logical-assignment)
+   *  def that does not kill the prior value. */
+  private recordTarget(target: CfgNode, block: number, line: number, weak = false): void {
     const { spec } = this;
     // A destructuring binding leaf: `{ a, b }` exposes each name as a
     // `shorthand_property_identifier_pattern` (no children), which the generic
@@ -680,7 +690,7 @@ class CfgBuilder {
       return;
     }
     if (spec.identTypes.has(target.type)) {
-      this.block(block).ops.push({ op: 'def', variable: target.text, line, precision: 'exact' });
+      this.block(block).ops.push({ op: 'def', variable: target.text, line, precision: 'exact', weak });
       return;
     }
     if (spec.memberTypes.has(target.type) || spec.subscriptTypes.has(target.type)) {
@@ -691,7 +701,7 @@ class CfgBuilder {
       if (base && spec.identTypes.has(base.type)) {
         this.block(block).ops.push({ op: 'use', variable: base.text, line, precision: 'exact' });
       }
-      this.block(block).ops.push({ op: 'def', variable: normalizeLValue(target.text), line, precision: 'may' });
+      this.block(block).ops.push({ op: 'def', variable: normalizeLValue(target.text), line, precision: 'may', weak });
       return;
     }
     // Anything else (rare): collect identifier defs conservatively.
@@ -735,6 +745,17 @@ class CfgBuilder {
       // Nested assignment/declaration inside an expression: handle as a statement.
       if (spec.assignTypes.has(t) || spec.augAssignTypes.has(t)) {
         this.recordAssignment(n, block, spec.augAssignTypes.has(t));
+        return;
+      }
+      // Walrus (`n := value`, Python named_expression): a definition embedded in
+      // an expression — record the value's uses, then the name's def.
+      if (t === 'named_expression') {
+        const val = n.childForFieldName('value');
+        const name = n.childForFieldName('name');
+        if (val) visit(val);
+        if (name && spec.identTypes.has(name.type)) {
+          this.block(block).ops.push({ op: 'def', variable: name.text, line: name.startPosition.row + 1, precision: 'exact' });
+        }
         return;
       }
       if (spec.memberTypes.has(t)) {
@@ -870,6 +891,8 @@ interface DefSite {
   block: number;
   /** Sequence index for deterministic ordering. */
   seq: number;
+  /** Conditional def (logical-assignment) — does not kill prior defs. */
+  weak: boolean;
 }
 
 /**
@@ -890,7 +913,7 @@ function computeReachingDefs(builder: CfgBuilder, params: string[], paramLine: n
   const allDefs: DefSite[] = [];
   let seq = 0;
   for (const p of params) {
-    allDefs.push({ variable: p, line: paramLine, precision: 'exact', block: builder.ENTRY, seq: seq++ });
+    allDefs.push({ variable: p, line: paramLine, precision: 'exact', block: builder.ENTRY, seq: seq++, weak: false });
   }
   // Per-block ordered def sites (entry block also carries param defs first).
   const blockDefSites: DefSite[][] = Array.from({ length: n }, () => []);
@@ -898,7 +921,7 @@ function computeReachingDefs(builder: CfgBuilder, params: string[], paramLine: n
   for (const b of blocks) {
     for (const op of b.ops) {
       if (op.op === 'def') {
-        const site: DefSite = { variable: op.variable, line: op.line, precision: op.precision, block: b.id, seq: seq++ };
+        const site: DefSite = { variable: op.variable, line: op.line, precision: op.precision, block: b.id, seq: seq++, weak: op.weak ?? false };
         op.seq = site.seq; // back-reference so the wiring pass can find this def's seq
         allDefs.push(site);
         blockDefSites[b.id].push(site);
@@ -914,23 +937,26 @@ function computeReachingDefs(builder: CfgBuilder, params: string[], paramLine: n
     defsByVar.set(d.variable, arr);
   }
 
-  // GEN[b]: the last def of each variable within the block (it kills earlier
-  // same-var defs from the block before it). KILL[b]: all defs of any variable
-  // defined in b.
+  // GEN[b]: defs generated in b that survive to its end. A STRONG def of v
+  // replaces all earlier in-block defs of v; a WEAK def (conditional assignment)
+  // accumulates alongside them. KILL[b]: only a STRONG def of v kills incoming
+  // defs of v — a weak def leaves them reaching.
   const gen: Set<number>[] = Array.from({ length: n }, () => new Set());
   const kill: Set<number>[] = Array.from({ length: n }, () => new Set());
   for (let b = 0; b < n; b++) {
-    const lastByVar = new Map<string, DefSite>();
-    const varsDefinedHere = new Set<string>();
+    const liveByVar = new Map<string, Set<number>>();
+    const stronglyDefined = new Set<string>();
     for (const d of blockDefSites[b]) {
-      lastByVar.set(d.variable, d);
-      varsDefinedHere.add(d.variable);
+      const cur = liveByVar.get(d.variable) ?? new Set<number>();
+      if (d.weak) { cur.add(d.seq); }            // accumulate — old in-block defs survive
+      else { cur.clear(); cur.add(d.seq); stronglyDefined.add(d.variable); } // replace
+      liveByVar.set(d.variable, cur);
     }
-    for (const d of lastByVar.values()) gen[b].add(d.seq);
-    for (const v of varsDefinedHere) {
+    for (const set of liveByVar.values()) for (const s of set) gen[b].add(s);
+    for (const v of stronglyDefined) {
       for (const killed of defsByVar.get(v) ?? []) kill[b].add(killed.seq);
     }
-    // A def does not kill itself within its own GEN set.
+    // A def never kills itself out of its own GEN set.
     for (const g of gen[b]) kill[b].delete(g);
   }
 
@@ -986,8 +1012,13 @@ function computeReachingDefs(builder: CfgBuilder, params: string[], paramLine: n
           }
         }
       } else if (op.seq !== undefined) {
-        // A def replaces (kills) all prior reaching defs of that variable.
-        reaching.set(op.variable, new Set([op.seq]));
+        if (op.weak) {
+          // Conditional assignment: the new def joins the prior reaching defs.
+          (reaching.get(op.variable) ?? reaching.set(op.variable, new Set()).get(op.variable)!).add(op.seq);
+        } else {
+          // A strong def replaces (kills) all prior reaching defs of that variable.
+          reaching.set(op.variable, new Set([op.seq]));
+        }
       }
     }
   }
