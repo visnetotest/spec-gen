@@ -7,16 +7,19 @@
  * disclosure (no silent capping). These are real-execution smoke tests against
  * the actual parsers plus regression guards on the documented caps.
  */
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { describe, it, expect, afterEach } from 'vitest';
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractSignatures } from './signature-extractor.js';
-import { normalizeUrl } from './http-route-parser.js';
+import { normalizeUrl, extractHttpCalls } from './http-route-parser.js';
+import { parseFile, parseJavaPackage } from './import-parser.js';
+import { extractEnvVars } from './env-extractor.js';
 
 const ANALYZER_DIR = fileURLToPath(new URL('.', import.meta.url));
 
-/** Run `fn` and assert it completes within `budgetMs` — a ReDoS would blow past it. */
+/** Run a sync `fn` and assert it completes within `budgetMs` — a ReDoS would blow past it. */
 function withinTimeBudget(label: string, budgetMs: number, fn: () => void): void {
   const start = performance.now();
   fn();
@@ -63,6 +66,67 @@ describe('Bounded Computation — ReDoS resilience of content parsers (mcp-secur
     for (const u of urls) {
       withinTimeBudget('normalizeUrl', 1_000, () => { normalizeUrl(u); });
     }
+  });
+
+  it('parseJavaPackage stays linear on adversarial content', () => {
+    for (const c of [
+      'package ' + 'a.'.repeat(100_000) + 'z;',
+      ' '.repeat(200_000) + 'package x;',
+      'package' + '\t'.repeat(200_000),
+    ]) {
+      withinTimeBudget('parseJavaPackage', 1_000, () => { parseJavaPackage(c); });
+    }
+  });
+});
+
+// The import parser, env extractor, and HTTP-call scanner read a file from disk;
+// drive them against pathological fixture files and assert linear completion
+// (the spec names "import parsers" and "content scanners" explicitly).
+describe('Bounded Computation — ReDoS resilience of file-reading scanners (mcp-security)', () => {
+  let dir: string;
+  afterEach(() => { if (dir) { rmSync(dir, { recursive: true, force: true }); dir = ''; } });
+
+  const PAYLOADS: Record<string, string> = {
+    'h.ts': 'import {' + 'a,'.repeat(40_000) + '} from "' + 'x'.repeat(80_000) + '"\n'
+          + 'export const ' + 'b'.repeat(80_000) + ' = 1\n'
+          + 'fetch("/' + 'a/'.repeat(40_000) + '")\n',
+    'h.py': 'from ' + 'm.'.repeat(40_000) + 'n import ' + 'x'.repeat(80_000) + '\n'
+          + 'import ' + 'a,'.repeat(40_000) + 'b\n',
+    'h.go': 'package main\nimport (\n' + '\t"' + 'p/'.repeat(40_000) + '"\n'.repeat(2) + ')\n',
+    'h.java': 'package ' + 'a.'.repeat(40_000) + 'z;\nimport ' + 'b.'.repeat(40_000) + 'C;\n',
+    'h.rb': "require '" + 'a/'.repeat(40_000) + "'\n",
+    'h.env': '#' + ' '.repeat(200_000) + '\n' + 'A'.repeat(100_000) + '=' + 'v'.repeat(100_000) + '\n',
+  };
+
+  async function withinAsyncBudget(label: string, budgetMs: number, fn: () => Promise<unknown>): Promise<void> {
+    const start = performance.now();
+    await fn();
+    const elapsed = performance.now() - start;
+    expect(elapsed, `${label} took ${elapsed.toFixed(0)}ms (budget ${budgetMs}ms) — possible ReDoS`).toBeLessThan(budgetMs);
+  }
+
+  it('the import parser stays linear on adversarial source files', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'ol-redos-imp-'));
+    for (const [name, body] of Object.entries(PAYLOADS)) {
+      if (name === 'h.env') continue;
+      const p = join(dir, name);
+      writeFileSync(p, body, 'utf-8');
+      await withinAsyncBudget(`parseFile ${name}`, 3_000, () => parseFile(p));
+    }
+  });
+
+  it('the HTTP-call scanner stays linear on an adversarial source file', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'ol-redos-http-'));
+    const p = join(dir, 'h.ts');
+    writeFileSync(p, PAYLOADS['h.ts'], 'utf-8');
+    await withinAsyncBudget('extractHttpCalls', 3_000, () => extractHttpCalls(p));
+  });
+
+  it('the env-var extractor stays linear on adversarial files', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'ol-redos-env-'));
+    writeFileSync(join(dir, '.env'), PAYLOADS['h.env'], 'utf-8');
+    writeFileSync(join(dir, 'h.ts'), 'const x = process.env.' + 'A'.repeat(80_000) + '\n', 'utf-8');
+    await withinAsyncBudget('extractEnvVars', 3_000, () => extractEnvVars(['.env', 'h.ts'], dir));
   });
 });
 
