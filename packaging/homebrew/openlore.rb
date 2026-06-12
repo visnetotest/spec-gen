@@ -2,15 +2,13 @@
 #
 # openlore is published to npm (https://www.npmjs.com/package/openlore); this
 # formula installs that published tarball under a Homebrew-managed Node prefix,
-# so `brew install` users get the same bits as `npm i -g openlore` without
-# needing a global npm setup.
+# so `brew install` users get the same bits as `npm i -g openlore`.
 #
-# This file is the canonical source. Homebrew installs formulae from taps, not
-# from this directory, so the release pipeline pushes this formula into the
-# clay-good/homebrew-openlore tap on every tagged release (the bump-homebrew job
-# in .github/workflows/release.yml regenerates `url` + `sha256` via
-# scripts/update-homebrew-formula.mjs). See packaging/homebrew/README.md for the
-# one-time tap setup and the manual bump command.
+# Status: staged for a future homebrew-core submission (not a personal tap). When
+# the project clears Homebrew's notability bar, this file is the ready artifact to
+# open against homebrew/homebrew-core, giving a plain `brew install openlore` with
+# no tap. Until then the supported install is npm. Refresh `url`/`sha256` for the
+# current release with `npm run homebrew:formula`. See packaging/homebrew/README.md.
 class Openlore < Formula
   desc "Deterministic structural code-context substrate for coding agents"
   homepage "https://github.com/clay-good/OpenLore"
