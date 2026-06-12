@@ -564,6 +564,13 @@ class CfgBuilder {
       return null;
     }
 
+    // Ruby statement modifiers (`x = 2 if c`, `… while c`): the wrapped statement
+    // runs CONDITIONALLY, so treating it as unconditional would let it kill the
+    // prior def and emit a wrong `exact`. Model it as a one-armed branch / loop.
+    if (t === 'if_modifier' || t === 'unless_modifier' || t === 'while_modifier' || t === 'until_modifier') {
+      return this.processModifier(stmt, current, loop);
+    }
+
     // Compound block (bare `{ ... }`) — recurse into its statements.
     if (spec.blockTypes.has(t)) {
       return this.processSeq(stmt.namedChildren, current, loop);
@@ -572,6 +579,23 @@ class CfgBuilder {
     // Straight-line statement: record defs/uses into the current block.
     this.recordStmt(stmt, current);
     return current;
+  }
+
+  /** Ruby `<stmt> if/unless/while/until <cond>` — the wrapped statement is
+   *  conditional, so its def does not unconditionally kill the prior one. */
+  private processModifier(stmt: CfgNode, current: number, loop: LoopCtx | null): number | null {
+    const cond = stmt.childForFieldName('condition');
+    const body = stmt.childForFieldName('body');
+    const isLoop = stmt.type === 'while_modifier' || stmt.type === 'until_modifier';
+    this.setKind(current, isLoop ? 'loop' : 'branch');
+    if (cond) this.recordUses(cond, current);
+    const bodyBlock = this.newBlock('normal');
+    this.addEdge(current, bodyBlock, 'true');
+    const bodyExit = body ? this.processStmt(body, bodyBlock, loop) : bodyBlock;
+    const merge = this.newBlock('merge');
+    this.addEdge(current, merge, 'false');     // condition false → skip the body
+    if (bodyExit !== null) this.addEdge(bodyExit, isLoop ? current : merge, isLoop ? 'back' : 'normal');
+    return merge;
   }
 
   private processIf(stmt: CfgNode, current: number, loop: LoopCtx | null): number | null {
@@ -797,10 +821,13 @@ class CfgBuilder {
       ty === 'case_clause' || ty === 'case_block' ||           // Py match (case_clause)
       ty === 'expression_case' || ty === 'default_case' || ty === 'type_case' || // Go
       ty === 'case_statement' ||                               // C/C++
-      ty === 'switch_block_statement_group' ||                 // Java
+      ty === 'switch_block_statement_group' || ty === 'switch_rule' || // Java (colon + arrow)
       ty === 'match_arm' ||                                    // Rust
       ty === 'when' || ty === 'else';                          // Ruby (when + else)
     const cases = caseContainer.namedChildren.filter(c => isCaseNode(c.type));
+    // Arrow-style cases (Java `case N ->`, Rust arms, Ruby when) never fall through.
+    const fallsThrough = spec.switchFallsThrough &&
+      !cases.some(c => c.type === 'switch_rule' || c.type === 'match_arm' || c.type === 'when' || c.type === 'else');
     let sawDefault = false;
     let prevFallthrough: number | null = null;
     for (const cs of cases) {
@@ -809,18 +836,18 @@ class CfgBuilder {
       const caseBlock = this.newBlock('normal');
       this.addEdge(current, caseBlock, isDefault ? 'false' : 'true');
       // C-style fall-through: a previous case that did not break/return flows in.
-      if (spec.switchFallsThrough && prevFallthrough !== null) this.addEdge(prevFallthrough, caseBlock, 'normal');
+      if (fallsThrough && prevFallthrough !== null) this.addEdge(prevFallthrough, caseBlock, 'normal');
       // The case label expression(s) are uses of the discriminant context.
       for (const lbl of labels) this.recordUses(lbl, current);
       const caseExit = this.processSeq(stmts, caseBlock, caseCtx);
-      if (spec.switchFallsThrough) {
+      if (fallsThrough) {
         prevFallthrough = caseExit;
       } else if (caseExit !== null) {
-        // Each case auto-breaks (Go/Python): its tail goes straight to the merge.
+        // Each case auto-breaks (arrow/match/when, Go/Python): tail → merge.
         this.addEdge(caseExit, merge, 'normal');
       }
     }
-    if (spec.switchFallsThrough && prevFallthrough !== null) this.addEdge(prevFallthrough, merge, 'normal');
+    if (fallsThrough && prevFallthrough !== null) this.addEdge(prevFallthrough, merge, 'normal');
     // No default: the discriminant can match nothing and skip to the merge.
     if (!sawDefault) this.addEdge(current, merge, 'false');
     return merge;
@@ -849,9 +876,15 @@ class CfgBuilder {
     if (t === 'else') { // Ruby case `else` clause = the default
       return { labels: [], stmts: cs.namedChildren, isDefault: true };
     }
-    if (t === 'switch_block_statement_group') { // Java: switch_label* + statements
+    if (t === 'switch_block_statement_group') { // Java colon: switch_label* + statements
       const labels = cs.namedChildren.filter(c => c.type === 'switch_label');
       const stmts = cs.namedChildren.filter(c => c.type !== 'switch_label');
+      const isDefault = labels.some(l => l.text.includes('default'));
+      return { labels, stmts, isDefault };
+    }
+    if (t === 'switch_rule') { // Java arrow `case N -> body`: switch_label* + body
+      const labels = cs.namedChildren.filter(c => c.type === 'switch_label');
+      const stmts = cs.namedChildren.filter(c => c.type !== 'switch_label').flatMap(b => this.stmtChildren(b));
       const isDefault = labels.some(l => l.text.includes('default'));
       return { labels, stmts, isDefault };
     }
@@ -1047,8 +1080,9 @@ class CfgBuilder {
     if (init) this.recordStmt(init, block);
     const update = loopHeaderField(stmt, 'update') ?? loopHeaderField(stmt, 'increment');
     if (update) this.recordUses(update, block);
-    // for (const x of xs) / for x in xs / for i, v := range xs / Rust `for i in xs`
-    const left = loopHeaderField(stmt, 'left') ?? loopHeaderField(stmt, 'pattern');
+    // for (const x of xs) / for x in xs / for i, v := range xs / Rust `for i in xs` /
+    // Java enhanced-for `for (T name : value)` exposes the loop var in `name`.
+    const left = loopHeaderField(stmt, 'left') ?? loopHeaderField(stmt, 'pattern') ?? loopHeaderField(stmt, 'name');
     const right = loopHeaderField(stmt, 'right') ?? loopHeaderField(stmt, 'value');
     if (right) this.recordUses(right, block);
     if (left && (spec.identTypes.has(left.type) || left.type.includes('pattern') || left.type === 'expression_list')) {
@@ -1228,11 +1262,18 @@ function collectEscapedVars(body: CfgNode, spec: CfgLangSpec): Set<string> {
 
   const walk = (n: CfgNode): void => {
     if (spec.nestedFnTypes.has(n.type)) { collectClosureMutations(n); return; }
-    // Address-of (`&x`): a pointer to a local escapes scalar tracking.
-    if (n.type === 'unary_expression') {
-      const op = n.childForFieldName('operator');
-      const operand = n.childForFieldName('operand');
+    // Address-of (`&x`): a pointer to a local escapes scalar tracking. Go uses a
+    // `unary_expression` with `&`; C/C++ use a `pointer_expression` with `&`.
+    if (n.type === 'unary_expression' || n.type === 'pointer_expression') {
+      const op = n.childForFieldName('operator') ?? n.children.find(c => c.text === '&' || c.text === '*');
+      const operand = n.childForFieldName('operand') ?? n.childForFieldName('argument') ?? n.namedChildren[0];
       if (op?.text === '&' && operand && spec.identTypes.has(operand.type)) escaped.add(operand.text);
+    }
+    // C/C++ reference binding `T& r = x;` aliases x — writes through r mutate x,
+    // so x can change out of band: it can never carry a sound `exact`.
+    if (n.type === 'init_declarator' && n.childForFieldName('declarator')?.type === 'reference_declarator') {
+      const ref = n.childForFieldName('value');
+      if (ref && spec.identTypes.has(ref.type)) escaped.add(ref.text);
     }
     // Python `global x` / `nonlocal x`: the name binds a module-global or an
     // enclosing local, so an intervening call (or another thread/callback) can
@@ -1478,7 +1519,7 @@ function scopeDeclaredNames(scopeNode: CfgNode, spec: CfgLangSpec): Set<string> 
       if (spec.declTypes.has(init.type)) collectDeclNames(init, spec, names);
       for (const c of init.namedChildren) if (spec.declTypes.has(c.type)) collectDeclNames(c, spec, names);
     }
-    const left = loopHeaderField(scopeNode, 'left'); // for-of / for-in / range target
+    const left = loopHeaderField(scopeNode, 'left') ?? loopHeaderField(scopeNode, 'name'); // for-of / range / Java for-each
     if (left) collectIdentLeaves(left, spec, names);
   }
   const scan = (n: CfgNode): void => {
@@ -1647,9 +1688,23 @@ function findBody(fnNode: CfgNode, spec: CfgLangSpec): CfgNode | undefined {
   return undefined;
 }
 
+/** Breadth-first search for a node of `type` up to `maxDepth` levels deep. */
+function findDescendantOfType(node: CfgNode, type: string, maxDepth: number): CfgNode | undefined {
+  let frontier = [...node.namedChildren];
+  for (let d = 0; d < maxDepth && frontier.length; d++) {
+    const next: CfgNode[] = [];
+    for (const n of frontier) { if (n.type === type) return n; next.push(...n.namedChildren); }
+    frontier = next;
+  }
+  return undefined;
+}
+
 function extractParamNames(fnNode: CfgNode, spec: CfgLangSpec): string[] {
   const params = fnNode.childForFieldName(spec.paramsField)
-    ?? fnNode.namedChildren.find(c => c.type === 'parameters' || c.type === 'parameter_list' || c.type === 'formal_parameters');
+    // C/C++ nest the parameter_list under the `function_declarator`.
+    ?? fnNode.childForFieldName('declarator')?.childForFieldName('parameters')
+    ?? fnNode.namedChildren.find(c => c.type === 'parameters' || c.type === 'parameter_list' || c.type === 'formal_parameters')
+    ?? findDescendantOfType(fnNode, 'parameter_list', 4);
   if (!params) return [];
   const names: string[] = [];
   const visit = (n: CfgNode): void => {

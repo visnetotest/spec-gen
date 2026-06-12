@@ -590,3 +590,40 @@ describe('Ruby overlay', () => {
     expect(defLinesTo(cfg, 'x', 14)).toEqual([10, 12]);
   });
 });
+
+// ─── extended-language adversarial fixes (real-repo agent findings) ───────────
+
+describe('extended-language soundness fixes', () => {
+  it('Java arrow switch (case N -> {}) is modeled (no leaked pre-switch def)', async () => {
+    const lang = await javaLang();
+    const cfg = cfgFor('class C{ int f(int k){\n  int x = 0;\n  switch(k){\n    case 1 -> { x = 10; }\n    default -> { x = -1; }\n  }\n  return x;\n} }', lang, 'Java', ['method_declaration']);
+    expect(defLinesTo(cfg, 'x', 7)).toEqual([4, 5]); // both arms; x=0 (line 2) does not leak
+  });
+
+  it('Java enhanced-for binds the loop variable', async () => {
+    const lang = await javaLang();
+    const cfg = cfgFor('class C{ int f(int[] xs){\n  int s = 0;\n  for(int v : xs){\n    s = s + v;\n  }\n  return s;\n} }', lang, 'Java', ['method_declaration']);
+    expect(cfg.defUse.some(e => e.variable === 'v')).toBe(true);
+  });
+
+  it('C++ extracts parameters (nested under function_declarator)', async () => {
+    const lang = await cppLang();
+    const cfg = cfgFor('int f(int a, int b){\n  return a + b;\n}', lang, 'C++', ['function_definition']);
+    expect(cfg.params).toEqual(['a', 'b']);
+    expect(cfg.defUse.some(e => e.variable === 'a' && e.useLine === 2)).toBe(true);
+  });
+
+  it('C++ reference alias and address-of downgrade the referent to may', async () => {
+    const lang = await cppLang();
+    const ref = cfgFor('int f(){\n  int x = 1;\n  int& r = x;\n  r = 5;\n  return x;\n}', lang, 'C++', ['function_definition']);
+    expect(ref.defUse.find(e => e.variable === 'x' && e.useLine === 5)?.precision).toBe('may');
+    const ptr = cfgFor('int f(){\n  int x = 1;\n  int* p = &x;\n  *p = 5;\n  return x;\n}', lang, 'C++', ['function_definition']);
+    expect(ptr.defUse.find(e => e.variable === 'x' && e.useLine === 5)?.precision).toBe('may');
+  });
+
+  it('Ruby statement modifier (x = 2 if c) is conditional, not a strong kill', async () => {
+    const lang = await rubyLang();
+    const cfg = cfgFor('def f(a)\n  x = 1\n  x = 2 if a\n  return x\nend', lang, 'Ruby', ['method']);
+    expect(defLinesTo(cfg, 'x', 4)).toEqual([2, 3]); // both the original and the conditional def reach
+  });
+});
