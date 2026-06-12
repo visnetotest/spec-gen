@@ -46,6 +46,18 @@ describe('Subprocess Argument Safety (mcp-security)', () => {
     expect(offenders, `shell:true found in: ${offenders.join(', ')}`).toEqual([]);
   });
 
+  it('no source spawns a shell binary (/bin/sh, sh -c, bash -c)', () => {
+    // execFile/spawn an argv array is safe; invoking a shell with -c is not — the
+    // command string can interpolate untrusted values. Catches the class even when
+    // the call uses spawn/execFile rather than the `exec`/`shell:true` forms above.
+    const offenders: string[] = [];
+    const SHELL_INVOKE = /(?:exec|execFile|execFileSync|spawn|spawnSync)\(\s*['"`](?:\/bin\/)?(?:sh|bash|zsh|dash)['"`]\s*,\s*\[\s*['"`]-c['"`]/;
+    for (const file of ALL_SOURCES) {
+      if (SHELL_INVOKE.test(readFileSync(file, 'utf-8'))) offenders.push(file.replace(SRC, 'src'));
+    }
+    expect(offenders, `shell-binary -c invocation found in: ${offenders.join(', ')}`).toEqual([]);
+  });
+
   it('no source imports the shell-string exec/execSync (only execFile*/spawn* with argv)', () => {
     const offenders: string[] = [];
     for (const file of ALL_SOURCES) {

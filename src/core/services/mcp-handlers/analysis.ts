@@ -9,7 +9,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import {
   DEFAULT_MAX_FILES,
@@ -41,6 +41,7 @@ import {
   buildSpecMap,
   buildADRMap,
   detectDrift,
+  validateGitRef,
 } from '../../drift/index.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { validateDirectory, readCachedContext, isCacheFresh, safeJoin } from './utils.js';
@@ -1131,23 +1132,32 @@ export function buildClusterView(cg: SerializedCallGraph, absDir: string, commun
 // detect_changes
 // ============================================================================
 
-/** Run git with explicit stdio pipes — safe inside MCP server (which owns stdin/stdout). */
+/** Run git with output redirected to file descriptors — safe inside the MCP
+ * server (which owns stdin/stdout). */
 function runGit(args: string[], cwd: string): Promise<string> {
-  // Use shell file-redirect to temp files instead of pipes — libuv pipe() calls
-  // fail with EBADF inside the MCP server because its FD 0/1 are the JSON-RPC
-  // protocol sockets; avoiding pipe creation altogether sidesteps the issue.
+  // Redirect git's stdout/stderr straight to temp files via file descriptors.
+  // This sidesteps libuv's pipe() (which fails EBADF inside the MCP server,
+  // whose FD 0/1 are the JSON-RPC protocol sockets) WITHOUT a shell: git is
+  // invoked with an argv array, so an arg can never be reinterpreted as a shell
+  // token (mcp-security: Subprocess Argument Safety — no shell-string calls).
   return new Promise((resolve, reject) => {
     const PATH = (process.env.PATH ?? '') + ':/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin';
     const tmp = mkdtempSync(join(tmpdir(), 'sg-git-'));
     const outPath = join(tmp, 'o');
     const errPath = join(tmp, 'e');
-    const escaped = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-    const cmd = `/usr/bin/git ${escaped} >'${outPath}' 2>'${errPath}'`;
-    const r = spawnSync('/bin/sh', ['-c', cmd], {
-      cwd,
-      stdio: 'ignore',
-      env: { ...process.env, PATH },
-    });
+    const outFd = openSync(outPath, 'w');
+    const errFd = openSync(errPath, 'w');
+    let r: ReturnType<typeof spawnSync>;
+    try {
+      r = spawnSync('git', args, {
+        cwd,
+        stdio: ['ignore', outFd, errFd],
+        env: { ...process.env, PATH },
+      });
+    } finally {
+      try { closeSync(outFd); } catch { /* already closed */ }
+      try { closeSync(errFd); } catch { /* already closed */ }
+    }
     let stdout = '';
     let stderr = '';
     try { stdout = readFileSync(outPath, 'utf8'); } catch { /* no output */ }
@@ -1240,6 +1250,9 @@ export async function handleDetectChanges(
   if (!ctx?.callGraph) return { error: 'No call graph. Run analyze_codebase first.' };
 
   const ref = base ?? 'HEAD';
+  // Validate the caller-supplied base ref against argument injection before it
+  // reaches git (mcp-security: Subprocess Argument Safety).
+  validateGitRef(ref);
   let diffOutput: string;
   try {
     diffOutput = await runGit(['diff', '--unified=0', ref, '--', '.'], absDir);
