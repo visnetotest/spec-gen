@@ -322,6 +322,81 @@ describe('McpWatcher.handleChange', () => {
     expect(outgoing.filter(e => e.calleeName === 'bar')).toHaveLength(0);
   });
 
+  it('recomputes the CFG/def-use overlay on a file edit, matching a fresh build (spec: incrementality)', async () => {
+    const ctx = makeContext();
+    const { rootPath, outputPath } = await setupProject(ctx);
+    await mkdir(join(rootPath, 'src'), { recursive: true });
+    const rel = 'src/calc.ts';
+    const srcFile = join(rootPath, rel);
+
+    const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
+    // Seed the DB with the v1 overlay + node + file hash so the watcher sees a real change.
+    const v1 = 'export function calc(a: number) {\n  let x = a;\n  return x;\n}';
+    await writeFile(srcFile, v1, 'utf-8');
+    const buildOverlay = async (content: string) => {
+      const r = await new CallGraphBuilder().build([{ path: rel, content, language: 'TypeScript' }]);
+      return { nodes: Array.from(r.nodes.values()), cfgs: r.cfgs! };
+    };
+    const { createHash } = await import('node:crypto');
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    const b1 = await buildOverlay(v1);
+    store.insertNodes(b1.nodes);
+    store.insertCfgs([...b1.cfgs].map(([id, cfg]) => ({ functionId: id, filePath: rel, cfg })));
+    store.setFileHash(rel, createHash('sha256').update(v1).digest('hex'));
+    store.close();
+
+    // Edit the file: add a reassignment so the overlay genuinely changes.
+    const v2 = 'export function calc(a: number) {\n  let x = a;\n  x = x + 1;\n  return x;\n}';
+    await writeFile(srcFile, v2, 'utf-8');
+
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath, outputPath }).handleChange(srcFile);
+
+    // The persisted overlay must equal a fresh full build of v2 (intra-procedural
+    // ⇒ incremental == full), and must NOT be the stale v1.
+    const expected = await buildOverlay(v2);
+    const store2 = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    const stored = store2.getCfg('src/calc.ts::calc');
+    store2.close();
+    expect(stored).toBeTruthy();
+    expect(stored).toEqual(expected.cfgs.get('src/calc.ts::calc'));
+    // v1 had `return x` depend on def@2; v2 must now depend on the x=x+1 def@3.
+    const toReturn = stored!.defUse.filter(e => e.variable === 'x' && e.useLine === 4);
+    expect(toReturn.every(e => e.defLine === 3)).toBe(true);
+  });
+
+  it('a C# edit refreshes (does NOT wipe) its nodes/overlay — watcher graph-lang coverage', async () => {
+    // C# (.cs) matches SOURCE_EXTENSIONS, so the watcher must also graph it,
+    // otherwise editing a .cs file made buildGraphSubset return empty and the
+    // swap wiped the file's nodes + overlay (graph-coverage regression).
+    const ctx = makeContext();
+    const { rootPath, outputPath } = await setupProject(ctx);
+    await mkdir(join(rootPath, 'src'), { recursive: true });
+    const rel = 'src/A.cs';
+    const srcFile = join(rootPath, rel);
+    const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
+    const { createHash } = await import('node:crypto');
+    const v1 = 'class A { int f(int a){ int x=a; return x; } }';
+    await writeFile(srcFile, v1, 'utf-8');
+    const r = await new CallGraphBuilder().build([{ path: rel, content: v1, language: 'C#' }]);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    store.insertNodes(Array.from(r.nodes.values()));
+    store.insertCfgs([...r.cfgs!].map(([id, cfg]) => ({ functionId: id, filePath: rel, cfg })));
+    store.setFileHash(rel, createHash('sha256').update(v1).digest('hex'));
+    store.close();
+
+    await writeFile(srcFile, 'class A { int f(int a){ int x=a; x=x+1; return x; } }', 'utf-8');
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath, outputPath }).handleChange(srcFile);
+
+    const store2 = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    const nodes = store2.getNodesForFile(rel);
+    const overlay = store2.getCfg('src/A.cs::A.f');
+    store2.close();
+    expect(nodes.length).toBe(1);   // node preserved, not wiped
+    expect(overlay).toBeTruthy();   // overlay refreshed, not wiped
+  });
+
   it('skips re-index when file content is unchanged (hash cache hit)', async () => {
     const ctx = makeContext();
     const { rootPath, outputPath, contextPath } = await setupProject(ctx);

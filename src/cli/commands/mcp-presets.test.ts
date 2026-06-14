@@ -162,12 +162,16 @@ describe('tools/list payload budget (spec-28)', () => {
   // Bumped 53_000 → 54_000 when the `directResolvedOnly` strict-traversal option was added
   // to find_dead_code/analyze_impact/get_subgraph/find_path/select_tests/trace_execution_path
   // (one boolean prop per tool) — conscious budget decision, not silent drift.
+  // Nav bumped 11_800 → 12_300 and full kept < 54_000 when the value-level opt-in
+  // (`valueLevel` + `valueParam`) was added to analyze_impact and trace_execution_path
+  // (spec: add-intraprocedural-cfg-dataflow-overlay) — two opt-in props per tool,
+  // a conscious decision, not silent drift.
   it('full surface stays within its prefix budget', () => {
     expect(payloadBytes({})).toBeLessThan(54_000);
   });
 
   it('navigation preset stays lean (the low-overhead surface that wins the benchmark)', () => {
-    expect(payloadBytes({ preset: 'navigation' })).toBeLessThan(11_800);
+    expect(payloadBytes({ preset: 'navigation' })).toBeLessThan(12_300);
   });
 
   // Lossless-dedup invariant: the `directory` input is shared by every tool, so its

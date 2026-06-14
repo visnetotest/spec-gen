@@ -27,6 +27,7 @@ import {
 import { buildProjectedIac } from './iac/index.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
+import { buildFunctionCfg, type FunctionCfg, type CfgNode } from './cfg.js';
 import { logger } from '../../utils/logger.js';
 
 // ============================================================================
@@ -278,6 +279,14 @@ export interface InheritanceEdge {
 export interface CallGraphResult {
   nodes: Map<string, FunctionNode>;
   edges: CallEdge[];
+  /**
+   * Per-function intra-procedural control-flow + reaching-definitions overlay
+   * (spec: add-intraprocedural-cfg-dataflow-overlay), keyed by function id.
+   * Transient build-time data: persisted to the disposable SQLite store but
+   * deliberately NOT carried into {@link SerializedCallGraph}/the resident graph,
+   * so in-memory footprint is unchanged. Absent for unsupported languages.
+   */
+  cfgs?: Map<string, FunctionCfg>;
   /** Class-level structural nodes, derived from FunctionNode.className grouping */
   classes: ClassNode[];
   /** Inheritance / implementation edges between ClassNodes */
@@ -908,6 +917,51 @@ function extractDeclaration(
 }
 
 // ============================================================================
+// CFG / DATA-FLOW OVERLAY HELPER (spec: add-intraprocedural-cfg-dataflow-overlay)
+// ============================================================================
+
+/**
+ * Build the per-function CFG + reaching-definitions overlay for one function
+ * while its parse tree is still live. `fnNode` is the node captured as the
+ * function (may be a declaration wrapper, e.g. a `const f = () => {}`
+ * lexical_declaration); this resolves to the node that actually owns the body
+ * so arrow/function-expression bodies and params are analyzed too. Fail-soft:
+ * returns undefined for unsupported languages or any analysis surprise.
+ */
+function buildCfgFor(fnNode: CfgNode, language: string): FunctionCfg | undefined {
+  // The overlay is strictly additive: a CFG-builder surprise (an unexpected
+  // grammar shape, a partially-loaded optional grammar after the tree-sitter
+  // deps became optional) must never propagate and drop the function's node/edge
+  // data from the call graph — or, in watch mode, roll back the per-file swap.
+  // Fail soft to no overlay; the base call graph is unaffected.
+  try {
+    let target = fnNode;
+    if (!fnNode.childForFieldName('body')) {
+      // Dig (breadth-first) for the node that actually owns the body: a TS arrow/
+      // function-expression assigned to a variable, or — crucially — the inner
+      // `function_definition` of a Python `@decorator`'d function, whose captured
+      // node is the `decorated_definition` wrapper (no `body` field of its own).
+      const stack = [...fnNode.namedChildren];
+      while (stack.length) {
+        const n = stack.shift()!;
+        if (
+          (n.type === 'arrow_function' || n.type === 'function_expression' ||
+           n.type === 'function' || n.type === 'function_definition') &&
+          n.childForFieldName('body')
+        ) { target = n; break; }
+        stack.push(...n.namedChildren);
+      }
+    }
+    return buildFunctionCfg(target as unknown as CfgNode, language);
+  } catch (error) {
+    if (process.env.DEBUG) {
+      console.debug(`[cfg] overlay skipped for a ${language} function: ${(error as Error).message}`);
+    }
+    return undefined;
+  }
+}
+
+// ============================================================================
 // TYPESCRIPT EXTRACTOR
 // ============================================================================
 
@@ -939,9 +993,9 @@ const TS_CALL_QUERY = `
 async function extractTSGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const r = await getTSParser();
-  if (!r) return { nodes: [], rawEdges: [] };
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
@@ -950,6 +1004,7 @@ async function extractTSGraph(
 
   // --- Extract function nodes ---
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   const fnMatches = fnQuery.matches(tree.rootNode);
 
   for (const match of fnMatches) {
@@ -994,6 +1049,9 @@ async function extractTSGraph(
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'TypeScript'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'TypeScript'),
     });
+
+    const fnCfg = buildCfgFor(fnNode, 'TypeScript');
+    if (fnCfg) cfg.set(id, fnCfg);
   }
 
   // --- Extract calls ---
@@ -1028,7 +1086,7 @@ async function extractTSGraph(
     });
   }
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
@@ -1070,9 +1128,9 @@ const PY_METHOD_CALL_QUERY = `
 async function extractPyGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const r = await getPyParser();
-  if (!r) return { nodes: [], rawEdges: [] };
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
@@ -1080,6 +1138,7 @@ async function extractPyGraph(
 
   // --- Extract function nodes ---
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   const seen = new Set<number>(); // avoid duplicates from decorated_definition + function_definition
   const fnMatches = fnQuery.matches(tree.rootNode);
 
@@ -1131,6 +1190,9 @@ async function extractPyGraph(
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Python'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Python'),
     });
+
+    const fnCfg = buildCfgFor(fnNode, 'Python');
+    if (fnCfg) cfg.set(id, fnCfg);
   }
 
   // --- Extract calls ---
@@ -1186,7 +1248,7 @@ async function extractPyGraph(
     });
   }
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
@@ -1214,9 +1276,9 @@ const GO_CALL_QUERY = `
 async function extractGoGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const r = await getGoParser();
-  if (!r) return { nodes: [], rawEdges: [] };
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
@@ -1224,6 +1286,7 @@ async function extractGoGraph(
   const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, GO_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1255,6 +1318,9 @@ async function extractGoGraph(
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Go'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Go'),
     });
+
+    const fnCfg = buildCfgFor(fnNode, 'Go');
+    if (fnCfg) cfg.set(id, fnCfg);
   }
 
   const rawEdges: RawEdge[] = [];
@@ -1273,7 +1339,7 @@ async function extractGoGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objectCapture?.node.text });
   }
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
@@ -1298,9 +1364,9 @@ const RUST_CALL_QUERY = `
 async function extractRustGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const r = await getRustParser();
-  if (!r) return { nodes: [], rawEdges: [] };
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
@@ -1308,6 +1374,7 @@ async function extractRustGraph(
   const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUST_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1343,6 +1410,9 @@ async function extractRustGraph(
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Rust'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Rust'),
     });
+
+    const fnCfg = buildCfgFor(fnNode, 'Rust');
+    if (fnCfg) cfg.set(id, fnCfg);
   }
 
   const rawEdges: RawEdge[] = [];
@@ -1361,7 +1431,7 @@ async function extractRustGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objectCapture?.node.text });
   }
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
@@ -1397,9 +1467,9 @@ const RUBY_BAREWORD_QUERY = `
 async function extractRubyGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const r = await getRubyParser();
-  if (!r) return { nodes: [], rawEdges: [] };
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
@@ -1408,6 +1478,7 @@ async function extractRubyGraph(
   const barewordQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUBY_BAREWORD_QUERY);
 
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1439,6 +1510,9 @@ async function extractRubyGraph(
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Ruby'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Ruby'),
     });
+
+    const fnCfg = buildCfgFor(fnNode, 'Ruby');
+    if (fnCfg) cfg.set(id, fnCfg);
   }
 
   // Explicit calls: fn(), obj.method(). RUBY_CALL_QUERY has the same two-pattern
@@ -1460,7 +1534,7 @@ async function extractRubyGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nameCapture.node.startPosition.row + 1 });
   }
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
@@ -1545,9 +1619,9 @@ function dedupeOverlappingCalls(
 async function extractJavaGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const r = await getJavaParser();
-  if (!r) return { nodes: [], rawEdges: [] };
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
@@ -1555,6 +1629,7 @@ async function extractJavaGraph(
   const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, JAVA_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1595,6 +1670,9 @@ async function extractJavaGraph(
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Java'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Java'),
     });
+
+    const fnCfg = buildCfgFor(fnNode, 'Java');
+    if (fnCfg) cfg.set(id, fnCfg);
   }
 
   // JAVA_CALL_QUERY has two patterns: a qualified `object.name(...)` pattern and a
@@ -1605,7 +1683,7 @@ async function extractJavaGraph(
   // preferring the qualified match (it carries the receiver).
   const rawEdges = dedupeOverlappingCalls(callQuery, tree.rootNode, nodes, 'Java');
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
@@ -1667,13 +1745,14 @@ const CPP_CALL_MEMBER_QUERY = `
 async function extractCppGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const r = await getCppParser();
-  if (!r) return { nodes: [], rawEdges: [] };
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   const seen = new Set<number>(); // deduplicate by name-node start position
 
   for (const queryStr of [CPP_FN_BASIC_QUERY, CPP_FN_QUALIFIED_QUERY]) {
@@ -1727,6 +1806,9 @@ async function extractCppGraph(
         docstring: extractDocstringBefore(content, fnNode.startIndex, 'C++'),
         signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'C++'),
       });
+
+      const fnCfg = buildCfgFor(fnNode, 'C++');
+      if (fnCfg) cfg.set(id, fnCfg);
     }
   }
 
@@ -1763,7 +1845,7 @@ async function extractCppGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objectCapture?.node.text });
   }
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
@@ -2084,12 +2166,13 @@ async function extractByQueries(
   spec: QueryLangSpec,
   filePath: string,
   content: string,
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const handle = await spec.loader();
-  if (!handle) return { nodes: [], rawEdges: [] };
+  if (!handle) return { nodes: [], rawEdges: [], cfg: new Map() };
 
   return handle.withTree(content, (_root, runQuery) => {
     const nodes: FunctionNode[] = [];
+    const cfg = new Map<string, FunctionCfg>();
     for (const match of runQuery(spec.fnQuery)) {
       const nameCapture = match.captures.find(c => c.name === 'fn.name');
       const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -2100,6 +2183,11 @@ async function extractByQueries(
         ?? spec.extraClassName?.(fnNode);
       const id = className ? `${filePath}::${className}.${name}` : `${filePath}::${name}`;
       if (nodes.some(n => n.id === id)) continue; // collapse multi-clause/overloads to one node
+      // CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay) for
+      // spec-08 languages that have a CfgLangSpec; others fail soft to no overlay.
+      // Built inside withTree while the (possibly WASM) tree is live.
+      const fnCfg = buildCfgFor(fnNode as unknown as CfgNode, spec.language);
+      if (fnCfg) cfg.set(id, fnCfg);
       nodes.push({
         id, name, filePath, className,
         isAsync: false,
@@ -2130,7 +2218,7 @@ async function extractByQueries(
       seen.add(key);
       rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject });
     }
-    return { nodes, rawEdges };
+    return { nodes, rawEdges, cfg };
   });
 }
 
@@ -3977,11 +4065,12 @@ export class CallGraphBuilder {
   ): Promise<CallGraphResult> {
     const allNodes = new Map<string, FunctionNode>();
     const allRawEdges: RawEdge[] = [];
+    const allCfgs = new Map<string, FunctionCfg>();
 
     // Pass 1: Extract nodes and raw edges from each file
     for (const file of files) {
       try {
-        let result: { nodes: FunctionNode[]; rawEdges: RawEdge[] };
+        let result: { nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg?: Map<string, FunctionCfg> };
 
         if (file.language === 'Python') {
           result = await extractPyGraph(file.path, file.content);
@@ -4029,6 +4118,7 @@ export class CallGraphBuilder {
           allNodes.set(node.id, node);
         }
         allRawEdges.push(...result.rawEdges);
+        if (result.cfg) for (const [id, fnCfg] of result.cfg) allCfgs.set(id, fnCfg);
       } catch (error) {
         // Skip files that fail to parse (syntax errors, encoding issues, etc.)
         if (process.env.DEBUG) {
@@ -4455,6 +4545,7 @@ export class CallGraphBuilder {
     return {
       nodes: allNodes,
       edges,
+      cfgs: allCfgs,
       classes,
       inheritanceEdges,
       hubFunctions,

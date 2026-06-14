@@ -529,6 +529,8 @@ export async function handleAnalyzeImpact(
   symbol: string,
   depth = 2,
   directResolvedOnly = false,
+  valueLevel = false,
+  valueParam?: string,
 ): Promise<unknown> {
   // Clamp to the documented maximum so a hostile depth (e.g. 1e9) can't drive an
   // unbounded BFS over an adversarial graph (mcp-security: Bounded Computation).
@@ -578,7 +580,64 @@ export async function handleAnalyzeImpact(
   const hubIds      = new Set(ctx.edgeStore.getHubs(500).map(n => n.id));
   const bfsOpts = { directResolvedOnly };
   const upstreamMap   = bfsFromDB(seedIds, 'backward', depth, ctx.edgeStore, bfsOpts);
-  const downstreamMap = bfsFromDB(seedIds, 'forward',  depth, ctx.edgeStore, bfsOpts);
+
+  // Value-level opt-in (spec: add-intraprocedural-cfg-dataflow-overlay): narrow
+  // the downstream forward slice to the calls whose arguments are data-dependent
+  // on the targeted value, using the reaching-definitions overlay. Strictly
+  // opt-in — when the flag is absent the downstream BFS is byte-for-byte the
+  // original. Falls back to function granularity when the seed has no overlay.
+  let valueLevelInfo: { applied: boolean; parameter?: string; reason?: string; dataDependentCallees?: number; precision?: string } | undefined;
+  let downstreamMap: Map<string, number>;
+  if (valueLevel && seeds.length === 1) {
+   try {
+    const cfg = ctx.edgeStore.getCfg(seeds[0].id);
+    // The value-level query is well-posed only when its target resolves in the
+    // overlay: a named valueParam must be a parameter or a tracked local; an
+    // "all parameters" request needs at least one parameter. Otherwise narrowing
+    // would silently report zero blast radius (e.g. a mistyped param) — telling
+    // an agent a change is safe when we simply couldn't resolve the value. Fall
+    // back to function granularity instead.
+    const targetExists = !!cfg && (valueParam === undefined
+      ? cfg.params.length > 0
+      : cfg.params.includes(valueParam) || cfg.defUse.some(e => e.variable === valueParam));
+    if (!cfg || !targetExists) {
+      valueLevelInfo = { applied: false, reason: !cfg
+        ? 'no CFG/def-use overlay for this function (unsupported language or no usable body); returning function-granularity result'
+        : valueParam
+          ? `value "${valueParam}" is not a parameter or tracked local in this function's overlay; returning function-granularity result`
+          : 'function exposes no parameters in the overlay; returning function-granularity result' };
+      downstreamMap = bfsFromDB(seedIds, 'forward', depth, ctx.edgeStore, bfsOpts);
+    } else {
+      const { valueReachableLines } = await import('../../analyzer/cfg.js');
+      const reached = valueReachableLines(cfg, valueParam);
+      const directCallees = ctx.edgeStore.getCallees(seeds[0].id)
+        .filter(e => e.line != null && reached.has(e.line) && e.calleeId && !e.calleeId.startsWith('external::'));
+      const calleeIds = [...new Set(directCallees.map(e => e.calleeId))];
+      // The data-dependent direct callees are depth-1; expand forward from them.
+      downstreamMap = new Map<string, number>();
+      for (const id of calleeIds) downstreamMap.set(id, 1);
+      if (depth > 1 && calleeIds.length > 0) {
+        const expanded = bfsFromDB(calleeIds, 'forward', depth - 1, ctx.edgeStore, bfsOpts);
+        for (const [id, d] of expanded) if (!downstreamMap.has(id)) downstreamMap.set(id, d + 1);
+      }
+      valueLevelInfo = {
+        applied: true,
+        parameter: valueParam ?? '(all parameters)',
+        dataDependentCallees: calleeIds.length,
+        precision: 'may (data-dependence crosses the call boundary)',
+      };
+    }
+   } catch (error) {
+     // Value-level is strictly best-effort: any overlay error (corrupt blob, a
+     // builder surprise) falls back to the full function-granularity blast radius
+     // rather than failing analyze_impact.
+     if (process.env.DEBUG) console.debug(`[value-level] analyze_impact fell back: ${(error as Error).message}`);
+     valueLevelInfo = { applied: false, reason: 'value-level overlay unavailable (error); returning function-granularity result' };
+     downstreamMap = bfsFromDB(seedIds, 'forward', depth, ctx.edgeStore, bfsOpts);
+   }
+  } else {
+    downstreamMap = bfsFromDB(seedIds, 'forward', depth, ctx.edgeStore, bfsOpts);
+  }
 
   const resolveNode = (id: string): FunctionNode | undefined =>
     ctx.edgeStore!.getNode(id) ?? undefined;
@@ -652,6 +711,7 @@ export async function handleAnalyzeImpact(
       recommendedStrategy: strategy,
       ...(crossDomain ? { crossDomain } : {}),
       ...(governingDecisions.length > 0 ? { governingDecisions } : {}),
+      ...(valueLevelInfo ? { valueLevel: valueLevelInfo } : {}),
     };
   });
 
@@ -950,6 +1010,8 @@ export async function handleTraceExecutionPath(
   maxDepth = TRACE_PATH_DEFAULT_MAX_DEPTH,
   maxPaths = TRACE_PATH_MAX_PATHS,
   directResolvedOnly = false,
+  valueLevel = false,
+  valueParam?: string,
 ): Promise<unknown> {
   maxDepth = Math.max(1, Math.min(maxDepth, SUBGRAPH_MAX_DEPTH_LIMIT));
   maxPaths = Math.max(1, Math.min(maxPaths, 50));
@@ -971,6 +1033,49 @@ export async function handleTraceExecutionPath(
   if (entryNodes.length === 0)  return { error: `No function matching "${entryFunction}" found in call graph.` };
   if (targetNodes.length === 0) return { error: `No function matching "${targetFunction}" found in call graph.` };
 
+  // Value-level opt-in (spec: add-intraprocedural-cfg-dataflow-overlay): restrict
+  // each entry's first hop to the calls whose arguments are data-dependent on the
+  // targeted value, via the reaching-definitions overlay. Opt-in and fail-soft —
+  // with the flag absent, or for an entry without an overlay, traversal is the
+  // original function-granularity DFS.
+  let allowedFirstHop: Map<string, Set<string>> | undefined;
+  let valueLevelInfo: { applied: boolean; parameter?: string; reason?: string } | undefined;
+  if (valueLevel && ctx.edgeStore) {
+   try {
+    const { valueReachableLines } = await import('../../analyzer/cfg.js');
+    allowedFirstHop = new Map();
+    let anyOverlay = false;
+    for (const entry of entryNodes) {
+      const fnCfg = ctx.edgeStore.getCfg(entry.id);
+      if (!fnCfg) continue;
+      // Skip an ill-posed query (mistyped valueParam, or no params for an "all
+      // params" request) so this entry's first hop stays unrestricted rather than
+      // silently filtering every path away.
+      const targetExists = valueParam === undefined
+        ? fnCfg.params.length > 0
+        : fnCfg.params.includes(valueParam) || fnCfg.defUse.some(e => e.variable === valueParam);
+      if (!targetExists) continue;
+      anyOverlay = true;
+      const reached = valueReachableLines(fnCfg, valueParam);
+      const allowed = new Set<string>();
+      for (const e of ctx.edgeStore.getCallees(entry.id)) {
+        if (e.line != null && reached.has(e.line) && e.calleeId) allowed.add(e.calleeId);
+      }
+      allowedFirstHop.set(entry.id, allowed);
+    }
+    valueLevelInfo = anyOverlay
+      ? { applied: true, parameter: valueParam ?? '(all parameters)' }
+      : { applied: false, reason: 'no resolvable value-level overlay for the entry function(s) (no overlay, or the value is not a parameter/local); returning function-granularity paths' };
+    if (!anyOverlay) allowedFirstHop = undefined;
+   } catch (error) {
+     // Value-level is strictly best-effort: any overlay error falls back to the
+     // original function-granularity DFS rather than failing the trace.
+     if (process.env.DEBUG) console.debug(`[value-level] trace_execution_path fell back: ${(error as Error).message}`);
+     allowedFirstHop = undefined;
+     valueLevelInfo = { applied: false, reason: 'value-level overlay unavailable (error); returning function-granularity paths' };
+   }
+  }
+
   const targetIds = new Set(targetNodes.map(n => n.id));
   const allPaths: string[][] = [];
 
@@ -981,7 +1086,10 @@ export async function handleTraceExecutionPath(
       return; // don't traverse past the target
     }
     if (path.length > maxDepth) return;
+    // At the first hop from an entry, honor the value-level data-dependence filter.
+    const firstHopFilter = path.length === 1 && allowedFirstHop?.has(path[0]) ? allowedFirstHop.get(path[0]) : undefined;
     for (const neighborId of forward.get(currentId) ?? []) {
+      if (firstHopFilter && !firstHopFilter.has(neighborId)) continue;
       if (!visited.has(neighborId)) {
         visited.add(neighborId);
         path.push(neighborId);
@@ -1004,6 +1112,7 @@ export async function handleTraceExecutionPath(
       pathsFound: 0,
       message: `No execution path found from "${entryFunction}" to "${targetFunction}" within depth ${maxDepth}.`,
       hint: 'Try increasing maxDepth, or check whether both functions are in the same connected component of the call graph.',
+      ...(valueLevelInfo ? { valueLevel: valueLevelInfo } : {}),
     };
   }
 
@@ -1030,5 +1139,6 @@ export async function handleTraceExecutionPath(
     maxDepth,
     shortestPath: paths[0].chain,
     paths,
+    ...(valueLevelInfo ? { valueLevel: valueLevelInfo } : {}),
   };
 }

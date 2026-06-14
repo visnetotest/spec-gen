@@ -697,6 +697,175 @@ describe('handleAnalyzeImpact — edgeStore fast path', () => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Value-level opt-in (spec: add-intraprocedural-cfg-dataflow-overlay).
+// `entry(a, b)` calls used(a) on a's data-dependence line and unused(b) on b's;
+// a value-level request targeting `a` must narrow downstream to `used` only, while
+// the default (no flag) keeps the full function-granularity blast radius.
+// ──────────────────────────────────────────────────────────────────────────────
+describe('handleAnalyzeImpact — value-level opt-in', () => {
+  let dir: string;
+  let store: EdgeStore;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'graph-valuelevel-test-'));
+    store = EdgeStore.open(join(dir, 'call-graph.db'));
+    store.insertNodes([
+      makeNode({ id: 'src/a.ts::entry',  fanOut: 2 }),
+      makeNode({ id: 'src/u.ts::used',   fanIn: 1 }),
+      makeNode({ id: 'src/n.ts::unused', fanIn: 1 }),
+    ]);
+    // entry calls `used` at line 3 and `unused` at line 4.
+    store.insertEdges([
+      { callerId: 'src/a.ts::entry', calleeId: 'src/u.ts::used',   calleeName: 'used',   confidence: 'import', line: 3 },
+      { callerId: 'src/a.ts::entry', calleeId: 'src/n.ts::unused', calleeName: 'unused', confidence: 'import', line: 4 },
+    ]);
+    // Overlay: param `a` is read at line 3 (used(a)); param `b` at line 4 (unused(b)).
+    store.insertCfgs([{
+      functionId: 'src/a.ts::entry',
+      filePath: 'src/a.ts',
+      cfg: {
+        blocks: [{ id: 0, kind: 'entry' }, { id: 1, kind: 'exit' }, { id: 2, kind: 'normal' }],
+        edges: [{ from: 0, to: 2, kind: 'normal' }, { from: 2, to: 1, kind: 'normal' }],
+        params: ['a', 'b'],
+        paramLine: 1,
+        defUse: [
+          { variable: 'a', defLine: 1, useLine: 3, precision: 'exact' },
+          { variable: 'b', defLine: 1, useLine: 4, precision: 'exact' },
+        ],
+      },
+    }]);
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('default impact (no flag) includes both callees', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+    const result = await handleAnalyzeImpact(dir, 'entry', 2) as Record<string, unknown>;
+    const blast = result.blastRadius as { downstream: number };
+    expect(blast.downstream).toBe(2);
+    expect(result.valueLevel).toBeUndefined();
+  });
+
+  it('value-level on param `a` narrows downstream to the data-dependent callee', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+    const result = await handleAnalyzeImpact(dir, 'entry', 2, false, true, 'a') as Record<string, unknown>;
+    const blast = result.blastRadius as { downstream: number };
+    const downstream = result.downstreamCriticalPath as Array<{ name: string }>;
+    expect(blast.downstream).toBe(1);
+    expect(downstream.map(d => d.name)).toEqual(['used']);
+    const vl = result.valueLevel as { applied: boolean; precision?: string };
+    expect(vl.applied).toBe(true);
+    // Cross-call dependence is labeled `may` (spec: DataFlowProvenanceLabeling) —
+    // the value-level hop crosses the call boundary, which is conservative.
+    expect(vl.precision).toContain('may');
+  });
+
+  it('falls back to function granularity when the function has no overlay', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+    // `used` has no overlay row → value-level request must fall back, not error.
+    const result = await handleAnalyzeImpact(dir, 'used', 2, false, true, 'x') as Record<string, unknown>;
+    expect((result.valueLevel as { applied: boolean }).applied).toBe(false);
+    expect(result.symbol).toBe('used');
+  });
+
+  it('falls back (not zero blast radius) when valueParam is not a real parameter', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+    // `entry` has an overlay, but `zzz` is not one of its params/locals. The
+    // narrowing must NOT silently report 0 callees — it must fall back to the
+    // full function-granularity blast radius so a typo can't read as "safe".
+    const result = await handleAnalyzeImpact(dir, 'entry', 2, false, true, 'zzz') as Record<string, unknown>;
+    const vl = result.valueLevel as { applied: boolean; reason?: string };
+    expect(vl.applied).toBe(false);
+    expect(vl.reason).toContain('zzz');
+    expect((result.blastRadius as { downstream: number }).downstream).toBe(2);
+  });
+
+  it('falls back (not throws) when the overlay store errors', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+    // A corrupt/erroring overlay must never fail the tool — value-level is
+    // strictly best-effort and degrades to the full function-granularity result.
+    const spy = vi.spyOn(store, 'getCfg').mockImplementation(() => { throw new Error('boom'); });
+    const result = await handleAnalyzeImpact(dir, 'entry', 2, false, true, 'a') as Record<string, unknown>;
+    expect((result.valueLevel as { applied: boolean }).applied).toBe(false);
+    expect((result.blastRadius as { downstream: number }).downstream).toBe(2);
+    spy.mockRestore();
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// trace_execution_path value-level: first-hop narrowing to the data-dependent
+// callee, and fail-soft fallback when the entry has no overlay. `entry(a,b)`
+// calls used(a) on a's data-dependence line (3) and unused(b) on b's (4).
+// ──────────────────────────────────────────────────────────────────────────────
+describe('handleTraceExecutionPath — value-level opt-in', () => {
+  let dir: string;
+  let store: EdgeStore;
+  let cg: SerializedCallGraph;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'graph-trace-vl-'));
+    store = EdgeStore.open(join(dir, 'call-graph.db'));
+    const nodes = [
+      makeNode({ id: 'a.ts::entry',  fanOut: 2 }),
+      makeNode({ id: 'u.ts::used',   fanIn: 1 }),
+      makeNode({ id: 'n.ts::unused', fanIn: 1 }),
+    ];
+    const edges: CallEdge[] = [
+      { callerId: 'a.ts::entry', calleeId: 'u.ts::used',   calleeName: 'used',   confidence: 'import' as EdgeConfidence, line: 3 },
+      { callerId: 'a.ts::entry', calleeId: 'n.ts::unused', calleeName: 'unused', confidence: 'import' as EdgeConfidence, line: 4 },
+    ];
+    store.insertNodes(nodes);
+    store.insertEdges(edges);
+    store.insertCfgs([{
+      functionId: 'a.ts::entry', filePath: 'a.ts',
+      cfg: {
+        blocks: [{ id: 0, kind: 'entry' }, { id: 1, kind: 'exit' }, { id: 2, kind: 'normal' }],
+        edges: [{ from: 0, to: 2, kind: 'normal' }, { from: 2, to: 1, kind: 'normal' }],
+        params: ['a', 'b'], paramLine: 1,
+        defUse: [
+          { variable: 'a', defLine: 1, useLine: 3, precision: 'exact' },
+          { variable: 'b', defLine: 1, useLine: 4, precision: 'exact' },
+        ],
+      },
+    }]);
+    cg = makeGraph(nodes, edges);
+  });
+
+  afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  it('default trace (no flag) carries no valueLevel block', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: cg, edgeStore: store } as never);
+    const r = await handleTraceExecutionPath(dir, 'entry', 'used', 5, 10) as Record<string, unknown>;
+    expect((r as { pathsFound: number }).pathsFound).toBeGreaterThanOrEqual(1);
+    expect(r.valueLevel).toBeUndefined();
+  });
+
+  it('value-level narrows the first hop to the data-dependent callee', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: cg, edgeStore: store } as never);
+    // entry→used (call line 3) IS data-dependent on param `a` → reachable.
+    const r1 = await handleTraceExecutionPath(dir, 'entry', 'used', 5, 10, false, true, 'a') as { pathsFound: number; valueLevel: { applied: boolean } };
+    expect(r1.valueLevel.applied).toBe(true);
+    expect(r1.pathsFound).toBeGreaterThanOrEqual(1);
+    // entry→unused (call line 4) is NOT data-dependent on `a` → first hop excluded.
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: cg, edgeStore: store } as never);
+    const r2 = await handleTraceExecutionPath(dir, 'entry', 'unused', 5, 10, false, true, 'a') as { pathsFound: number; valueLevel: { applied: boolean } };
+    expect(r2.valueLevel.applied).toBe(true);
+    expect(r2.pathsFound).toBe(0);
+  });
+
+  it('falls back (applied:false) when the entry function has no overlay', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: cg, edgeStore: store } as never);
+    // `unused` has no overlay row → value-level cannot narrow → unrestricted DFS,
+    // reported with applied:false (never a silent empty narrowing).
+    const r = await handleTraceExecutionPath(dir, 'unused', 'used', 5, 10, false, true, 'x') as { valueLevel: { applied: boolean } };
+    expect(r.valueLevel.applied).toBe(false);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Symbol resolution — exact-name match is preferred over fuzzy FTS hits.
 // searchNodes uses an fts5 trigram index, so a query like "auth" substring-matches
 // "authenticate"/"authorize" too. A request for a symbol that DOES exist exactly

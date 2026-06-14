@@ -366,6 +366,14 @@ export const TOOL_DEFINITIONS = [
           type: 'boolean',
           description: 'Traverse only directly-resolved edges, ignoring synthesized dynamic-dispatch edges (default false).',
         },
+        valueLevel: {
+          type: 'boolean',
+          description: 'Opt-in: restrict the first hop to calls data-dependent on a value via the def-use overlay; falls back to function granularity (default false).',
+        },
+        valueParam: {
+          type: 'string',
+          description: 'Entry parameter/variable to trace (with valueLevel; omit = all params).',
+        },
       },
       required: ['directory', 'entryFunction', 'targetFunction'],
     },
@@ -462,6 +470,14 @@ export const TOOL_DEFINITIONS = [
         directResolvedOnly: {
           type: 'boolean',
           description: 'Traverse only directly-resolved edges, ignoring synthesized dynamic-dispatch edges (default false).',
+        },
+        valueLevel: {
+          type: 'boolean',
+          description: 'Opt-in: narrow downstream to calls data-dependent on a value via the def-use overlay; falls back to function granularity (default false).',
+        },
+        valueParam: {
+          type: 'string',
+          description: 'Parameter/variable to trace (with valueLevel; omit = all params).',
         },
       },
       required: ['directory', 'symbol'],

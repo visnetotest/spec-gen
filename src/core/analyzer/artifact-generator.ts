@@ -154,6 +154,13 @@ export interface LLMContext {
   signatures?: import('./signature-extractor.js').FileSignatureMap[];
   /** Static call graph: function→function relationships across all TS/Python files */
   callGraph?: import('./call-graph.js').SerializedCallGraph;
+  /**
+   * Per-function CFG + reaching-definitions overlay (spec:
+   * add-intraprocedural-cfg-dataflow-overlay). Transient: written to the SQLite
+   * store but STRIPPED before llm-context.json is persisted, so it never enters
+   * the always-resident graph or the hot cache.
+   */
+  cfgs?: Array<{ functionId: string; filePath: string; cfg: import('./cfg.js').FunctionCfg }>;
 }
 
 /**
@@ -306,7 +313,10 @@ export class AnalysisArtifactGenerator {
       ),
       writeFile(
         join(this.options.outputDir, ARTIFACT_LLM_CONTEXT),
-        JSON.stringify(artifacts.llmContext, null, 2)
+        // Strip the CFG/def-use overlay before persisting: it is DB-only and must
+        // never enter the resident llm-context.json or the hot cache (spec:
+        // add-intraprocedural-cfg-dataflow-overlay).
+        JSON.stringify({ ...artifacts.llmContext, cfgs: undefined }, null, 2)
       ),
     ];
 
@@ -353,7 +363,7 @@ export class AnalysisArtifactGenerator {
     if (artifacts.llmContext.callGraph) {
       try {
         const dbPath = join(this.options.outputDir, ARTIFACT_CALL_GRAPH_DB);
-        await writeEdgesToSQLite(artifacts.llmContext.callGraph, dbPath, this.options.rootDir);
+        await writeEdgesToSQLite(artifacts.llmContext.callGraph, dbPath, this.options.rootDir, artifacts.llmContext.cfgs);
       } catch {
         // Non-fatal — JSON artifacts are the source of truth
       }
@@ -1159,6 +1169,17 @@ export class AnalysisArtifactGenerator {
     const callGraphResult = await builder.build(callGraphFiles);
     const callGraph = serializeCallGraph(callGraphResult);
 
+    // Intra-procedural CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay).
+    // Transient: persisted to SQLite by writeEdgesToSQLite, then stripped before
+    // llm-context.json is written so it never becomes resident.
+    const cfgs = callGraphResult.cfgs
+      ? Array.from(callGraphResult.cfgs.entries()).map(([functionId, cfg]) => ({
+          functionId,
+          filePath: callGraphResult.nodes.get(functionId)?.filePath ?? functionId.split('::')[0],
+          cfg,
+        }))
+      : undefined;
+
     // For languages without intra-module imports (Swift, C++, …), the dependency
     // graph has no import edges. Synthesize file-level dependency edges from the
     // call graph so the viewer shows a meaningful graph.
@@ -1210,6 +1231,7 @@ export class AnalysisArtifactGenerator {
       phase3_validation: phase3,
       signatures,
       callGraph,
+      cfgs,
     };
   }
 
@@ -1227,7 +1249,8 @@ export class AnalysisArtifactGenerator {
 export async function writeEdgesToSQLite(
   callGraph: import('./call-graph.js').SerializedCallGraph,
   dbPath: string,
-  rootPath?: string
+  rootPath?: string,
+  cfgs?: Array<{ functionId: string; filePath: string; cfg: import('./cfg.js').FunctionCfg }>,
 ): Promise<void> {
   const { EdgeStore } = await import('../services/edge-store.js');
   const store = EdgeStore.open(dbPath);
@@ -1267,6 +1290,15 @@ export async function writeEdgesToSQLite(
     store.insertEdges(prodEdges);
     store.insertInheritanceEdges(inheritanceEdges);
     store.insertClasses(classes);
+
+    // CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay).
+    // Production functions only — keyed by the same normalized ids as nodes.
+    if (cfgs && cfgs.length > 0) {
+      const normCfgs = cfgs
+        .map(c => ({ functionId: norm(c.functionId), filePath: norm(c.filePath), cfg: c.cfg }))
+        .filter(c => !testNodeIds.has(c.functionId));
+      store.insertCfgs(normCfgs);
+    }
 
     // Project the decision store onto first-class graph nodes + `affects` edges
     // (spec-16). Derived, like IaC: the JSON store stays authoritative. Active

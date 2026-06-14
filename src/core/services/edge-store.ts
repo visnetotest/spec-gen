@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { CallEdge, FunctionNode, ClassNode, InheritanceEdge } from '../analyzer/call-graph.js';
+import type { FunctionCfg } from '../analyzer/cfg.js';
 import type { DecisionNode, DecisionAffectsEdge } from '../decisions/project.js';
 import type { FileProvenance } from '../provenance/git-provenance.js';
 import type { FileChangeCoupling, CoupledFile, ChangeCouplingResult } from '../provenance/change-coupling.js';
@@ -51,7 +52,7 @@ function runTransaction(db: DatabaseSync, fn: () => void): void {
 }
 
 /** Bump when schema changes. Old DBs are dropped and rebuilt on next analyze --force. */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 export class EdgeStore {
   /**
@@ -85,6 +86,7 @@ export class EdgeStore {
         DROP TABLE IF EXISTS decision_edges;
         DROP TABLE IF EXISTS provenance;
         DROP TABLE IF EXISTS change_coupling;
+        DROP TABLE IF EXISTS cfg_overlay;
         DROP TABLE IF EXISTS schema_version;
         CREATE TABLE schema_version (version INTEGER NOT NULL);
       `);
@@ -205,6 +207,20 @@ export class EdgeStore {
         churn        INTEGER NOT NULL DEFAULT 0,
         coupled_with TEXT NOT NULL DEFAULT '[]'  -- JSON CoupledFile[]
       );
+
+      -- Intra-procedural control-flow + reaching-definitions overlay
+      -- (spec: add-intraprocedural-cfg-dataflow-overlay). One compact JSON blob
+      -- per function id: basic blocks + adjacency + labeled def-use edges, NOT a
+      -- row per statement. DB-only and lazily loaded — never added to the
+      -- resident SerializedCallGraph or the hot cached context, so in-memory
+      -- footprint is unchanged. file_path is denormalized for per-file
+      -- incremental delete in the watcher's per-file swap.
+      CREATE TABLE IF NOT EXISTS cfg_overlay (
+        function_id TEXT PRIMARY KEY,
+        file_path   TEXT NOT NULL,
+        cfg         TEXT NOT NULL  -- JSON FunctionCfg
+      );
+      CREATE INDEX IF NOT EXISTS idx_cfg_file ON cfg_overlay(file_path);
     `);
   }
 
@@ -433,6 +449,43 @@ export class EdgeStore {
     });
   }
 
+  // ── CFG / data-flow overlay (spec: add-intraprocedural-cfg-dataflow-overlay) ──
+
+  /**
+   * Lazily load one function's control-flow + reaching-definitions overlay.
+   * Returns null when the function has no overlay (unsupported language, a parse
+   * that produced no CFG, or a pre-overlay store). DB-only — never resident.
+   */
+  getCfg(functionId: string): FunctionCfg | null {
+    const row = this.db.prepare('SELECT cfg FROM cfg_overlay WHERE function_id = ?').get(functionId) as { cfg: string } | undefined;
+    if (!row) return null;
+    try { return JSON.parse(row.cfg) as FunctionCfg; } catch { return null; }
+  }
+
+  /** True when any overlay rows exist (used to tell "no overlay" from "absent feature"). */
+  hasCfgOverlay(): boolean {
+    const row = this.db.prepare('SELECT 1 FROM cfg_overlay LIMIT 1').get() as { 1: number } | undefined;
+    return row !== undefined;
+  }
+
+  /** Delete every overlay row for a file (per-file incremental recompute). */
+  deleteCfgForFile(file: string): void {
+    this.db.prepare('DELETE FROM cfg_overlay WHERE file_path = ?').run(file);
+  }
+
+  /** Bulk-insert per-function overlays in a single transaction. */
+  insertCfgs(cfgs: Array<{ functionId: string; filePath: string; cfg: FunctionCfg }>): void {
+    if (cfgs.length === 0) return;
+    const stmt: StatementSync = this.db.prepare(
+      'INSERT OR REPLACE INTO cfg_overlay (function_id, file_path, cfg) VALUES (@functionId, @filePath, @cfg)'
+    );
+    runTransaction(this.db, () => {
+      for (const c of cfgs) {
+        stmt.run({ '@functionId': c.functionId, '@filePath': c.filePath, '@cfg': JSON.stringify(c.cfg) });
+      }
+    });
+  }
+
   // ── Class queries ─────────────────────────────────────────────────────────────
 
   getClass(id: string): ClassNode | null {
@@ -654,7 +707,7 @@ export class EdgeStore {
 
   /** Drop all graph data — used by full analyze rebuild. */
   clearAll(): void {
-    this.db.exec('DELETE FROM edges; DELETE FROM inheritance_edges; DELETE FROM nodes; DELETE FROM classes; DELETE FROM nodes_fts; DELETE FROM file_hashes; DELETE FROM decisions; DELETE FROM decision_edges; DELETE FROM provenance; DELETE FROM change_coupling;');
+    this.db.exec('DELETE FROM edges; DELETE FROM inheritance_edges; DELETE FROM nodes; DELETE FROM classes; DELETE FROM nodes_fts; DELETE FROM file_hashes; DELETE FROM decisions; DELETE FROM decision_edges; DELETE FROM provenance; DELETE FROM change_coupling; DELETE FROM cfg_overlay;');
   }
 
   /** Run fn inside a single SQLite transaction. */
