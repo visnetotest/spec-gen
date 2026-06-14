@@ -9,7 +9,7 @@
  * so the LLM always has module-level context.
  */
 
-import Parser from 'tree-sitter';
+import type Parser from 'tree-sitter';
 import { detectLanguage } from './code-shaper.js';
 
 // ── Lazy parser singletons (one per language, created on first use) ─────────
@@ -21,15 +21,31 @@ let _rustParser: Parser | undefined;
 let _rubyParser: Parser | undefined;
 let _javaParser: Parser | undefined;
 
+// null = tried and unavailable; undefined = not yet tried
+let _NativeParser: (typeof Parser) | null | undefined;
+
+async function loadNativeParser(): Promise<typeof Parser | null> {
+  if (_NativeParser === undefined) {
+    try {
+      _NativeParser = ((await import('tree-sitter')).default) as typeof Parser;
+    } catch {
+      _NativeParser = null;
+    }
+  }
+  return _NativeParser;
+}
+
 async function getParserForLanguage(lang: string): Promise<Parser | null> {
   try {
+    const NP = await loadNativeParser();
+    if (!NP) return null;
     switch (lang.toLowerCase()) {
       case 'typescript':
       case 'javascript': {
         if (!_tsParser) {
           const m = await import('tree-sitter-typescript');
-          _tsParser = new Parser();
-          (_tsParser as Parser).setLanguage(
+          _tsParser = new NP();
+          _tsParser.setLanguage(
             ((m.default ?? m) as { typescript: object }).typescript as Parser.Language
           );
         }
@@ -38,40 +54,40 @@ async function getParserForLanguage(lang: string): Promise<Parser | null> {
       case 'python': {
         if (!_pyParser) {
           const m = await import('tree-sitter-python');
-          _pyParser = new Parser();
-          (_pyParser as Parser).setLanguage((m.default ?? m) as Parser.Language);
+          _pyParser = new NP();
+          _pyParser.setLanguage((m.default ?? m) as Parser.Language);
         }
         return _pyParser!;
       }
       case 'go': {
         if (!_goParser) {
           const m = await import('tree-sitter-go');
-          _goParser = new Parser();
-          (_goParser as Parser).setLanguage((m.default ?? m) as Parser.Language);
+          _goParser = new NP();
+          _goParser.setLanguage((m.default ?? m) as Parser.Language);
         }
         return _goParser!;
       }
       case 'rust': {
         if (!_rustParser) {
           const m = await import('tree-sitter-rust');
-          _rustParser = new Parser();
-          (_rustParser as Parser).setLanguage((m.default ?? m) as Parser.Language);
+          _rustParser = new NP();
+          _rustParser.setLanguage((m.default ?? m) as Parser.Language);
         }
         return _rustParser!;
       }
       case 'ruby': {
         if (!_rubyParser) {
           const m = await import('tree-sitter-ruby');
-          _rubyParser = new Parser();
-          (_rubyParser as Parser).setLanguage((m.default ?? m) as Parser.Language);
+          _rubyParser = new NP();
+          _rubyParser.setLanguage((m.default ?? m) as Parser.Language);
         }
         return _rubyParser!;
       }
       case 'java': {
         if (!_javaParser) {
           const m = await import('tree-sitter-java');
-          _javaParser = new Parser();
-          (_javaParser as Parser).setLanguage((m.default ?? m) as Parser.Language);
+          _javaParser = new NP();
+          _javaParser.setLanguage((m.default ?? m) as Parser.Language);
         }
         return _javaParser!;
       }

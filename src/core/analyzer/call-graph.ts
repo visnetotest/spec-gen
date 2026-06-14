@@ -13,7 +13,7 @@
  */
 
 import { dirname, join as joinPath } from 'node:path';
-import Parser from 'tree-sitter';
+import type Parser from 'tree-sitter';
 import { FunctionRegistryTrie } from './function-registry-trie.js';
 import type { ImportMap } from './import-resolver-bridge.js';
 import { inferTypesFromSource, resolveViaTypeInference } from './type-inference-engine.js';
@@ -442,6 +442,24 @@ let _phpParser: Parser | undefined;
 let _csParser: Parser | undefined;
 let _ktParser: Parser | undefined;
 let _exParser: Parser | undefined;
+
+// null = tried and unavailable; undefined = not yet tried
+let _NativeParser: (typeof Parser) | null | undefined;
+let _NativeQuery: (typeof Parser.Query) | null | undefined;
+
+async function loadNativeParser(): Promise<typeof Parser | null> {
+  if (_NativeParser === undefined) {
+    try {
+      const m = ((await import('tree-sitter')).default) as typeof Parser;
+      _NativeParser = m;
+      _NativeQuery = m.Query;
+    } catch {
+      _NativeParser = null;
+      _NativeQuery = null;
+    }
+  }
+  return _NativeParser;
+}
 let _TsLanguage: object | undefined;
 let _PyLanguage: object | undefined;
 let _GoLanguage: object | undefined;
@@ -455,122 +473,146 @@ let _CsLanguage: object | undefined;
 let _KtLanguage: object | undefined;
 let _ExLanguage: object | undefined;
 
-async function getTSParser(): Promise<{ parser: Parser; lang: object }> {
+async function getTSParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
   if (!_tsParser) {
     const tsModule = await import('tree-sitter-typescript');
     _TsLanguage = (tsModule.default as { typescript: object }).typescript;
-    _tsParser = new Parser();
-    (_tsParser as Parser).setLanguage(_TsLanguage as unknown as Parser.Language);
+    _tsParser = new NP();
+    _tsParser.setLanguage(_TsLanguage as unknown as Parser.Language);
   }
   return { parser: _tsParser!, lang: _TsLanguage! };
 }
 
-async function getPyParser(): Promise<{ parser: Parser; lang: object }> {
+async function getPyParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
   if (!_pyParser) {
     const pyModule = await import('tree-sitter-python');
     _PyLanguage = pyModule.default;
-    _pyParser = new Parser();
-    (_pyParser as Parser).setLanguage(_PyLanguage as unknown as Parser.Language);
+    _pyParser = new NP();
+    _pyParser.setLanguage(_PyLanguage as unknown as Parser.Language);
   }
   return { parser: _pyParser!, lang: _PyLanguage! };
 }
 
-async function getGoParser(): Promise<{ parser: Parser; lang: object }> {
+async function getGoParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
   if (!_goParser) {
     const goModule = await import('tree-sitter-go');
     _GoLanguage = goModule.default;
-    _goParser = new Parser();
-    (_goParser as Parser).setLanguage(_GoLanguage as unknown as Parser.Language);
+    _goParser = new NP();
+    _goParser.setLanguage(_GoLanguage as unknown as Parser.Language);
   }
   return { parser: _goParser!, lang: _GoLanguage! };
 }
 
-async function getRustParser(): Promise<{ parser: Parser; lang: object }> {
+async function getRustParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
   if (!_rustParser) {
     const rustModule = await import('tree-sitter-rust');
     _RustLanguage = rustModule.default;
-    _rustParser = new Parser();
-    (_rustParser as Parser).setLanguage(_RustLanguage as unknown as Parser.Language);
+    _rustParser = new NP();
+    _rustParser.setLanguage(_RustLanguage as unknown as Parser.Language);
   }
   return { parser: _rustParser!, lang: _RustLanguage! };
 }
 
-async function getRubyParser(): Promise<{ parser: Parser; lang: object }> {
+async function getRubyParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
   if (!_rubyParser) {
     const rubyModule = await import('tree-sitter-ruby');
     _RubyLanguage = rubyModule.default;
-    _rubyParser = new Parser();
-    (_rubyParser as Parser).setLanguage(_RubyLanguage as unknown as Parser.Language);
+    _rubyParser = new NP();
+    _rubyParser.setLanguage(_RubyLanguage as unknown as Parser.Language);
   }
   return { parser: _rubyParser!, lang: _RubyLanguage! };
 }
 
-async function getJavaParser(): Promise<{ parser: Parser; lang: object }> {
+async function getJavaParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
   if (!_javaParser) {
     const javaModule = await import('tree-sitter-java');
     _JavaLanguage = javaModule.default;
-    _javaParser = new Parser();
-    (_javaParser as Parser).setLanguage(_JavaLanguage as unknown as Parser.Language);
+    _javaParser = new NP();
+    _javaParser.setLanguage(_JavaLanguage as unknown as Parser.Language);
   }
   return { parser: _javaParser!, lang: _JavaLanguage! };
 }
 
-async function getPhpParser(): Promise<{ parser: Parser; lang: object }> {
+async function getPhpParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
   if (!_phpParser) {
     const phpModule = await import('tree-sitter-php');
     _PhpLanguage = (phpModule.default as { php: object }).php;
-    _phpParser = new Parser();
-    (_phpParser as Parser).setLanguage(_PhpLanguage as unknown as Parser.Language);
+    _phpParser = new NP();
+    _phpParser.setLanguage(_PhpLanguage as unknown as Parser.Language);
   }
   return { parser: _phpParser!, lang: _PhpLanguage! };
 }
 
-async function getCSharpParser(): Promise<{ parser: Parser; lang: object }> {
+async function getCSharpParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
   if (!_csParser) {
     const csModule = await import('tree-sitter-c-sharp');
     _CsLanguage = csModule.default;
-    _csParser = new Parser();
-    (_csParser as Parser).setLanguage(_CsLanguage as unknown as Parser.Language);
+    _csParser = new NP();
+    _csParser.setLanguage(_CsLanguage as unknown as Parser.Language);
   }
   return { parser: _csParser!, lang: _CsLanguage! };
 }
 
-async function getKotlinParser(): Promise<{ parser: Parser; lang: object }> {
+async function getKotlinParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
   if (!_ktParser) {
     const ktModule = await import('tree-sitter-kotlin');
     _KtLanguage = ktModule.default;
-    _ktParser = new Parser();
-    (_ktParser as Parser).setLanguage(_KtLanguage as unknown as Parser.Language);
+    _ktParser = new NP();
+    _ktParser.setLanguage(_KtLanguage as unknown as Parser.Language);
   }
   return { parser: _ktParser!, lang: _KtLanguage! };
 }
 
-async function getElixirParser(): Promise<{ parser: Parser; lang: object }> {
+async function getElixirParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
   if (!_exParser) {
     const exModule = await import('tree-sitter-elixir');
     _ExLanguage = exModule.default;
-    _exParser = new Parser();
-    (_exParser as Parser).setLanguage(_ExLanguage as unknown as Parser.Language);
+    _exParser = new NP();
+    _exParser.setLanguage(_ExLanguage as unknown as Parser.Language);
   }
   return { parser: _exParser!, lang: _ExLanguage! };
 }
 
-async function getCppParser(): Promise<{ parser: Parser; lang: object }> {
+async function getCppParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
   if (!_cppParser) {
     const cppModule = await import('tree-sitter-cpp');
     _CppLanguage = cppModule.default;
-    _cppParser = new Parser();
-    (_cppParser as Parser).setLanguage(_CppLanguage as unknown as Parser.Language);
+    _cppParser = new NP();
+    _cppParser.setLanguage(_CppLanguage as unknown as Parser.Language);
   }
   return { parser: _cppParser!, lang: _CppLanguage! };
 }
 
-async function getSwiftParser(): Promise<{ parser: Parser; lang: object }> {
+async function getSwiftParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
   if (!_swiftParser) {
     const swiftModule = await import('tree-sitter-swift');
     _SwiftLanguage = swiftModule.default;
-    _swiftParser = new Parser();
-    (_swiftParser as Parser).setLanguage(_SwiftLanguage as unknown as Parser.Language);
+    _swiftParser = new NP();
+    _swiftParser.setLanguage(_SwiftLanguage as unknown as Parser.Language);
   }
   return { parser: _swiftParser!, lang: _SwiftLanguage! };
 }
@@ -940,11 +982,13 @@ async function extractTSGraph(
   filePath: string,
   content: string
 ): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
-  const { parser, lang } = await getTSParser();
+  const r = await getTSParser();
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
-  const fnQuery = new Parser.Query(lang as unknown as Parser.Language, TS_FN_QUERY);
-  const callQuery = new Parser.Query(lang as unknown as Parser.Language, TS_CALL_QUERY);
+  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, TS_FN_QUERY);
+  const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, TS_CALL_QUERY);
 
   // --- Extract function nodes ---
   const nodes: FunctionNode[] = [];
@@ -1073,10 +1117,12 @@ async function extractPyGraph(
   filePath: string,
   content: string
 ): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
-  const { parser, lang } = await getPyParser();
+  const r = await getPyParser();
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
-  const fnQuery = new Parser.Query(lang as unknown as Parser.Language, PY_FN_QUERY);
+  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, PY_FN_QUERY);
 
   // --- Extract function nodes ---
   const nodes: FunctionNode[] = [];
@@ -1140,8 +1186,8 @@ async function extractPyGraph(
   // --- Extract calls ---
   const rawEdges: RawEdge[] = [];
 
-  const directCallQuery = new Parser.Query(lang as unknown as Parser.Language, PY_DIRECT_CALL_QUERY);
-  const methodCallQuery = new Parser.Query(lang as unknown as Parser.Language, PY_METHOD_CALL_QUERY);
+  const directCallQuery = new _NativeQuery!(lang as unknown as Parser.Language, PY_DIRECT_CALL_QUERY);
+  const methodCallQuery = new _NativeQuery!(lang as unknown as Parser.Language, PY_METHOD_CALL_QUERY);
 
   // Direct calls: foo(), bar(x) — resolve across all files
   for (const match of directCallQuery.matches(tree.rootNode)) {
@@ -1219,11 +1265,13 @@ async function extractGoGraph(
   filePath: string,
   content: string
 ): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
-  const { parser, lang } = await getGoParser();
+  const r = await getGoParser();
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
-  const fnQuery = new Parser.Query(lang as unknown as Parser.Language, GO_FN_QUERY);
-  const callQuery = new Parser.Query(lang as unknown as Parser.Language, GO_CALL_QUERY);
+  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, GO_FN_QUERY);
+  const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, GO_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
   const cfg = new Map<string, FunctionCfg>();
@@ -1305,11 +1353,13 @@ async function extractRustGraph(
   filePath: string,
   content: string
 ): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
-  const { parser, lang } = await getRustParser();
+  const r = await getRustParser();
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
-  const fnQuery = new Parser.Query(lang as unknown as Parser.Language, RUST_FN_QUERY);
-  const callQuery = new Parser.Query(lang as unknown as Parser.Language, RUST_CALL_QUERY);
+  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUST_FN_QUERY);
+  const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUST_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
   const cfg = new Map<string, FunctionCfg>();
@@ -1406,12 +1456,14 @@ async function extractRubyGraph(
   filePath: string,
   content: string
 ): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
-  const { parser, lang } = await getRubyParser();
+  const r = await getRubyParser();
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
-  const fnQuery = new Parser.Query(lang as unknown as Parser.Language, RUBY_FN_QUERY);
-  const callQuery = new Parser.Query(lang as unknown as Parser.Language, RUBY_CALL_QUERY);
-  const barewordQuery = new Parser.Query(lang as unknown as Parser.Language, RUBY_BAREWORD_QUERY);
+  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUBY_FN_QUERY);
+  const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUBY_CALL_QUERY);
+  const barewordQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUBY_BAREWORD_QUERY);
 
   const nodes: FunctionNode[] = [];
   const cfg = new Map<string, FunctionCfg>();
@@ -1556,11 +1608,13 @@ async function extractJavaGraph(
   filePath: string,
   content: string
 ): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
-  const { parser, lang } = await getJavaParser();
+  const r = await getJavaParser();
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
-  const fnQuery = new Parser.Query(lang as unknown as Parser.Language, JAVA_FN_QUERY);
-  const callQuery = new Parser.Query(lang as unknown as Parser.Language, JAVA_CALL_QUERY);
+  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, JAVA_FN_QUERY);
+  const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, JAVA_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
   const cfg = new Map<string, FunctionCfg>();
@@ -1634,8 +1688,9 @@ function safeQuery(
   queryStr: string,
   root: Parser.SyntaxNode
 ): Parser.QueryMatch[] {
+  if (!_NativeQuery) return [];
   try {
-    const q = new Parser.Query(lang as unknown as Parser.Language, queryStr);
+    const q = new _NativeQuery(lang as unknown as Parser.Language, queryStr);
     return q.matches(root);
   } catch {
     return [];
@@ -1679,7 +1734,9 @@ async function extractCppGraph(
   filePath: string,
   content: string
 ): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
-  const { parser, lang } = await getCppParser();
+  const r = await getCppParser();
+  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
   const nodes: FunctionNode[] = [];
@@ -1809,12 +1866,14 @@ async function extractSwiftGraph(
   filePath: string,
   content: string
 ): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
-  const { parser, lang } = await getSwiftParser();
+  const r = await getSwiftParser();
+  if (!r) return { nodes: [], rawEdges: [] };
+  const { parser, lang } = r;
   const tree = (parser as Parser).parse(content);
 
-  const fnQuery = new Parser.Query(lang as unknown as Parser.Language, SWIFT_FN_QUERY);
-  const directCallQuery = new Parser.Query(lang as unknown as Parser.Language, SWIFT_CALL_DIRECT_QUERY);
-  const navCallQuery = new Parser.Query(lang as unknown as Parser.Language, SWIFT_CALL_NAV_QUERY);
+  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, SWIFT_FN_QUERY);
+  const directCallQuery = new _NativeQuery!(lang as unknown as Parser.Language, SWIFT_CALL_DIRECT_QUERY);
+  const navCallQuery = new _NativeQuery!(lang as unknown as Parser.Language, SWIFT_CALL_NAV_QUERY);
 
   const nodes: FunctionNode[] = [];
   for (const match of fnQuery.matches(tree.rootNode)) {
@@ -1951,18 +2010,21 @@ async function loadGrammarSoft(
 ): Promise<GrammarHandle | null> {
   if (_grammarHandleCache.has(language)) return _grammarHandleCache.get(language)!;
   try {
+    const NP = await loadNativeParser();
+    if (!NP) throw new Error('tree-sitter native bindings not available');
     const mod = (await importer()) as Record<string, unknown>;
     const lang = pick(mod) as object;
     if (!lang) throw new Error('grammar export resolved to undefined');
-    const parser = new Parser();
+    const parser = new NP();
     parser.setLanguage(lang as unknown as Parser.Language);
     const handle: GrammarHandle = {
       withTree: (content, fn) => {
         const tree = (parser as Parser).parse(content);
         const root = tree.rootNode as unknown as TsNodeLike;
         const runQuery = (src: string): TsMatch[] => {
+          if (!_NativeQuery) return [];
           try {
-            const q = new Parser.Query(lang as unknown as Parser.Language, src);
+            const q = new _NativeQuery(lang as unknown as Parser.Language, src);
             return q.matches(tree.rootNode) as unknown as TsMatch[];
           } catch { return []; }
         };
@@ -2477,7 +2539,9 @@ async function extractClassRelationships(
   for (const file of files) {
     try {
       if (file.language === 'TypeScript' || file.language === 'JavaScript') {
-        const { parser, lang } = await getTSParser();
+        const r = await getTSParser();
+        if (!r) continue;
+        const { parser, lang } = r;
         const tree = (parser as Parser).parse(file.content);
 
         // class Foo extends Bar implements Baz, Qux
@@ -2502,7 +2566,9 @@ async function extractClassRelationships(
         }
 
       } else if (file.language === 'Python') {
-        const { parser, lang } = await getPyParser();
+        const r = await getPyParser();
+        if (!r) continue;
+        const { parser, lang } = r;
         const tree = (parser as Parser).parse(file.content);
 
         // class Foo(Bar, Baz):
@@ -2517,7 +2583,9 @@ async function extractClassRelationships(
         }
 
       } else if (file.language === 'Java') {
-        const { parser, lang } = await getJavaParser();
+        const r = await getJavaParser();
+        if (!r) continue;
+        const { parser, lang } = r;
         const tree = (parser as Parser).parse(file.content);
 
         const EXTENDS_Q = `
@@ -2541,7 +2609,9 @@ async function extractClassRelationships(
         }
 
       } else if (file.language === 'C++') {
-        const { parser, lang } = await getCppParser();
+        const r = await getCppParser();
+        if (!r) continue;
+        const { parser, lang } = r;
         const tree = (parser as Parser).parse(file.content);
 
         // class Foo : public Bar
@@ -2556,7 +2626,9 @@ async function extractClassRelationships(
         }
 
       } else if (file.language === 'Ruby') {
-        const { parser, lang } = await getRubyParser();
+        const r = await getRubyParser();
+        if (!r) continue;
+        const { parser, lang } = r;
         const tree = (parser as Parser).parse(file.content);
 
         // class Foo < Bar
@@ -2572,7 +2644,9 @@ async function extractClassRelationships(
 
       } else if (file.language === 'Go') {
         // Go has no inheritance but has struct embedding; treat as 'embeds' edges
-        const { parser, lang } = await getGoParser();
+        const r = await getGoParser();
+        if (!r) continue;
+        const { parser, lang } = r;
         const tree = (parser as Parser).parse(file.content);
 
         // Anonymous (embedded) field in a struct: type Foo struct { Bar }
@@ -3537,91 +3611,115 @@ async function synthesizeEventChannelEdges(
     (f.language === 'TypeScript' || f.language === 'JavaScript') && EVENT_PREFILTER.test(f.content),
   );
   if (tsFiles.length > 0) {
-    const { parser } = await getTSParser();
-    const sites: EventSites = { registrations: [], dispatches: [] };
-    for (const file of tsFiles) {
-      try { collectTsEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
-      catch { /* skip unparseable file */ }
+    const r = await getTSParser();
+    if (r) {
+      const { parser } = r;
+      const sites: EventSites = { registrations: [], dispatches: [] };
+      for (const file of tsFiles) {
+        try { collectTsEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        catch { /* skip unparseable file */ }
+      }
+      edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
     }
-    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
   }
 
   const pyFiles = files.filter(f => f.language === 'Python' && EVENT_PREFILTER.test(f.content));
   if (pyFiles.length > 0) {
-    const { parser } = await getPyParser();
-    const sites: EventSites = { registrations: [], dispatches: [] };
-    for (const file of pyFiles) {
-      try { collectPyEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
-      catch { /* skip unparseable file */ }
+    const r = await getPyParser();
+    if (r) {
+      const { parser } = r;
+      const sites: EventSites = { registrations: [], dispatches: [] };
+      for (const file of pyFiles) {
+        try { collectPyEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        catch { /* skip unparseable file */ }
+      }
+      edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
     }
-    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
   }
 
   const rubyFiles = files.filter(f => f.language === 'Ruby' && EVENT_PREFILTER.test(f.content));
   if (rubyFiles.length > 0) {
-    const { parser } = await getRubyParser();
-    const sites: EventSites = { registrations: [], dispatches: [] };
-    for (const file of rubyFiles) {
-      try { collectRubyEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
-      catch { /* skip unparseable file */ }
+    const r = await getRubyParser();
+    if (r) {
+      const { parser } = r;
+      const sites: EventSites = { registrations: [], dispatches: [] };
+      for (const file of rubyFiles) {
+        try { collectRubyEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        catch { /* skip unparseable file */ }
+      }
+      edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
     }
-    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
   }
 
   const phpFiles = files.filter(f => f.language === 'PHP' && EVENT_PREFILTER.test(f.content));
   if (phpFiles.length > 0) {
-    const { parser } = await getPhpParser();
-    const sites: EventSites = { registrations: [], dispatches: [] };
-    for (const file of phpFiles) {
-      try { collectPhpEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
-      catch { /* skip unparseable file */ }
+    const r = await getPhpParser();
+    if (r) {
+      const { parser } = r;
+      const sites: EventSites = { registrations: [], dispatches: [] };
+      for (const file of phpFiles) {
+        try { collectPhpEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        catch { /* skip unparseable file */ }
+      }
+      edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
     }
-    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
   }
 
   // ── Type-based events (keyed on the event TYPE, not a string channel) ──
   const javaFiles = files.filter(f => f.language === 'Java' && JAVA_TYPE_EVENT_PREFILTER.test(f.content));
   if (javaFiles.length > 0) {
-    const { parser } = await getJavaParser();
-    const sites: EventSites = { registrations: [], dispatches: [] };
-    for (const file of javaFiles) {
-      try { collectJavaTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
-      catch { /* skip unparseable file */ }
+    const r = await getJavaParser();
+    if (r) {
+      const { parser } = r;
+      const sites: EventSites = { registrations: [], dispatches: [] };
+      for (const file of javaFiles) {
+        try { collectJavaTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        catch { /* skip unparseable file */ }
+      }
+      edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
     }
-    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
   }
 
   const csFiles = files.filter(f => f.language === 'C#' && CSHARP_TYPE_EVENT_PREFILTER.test(f.content));
   if (csFiles.length > 0) {
-    const { parser } = await getCSharpParser();
-    const sites: EventSites = { registrations: [], dispatches: [] };
-    for (const file of csFiles) {
-      try { collectCSharpTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
-      catch { /* skip unparseable file */ }
+    const r = await getCSharpParser();
+    if (r) {
+      const { parser } = r;
+      const sites: EventSites = { registrations: [], dispatches: [] };
+      for (const file of csFiles) {
+        try { collectCSharpTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        catch { /* skip unparseable file */ }
+      }
+      edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
     }
-    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
   }
 
   const ktFiles = files.filter(f => f.language === 'Kotlin' && JAVA_TYPE_EVENT_PREFILTER.test(f.content));
   if (ktFiles.length > 0) {
-    const { parser } = await getKotlinParser();
-    const sites: EventSites = { registrations: [], dispatches: [] };
-    for (const file of ktFiles) {
-      try { collectKotlinTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
-      catch { /* skip unparseable file */ }
+    const r = await getKotlinParser();
+    if (r) {
+      const { parser } = r;
+      const sites: EventSites = { registrations: [], dispatches: [] };
+      for (const file of ktFiles) {
+        try { collectKotlinTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        catch { /* skip unparseable file */ }
+      }
+      edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
     }
-    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
   }
 
   const swiftFiles = files.filter(f => f.language === 'Swift' && SWIFT_EVENT_PREFILTER.test(f.content));
   if (swiftFiles.length > 0) {
-    const { parser } = await getSwiftParser();
-    const sites: EventSites = { registrations: [], dispatches: [] };
-    for (const file of swiftFiles) {
-      try { collectSwiftEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
-      catch { /* skip unparseable file */ }
+    const r = await getSwiftParser();
+    if (r) {
+      const { parser } = r;
+      const sites: EventSites = { registrations: [], dispatches: [] };
+      for (const file of swiftFiles) {
+        try { collectSwiftEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        catch { /* skip unparseable file */ }
+      }
+      edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
     }
-    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
   }
 
   return edges;
@@ -3806,28 +3904,37 @@ async function synthesizeCallbackRegistrationEdges(
 
   const tsFiles = files.filter(f => (f.language === 'TypeScript' || f.language === 'JavaScript') && TS_CALLBACK_PREFILTER.test(f.content));
   if (tsFiles.length > 0) {
-    const { parser } = await getTSParser();
-    for (const file of tsFiles) {
-      try { collectTsCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
-      catch { /* skip */ }
+    const r = await getTSParser();
+    if (r) {
+      const { parser } = r;
+      for (const file of tsFiles) {
+        try { collectTsCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
+        catch { /* skip */ }
+      }
     }
   }
 
   const goFiles = files.filter(f => f.language === 'Go' && GO_CALLBACK_PREFILTER.test(f.content));
   if (goFiles.length > 0) {
-    const { parser } = await getGoParser();
-    for (const file of goFiles) {
-      try { collectGoCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
-      catch { /* skip */ }
+    const r = await getGoParser();
+    if (r) {
+      const { parser } = r;
+      for (const file of goFiles) {
+        try { collectGoCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
+        catch { /* skip */ }
+      }
     }
   }
 
   const cppFiles = files.filter(f => f.language === 'C++' && CPP_CALLBACK_PREFILTER.test(f.content));
   if (cppFiles.length > 0) {
-    const { parser } = await getCppParser();
-    for (const file of cppFiles) {
-      try { collectCppCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
-      catch { /* skip */ }
+    const r = await getCppParser();
+    if (r) {
+      const { parser } = r;
+      for (const file of cppFiles) {
+        try { collectCppCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
+        catch { /* skip */ }
+      }
     }
   }
   return out;
@@ -3899,7 +4006,9 @@ async function synthesizeActorMessageEdges(
     if (n.isExternal) continue;
     (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
   }
-  const { parser } = await getElixirParser();
+  const r = await getElixirParser();
+  if (!r) return [];
+  const { parser } = r;
   const sites: EventSites = { registrations: [], dispatches: [] };
   for (const file of exFiles) {
     try { collectElixirActorSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
