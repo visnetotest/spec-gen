@@ -4938,6 +4938,22 @@ The system SHALL compute intraprocedural control-flow graphs and reaching-defini
 > Decision recorded: c8f2b9bf
 > Date: 2026-06-12
 
+### Requirement: ContentAddressedStableSymbolId
+
+The system SHALL compute, for every named function and class symbol, a content-addressed stable identity (`stableId`) that is independent of the symbol's file path, derived deterministically from a package- or module-relative container, the symbol's qualified name (class.method or function), and an overload disambiguator (the normalized signature shape, falling back to parameter arity). The `stableId` SHALL be a pure function of static structure, identical across runs and machines, and preserved when a symbol's file is renamed or moved without otherwise changing the symbol. Symbols whose identity cannot be derived deterministically (anonymous or dynamically-generated) SHALL NOT receive a `stableId`. Full scenarios: `openspec/changes/add-content-addressed-stable-symbol-ids/specs/analyzer/spec.md`.
+
+### Requirement: AdditiveStableIdentity
+
+The system SHALL introduce `stableId` additively, without changing the existing path-based symbol `id`, which SHALL remain the canonical key for the call graph, the store primary keys, edge endpoints, the file-from-id derivation, the serialized graph, and all existing path-based consumers. `stableId` SHALL be persisted as a nullable serialized-node field and a nullable indexed store column, introduced by bumping the store schema version so existing caches drop-and-rebuild with no data-migration code. A graph or store that predates `stableId` SHALL remain valid, with an absent `stableId` treated as "no stable identity available".
+
+### Requirement: RenameStableStructuralDiff
+
+The system SHALL use `stableId` as the primary cross-version node matcher in structural diffing, matching two nodes as the same symbol when their `stableId`s are equal and falling back to the path-based `id` only for nodes that have no `stableId`. A purely moved or renamed-file symbol (same `stableId`) SHALL be reported as the same symbol (an exact move/rename candidate), not a removal plus an addition. The system SHALL retain the signature-shape rename-recovery heuristic for the leftover removed/added set (identifier renames and symbols with no `stableId`), and SHALL continue to surface both interpretations rather than silently merging them.
+
+### Requirement: RenameStableMemoryAnchoring
+
+The system SHALL record an optional `stableId` on a code-anchored memory alongside its path-based `nodeId`, and SHALL resolve a memory's anchor by first attempting the `nodeId` (current behavior) and, only on a miss, resolving by `stableId`. A memory anchored to a symbol later moved/renamed-file but otherwise unchanged SHALL resolve via `stableId` to the relocated symbol and report `fresh` (or `drifted` if its content changed) instead of `orphaned`. A memory recorded before this change (carrying only `nodeId`) SHALL behave exactly as today, with no migration.
+
 ## Technical Notes
 
 - **Implementation**: `src/core/analyzer/repository-mapper.ts, src/api/types.ts, src/core/analyzer/embedding-service.ts, src/core/analyzer/subgraph-extractor.ts, src/core/analyzer/architecture-writer.ts, src/core/analyzer/dependency-graph.ts, src/core/analyzer/spec-vector-index.ts, src/core/analyzer/file-walker.ts, src/core/analyzer/import-resolver-bridge.ts, src/core/analyzer/refactor-analyzer.ts, src/core/analyzer/vector-index.ts, src/core/analyzer/import-parser.ts, src/core/analyzer/signature-extractor.ts, src/core/analyzer/artifact-generator.ts, src/core/analyzer/cpp-header-resolver.ts, src/core/analyzer/call-graph.ts, src/core/analyzer/duplicate-detector.ts, src/core/analyzer/type-inference-engine.ts, src/core/analyzer/significance-scorer.ts, src/core/analyzer/http-route-parser.ts, src/core/analyzer/ast-chunker.ts, src/core/analyzer/codebase-digest.ts, src/utils/progress.ts, src/utils/prompts.ts, src/utils/logger.ts, src/utils/shutdown.ts`

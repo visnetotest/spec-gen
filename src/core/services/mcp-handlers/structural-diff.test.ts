@@ -134,3 +134,71 @@ describe('handleStructuralDiff', () => {
     expect(r.summary.removedFunctions).toBe(0);
   });
 });
+
+// ── Rename-stable matching via content-addressed stable id ─────────────────────
+// (change: add-content-addressed-stable-symbol-ids)
+describe('handleStructuralDiff — stable-id matching', () => {
+  let repo: string;
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), 'struct-diff-sid-'));
+    git(repo, ['init', '-q', '-b', 'main']);
+    git(repo, ['config', 'user.name', 'T']); git(repo, ['config', 'user.email', 't@e.com']);
+    git(repo, ['config', 'commit.gpgsign', 'false']);
+    // v1: `mover` and `shifter` live in a.ts; `stay` in b.ts.
+    write(repo, 'src/a.ts',
+      `export function mover(p: string): number { return p.length; }\n` +
+      `export function shifter(n: number): number { return n; }\n`);
+    write(repo, 'src/b.ts', `export function stay(): void {}\n`);
+    git(repo, ['add', '.']); git(repo, ['commit', '-q', '-m', 'v1', '--no-gpg-sign']);
+    // v2 (working tree): `mover` moved to b.ts unchanged; `shifter` moved to b.ts
+    // with an added modifier (signature differs, param shape identical).
+    write(repo, 'src/a.ts', `// emptied\n`);
+    write(repo, 'src/b.ts',
+      `export function stay(): void {}\n` +
+      `export function mover(p: string): number { return p.length; }\n` +
+      `export async function shifter(n: number): number { return n; }\n`);
+    vi.mocked(readCachedContext).mockResolvedValue(null as never);
+  });
+
+  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+  it('reports a pure cross-file move as the same symbol, not remove+add', async () => {
+    const r = await handleStructuralDiff({ directory: repo, baseRef: 'HEAD' }) as {
+      added: Array<{ name: string }>; removed: Array<{ name: string }>;
+      renameCandidates: Array<{ from: { name: string; file: string }; to: { name: string; file: string }; confidence: string }>;
+    };
+    expect(r.added.map(n => n.name)).not.toContain('mover');
+    expect(r.removed.map(n => n.name)).not.toContain('mover');
+    const move = r.renameCandidates.find(c => c.from.name === 'mover');
+    expect(move).toBeDefined();
+    expect(move!.confidence).toBe('exact');
+    expect(move!.from.file).toBe('src/a.ts');
+    expect(move!.to.file).toBe('src/b.ts');
+  });
+
+  it('reports a moved symbol with a modifier-only signature change as modified', async () => {
+    const r = await handleStructuralDiff({ directory: repo, baseRef: 'HEAD' }) as {
+      added: Array<{ name: string }>; removed: Array<{ name: string }>;
+      signatureChanged: Array<{ name: string; before: string; after: string }>;
+    };
+    expect(r.added.map(n => n.name)).not.toContain('shifter');
+    expect(r.removed.map(n => n.name)).not.toContain('shifter');
+    const sig = r.signatureChanged.find(s => s.name === 'shifter');
+    expect(sig).toBeDefined();
+    expect(sig!.after).toContain('async');
+  });
+
+  it('still pairs an anonymous-style identifier rename via the heuristic fallback', async () => {
+    // Rename a free function in place (same file, same shape, different name) —
+    // stable id differs (name is in it), so the heuristic shape-pairing applies.
+    write(repo, 'src/a.ts', `export function renamedInPlace(p: string): number { return p.length; }\n`);
+    write(repo, 'src/b.ts', `export function stay(): void {}\nexport function shifter(n: number): number { return n; }\n`);
+    const r = await handleStructuralDiff({ directory: repo, baseRef: 'HEAD' }) as {
+      renameCandidates: Array<{ from: { name: string }; to: { name: string }; confidence: string }>;
+    };
+    const heuristic = r.renameCandidates.find(c => c.from.name === 'mover' && c.to.name === 'renamedInPlace');
+    expect(heuristic).toBeDefined();
+    expect(heuristic!.confidence).toBe('high'); // same file, same shape
+  });
+});

@@ -35,6 +35,8 @@ export interface AnchorNode {
   filePath: string;
   /** Current hash of the node's source span. */
   contentHash: string;
+  /** Content-addressed stable id, when the symbol has a derivable one. */
+  stableId?: string;
 }
 
 /** Current-state lookups used to compute freshness against the live graph. */
@@ -44,6 +46,14 @@ export interface GraphFreshnessView {
   fileExists(filePath: string): boolean;
   /** Current whole-file content hash, or `undefined` if the file is gone. */
   fileHash(filePath: string): string | undefined;
+  /**
+   * Resolve a symbol by its content-addressed stable id when its `nodeId` no
+   * longer matches (the symbol was moved/renamed-file but otherwise survives).
+   * Returns the relocated node's id + current span hash, or `undefined` when no
+   * unambiguous node carries that stable id. Optional — absent on legacy views.
+   * (change: add-content-addressed-stable-symbol-ids)
+   */
+  resolveStableId?(stableId: string): { nodeId: string; contentHash: string } | undefined;
   /**
    * Confident rename mapping: given an absent node id, the new location label
    * (e.g. `newFile.ts::newName`) when `structural_diff` mapped it, else undefined.
@@ -79,6 +89,7 @@ export function resolveSymbolAnchors(
     seen.add(node.id);
     out.push({
       nodeId: node.id,
+      ...(node.stableId ? { stableId: node.stableId } : {}),
       symbolName: node.name,
       filePath: node.filePath,
       contentHash: node.contentHash,
@@ -103,13 +114,29 @@ export function anchorFreshness(
   // Symbol-level anchor.
   if (anchor.nodeId) {
     const current = view.nodeHash(anchor.nodeId);
-    if (current === undefined) {
-      const relocatedTo = view.renameOf?.(anchor.nodeId);
-      return relocatedTo
-        ? { anchor, freshness: 'drifted', relocatedTo }
-        : { anchor, freshness: 'orphaned' };
+    // nodeId takes precedence: a still-resolving node is decided here, never via
+    // stableId (add-content-addressed-stable-symbol-ids).
+    if (current !== undefined) {
+      return { anchor, freshness: current === anchor.contentHash ? 'fresh' : 'drifted' };
     }
-    return { anchor, freshness: current === anchor.contentHash ? 'fresh' : 'drifted' };
+    // nodeId miss — the symbol may have moved/renamed-file. Re-resolve by its
+    // content-addressed stable id: a relocated-but-unchanged symbol is `fresh`,
+    // a relocated-and-changed one is `drifted` — no longer `orphaned`.
+    if (anchor.stableId) {
+      const relocated = view.resolveStableId?.(anchor.stableId);
+      if (relocated) {
+        return {
+          anchor,
+          freshness: relocated.contentHash === anchor.contentHash ? 'fresh' : 'drifted',
+          relocatedTo: relocated.nodeId,
+        };
+      }
+    }
+    // Last resort — the existing heuristic rename map, then orphaned.
+    const relocatedTo = view.renameOf?.(anchor.nodeId);
+    return relocatedTo
+      ? { anchor, freshness: 'drifted', relocatedTo }
+      : { anchor, freshness: 'orphaned' };
   }
 
   // File-level anchor.

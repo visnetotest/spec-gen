@@ -28,6 +28,7 @@ import { buildProjectedIac } from './iac/index.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
 import { buildFunctionCfg, type FunctionCfg, type CfgNode } from './cfg.js';
+import { stableSymbolId, stableClassId } from '../scip/moniker.js';
 import { logger } from '../../utils/logger.js';
 
 // ============================================================================
@@ -106,6 +107,14 @@ export interface FunctionNode {
   communityLabel?: string;
   /** McCabe cyclomatic complexity computed from AST body slice (1 = linear, ≥10 = complex) */
   cyclomaticComplexity?: number;
+  /**
+   * Content-addressed, location-independent stable identity (change:
+   * add-content-addressed-stable-symbol-ids). Derived from the qualified name +
+   * signature shape, excluding the file path — so it survives a rename/move.
+   * Additive: the path-based `id` remains the canonical key. Absent for
+   * anonymous/synthetic symbols with no derivable descriptor.
+   */
+  stableId?: string;
 }
 
 /** Broad category of an external (unresolved) call */
@@ -262,6 +271,13 @@ export interface ClassNode {
   fanOut: number;
   /** True for synthetic file-level module nodes (free functions grouped by file) */
   isModule?: boolean;
+  /**
+   * Content-addressed, location-independent stable identity (change:
+   * add-content-addressed-stable-symbol-ids); the escaped class name, excluding
+   * the file path. Absent for synthetic module groupings. Additive — `id`
+   * remains canonical.
+   */
+  stableId?: string;
 }
 
 /**
@@ -4542,6 +4558,12 @@ export class CallGraphBuilder {
     const classIds = new Set(classes.map(c => c.id));
     for (const c of iacClasses) if (!classIds.has(c.id)) classes.push(c);
 
+    // Pass 8: Content-addressed stable ids (change: add-content-addressed-stable-symbol-ids).
+    // Pure post-pass over the fully-built node set — keeps the per-language
+    // extractors untouched and the derivation in one place.
+    assignStableIds(allNodes.values());
+    assignClassStableIds(classes);
+
     return {
       nodes: allNodes,
       edges,
@@ -4590,6 +4612,59 @@ export class CallGraphBuilder {
 // ============================================================================
 // SERIALIZATION HELPER
 // ============================================================================
+
+/**
+ * Assign a content-addressed `stableId` to every internal function node that has
+ * a derivable descriptor (change: add-content-addressed-stable-symbol-ids).
+ *
+ * A symbol's stable id excludes its file path, so two distinct same-named,
+ * same-signature symbols in different files share a base id. Such collisions are
+ * broken with a deterministic source-order ordinal (`~0`, `~1`, …) so every
+ * stable id is unique within a run and identical across runs. External and
+ * anonymous/synthetic symbols receive none (they keep only the path-based `id`).
+ */
+function assignStableIds(nodes: Iterable<FunctionNode>): void {
+  const byBase = new Map<string, FunctionNode[]>();
+  for (const n of nodes) {
+    if (n.isExternal) continue;
+    const base = stableSymbolId(n);
+    if (!base) continue;
+    const group = byBase.get(base);
+    if (group) group.push(n);
+    else byBase.set(base, [n]);
+  }
+  for (const [base, group] of byBase) {
+    if (group.length === 1) {
+      group[0].stableId = base;
+      continue;
+    }
+    group.sort((a, b) =>
+      a.filePath.localeCompare(b.filePath) ||
+      a.startIndex - b.startIndex ||
+      a.id.localeCompare(b.id));
+    group.forEach((n, i) => { n.stableId = `${base}~${i}`; });
+  }
+}
+
+/** Stable ids for class/module nodes — same base+ordinal scheme as functions. */
+function assignClassStableIds(classes: ClassNode[]): void {
+  const byBase = new Map<string, ClassNode[]>();
+  for (const c of classes) {
+    const base = stableClassId(c.name, c.isModule);
+    if (!base) continue;
+    const group = byBase.get(base);
+    if (group) group.push(c);
+    else byBase.set(base, [c]);
+  }
+  for (const [base, group] of byBase) {
+    if (group.length === 1) {
+      group[0].stableId = base;
+      continue;
+    }
+    group.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.id.localeCompare(b.id));
+    group.forEach((c, i) => { c.stableId = `${base}~${i}`; });
+  }
+}
 
 export function serializeCallGraph(result: CallGraphResult): SerializedCallGraph {
   return {
