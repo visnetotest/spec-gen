@@ -340,6 +340,12 @@ The system SHALL ensure that at most one forced graph rebuild runs per directory
 
 > Decision recorded: f0885af9
 > Date: 2026-06-07
+### Requirement: InstallJsonMergesPreserveUserFormattingViaJsoncparserPathEdits
+
+The system SHALL preserve user formatting in existing JSON configuration files by applying minimal path-level edits to only OpenLore-managed keys.
+
+> Decision recorded: df27e8ef
+> Date: 2026-06-16
 
 ## Technical Notes
 
@@ -476,3 +482,13 @@ Two independent code paths (schema-reset healer and watcher-debounced re-analyze
 Surface 'which functions are structural anchors and why' as a set of labeled signals with raw evidence, not a blended salience score. A composite (hub*40+orchestrator*20+...) would be deterministic-but-arbitrary — a black box the agent must trust — violating the north-star principle (c6d1ad07). computeLandmarkSignals reuses existing classifiers with no new thresholds: hub (fanIn>=5), orchestrator (fanOut>=GOD_FUNCTION_FAN_OUT_THRESHOLD), chokepoint (hub ∧ ¬orchestrator), entrypoint, volatile (reuses volatilityLevel from change-coupling), dead (reuses dead-code roots+forward-BFS). Each signal carries raw evidence. No score, no rank field; ordering is the caller's responsibility. A get_landmarks tool is classified conclusion under the tool contract and ships in the opt-in navigation preset only.
 
 **Consequences:** No LANDMARK_WEIGHTS constant or composite salience introduced (explicitly rejected). computeLandmarkSignals takes optional opts (volatilityByFile, deadIds) so pure structural labels need only the graph while volatile/dead are injected from git/reachability — keeping core unit-testable. A deadCodeIds helper added to reachability.ts shares the documented roots definition with handleFindDeadCode. Phase 1 (signals) + Phase 3 (get_landmarks tool) ship now; Phase 2 (orient landmarks[] proximity-ordered enrichment) deferred to follow-up.
+
+### Install JSON merges preserve user formatting via jsonc-parser path edits
+
+**Status:** Approved
+**Date:** 2026-06-16
+**ID:** df27e8ef
+
+When the target file already exists, applying JSON.stringify rewrites the entire file and clobbers user formatting (e.g. collapsing multi-line arrays, normalizing indent), producing noisy git diffs and violating the merge-not-clobber install contract. Fix: use jsonc-parser (a zero-dependency JSON-CST editor from the VS Code ecosystem) to apply minimal edits to only the OpenLore-managed paths, with formatting options detected from the file. This is preferred over hand-rolling text edits (error-prone) or indent-detection-only fixes (still normalizes intra-line formatting). New files are still created with JSON.stringify.
+
+**Consequences:** Adds jsonc-parser as a runtime dependency. A shared helper (json-managed.ts) applies path edits preserving byte-identical formatting for untouched keys. The claude-code adapter's settings.json and .mcp.json writes use it for apply and uninstall. Other adapters (cursor, continue) can adopt the same helper.
