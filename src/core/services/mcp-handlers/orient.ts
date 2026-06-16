@@ -581,7 +581,7 @@ export async function handleOrient(
       const cg = llmCtx.callGraph as SerializedCallGraph;
       const { computeLandmarkSignals } = await import('../../analyzer/landmark-signals.js');
       const { buildWeightedAdjacency, weightedBfs } = await import('./graph.js');
-      const { personalizedPageRank } = await import('../../analyzer/personalized-pagerank.js');
+      const { personalizedPageRank, mergeUndirected } = await import('../../analyzer/personalized-pagerank.js');
       const { volatilityLevel } = await import('../../provenance/change-coupling.js');
 
       // volatile from the persisted churn table; dead intentionally omitted.
@@ -608,13 +608,7 @@ export async function handleOrient(
       if (seedIds.length > 0 && landmarkById.size > 0) {
         // Undirected weighted adjacency: a nearby caller OR callee is "near".
         const { forward, backward } = buildWeightedAdjacency(cg);
-        const undirected = new Map<string, Array<{ to: string; cost: number }>>();
-        for (const m of [forward, backward]) {
-          for (const [k, arr] of m) {
-            const cur = undirected.get(k);
-            if (cur) cur.push(...arr); else undirected.set(k, [...arr]);
-          }
-        }
+        const undirected = mergeUndirected(forward, backward);
         // Default: order the task's nearby structural anchors by call-distance proximity.
         // Opt-in pagerank mode: order the SAME candidates by query-conditioned connectivity
         // (personalized PageRank seeded on the matched functions) over the same bounded

@@ -997,12 +997,14 @@ export async function handleGetMinimalContext(
     const ordered = pagerank
       ? [...items].sort((a, b) => b._rel - a._rel || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       : [...items].sort((a, b) => a.distance - b.distance || b._rank - a._rank);
-    const capped = ordered.slice(0, kCap);
-    const { kept, omitted } = budget ? applyTokenBudget(capped, budget) : { kept: capped, omitted: 0 };
-    const list = kept.map(({ id: _id, _rank, _rel, ...rest }) =>
+    // Project to the FINAL returned shape BEFORE budgeting, so the token estimate is
+    // costed on what's actually emitted (the long `id`/`_rank`/`_rel` scratch fields are
+    // dropped here, not measured) rather than over-counting and over-reporting overflow.
+    const projected = ordered.slice(0, kCap).map(({ id: _id, _rank, _rel, ...rest }) =>
       pagerank ? { ...rest, relevance: Math.round(_rel * 1e6) / 1e6 } : rest,
     );
-    return { list, omitted };
+    const { kept, omitted } = budget ? applyTokenBudget(projected, budget) : { kept: projected, omitted: 0 };
+    return { list: kept, omitted };
   };
 
   // Callers: nearest-by-call-distance over the backward (callee→caller) adjacency.
