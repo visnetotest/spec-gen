@@ -8,6 +8,44 @@
  */
 
 import { createHash } from 'node:crypto';
+import { modify, applyEdits, type FormattingOptions } from 'jsonc-parser';
+
+/** A minimal edit into an existing JSON document: set `path` to `value`, or delete it when `value` is undefined. */
+export interface JsonPathEdit {
+  path: (string | number)[];
+  value: unknown;
+}
+
+/** Infer indent unit + line ending from an existing JSON file so edits match the user's style. */
+export function detectJsonFormatting(text: string): FormattingOptions {
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  // First indented content line reveals the unit (tabs or N spaces).
+  const m = text.match(/\n([ \t]+)\S/);
+  if (m) {
+    const ws = m[1];
+    if (ws.startsWith('\t')) return { tabSize: 1, insertSpaces: false, eol };
+    return { tabSize: ws.length, insertSpaces: true, eol };
+  }
+  return { tabSize: 2, insertSpaces: true, eol };
+}
+
+/**
+ * Apply path edits to an existing JSON document's TEXT, preserving the formatting of every
+ * region OpenLore does not touch (indent style, key order, spacing, untouched values). Only
+ * the edited paths are re-rendered, using formatting detected from the original. This replaces
+ * reparse→`JSON.stringify` writes, which reformat the user's whole file (decision df27e8ef).
+ */
+export function editJsonPreservingFormat(originalText: string, edits: JsonPathEdit[]): string {
+  const formattingOptions = detectJsonFormatting(originalText);
+  let text = originalText;
+  for (const { path, value } of edits) {
+    // modify() with value === undefined removes the property; a no-op (e.g. deleting an absent
+    // path) returns no edits, so every edit is safe to attempt unconditionally.
+    const e = modify(text, path, value, { formattingOptions });
+    text = applyEdits(text, e);
+  }
+  return text;
+}
 
 export interface ManagedJsonMeta {
   managed: true;

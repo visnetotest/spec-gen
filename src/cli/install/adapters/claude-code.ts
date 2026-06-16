@@ -13,7 +13,7 @@
 import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { applyMarkdownBlock, uninstallMarkdownBlock } from './markdown-block.js';
-import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-managed.js';
+import { mergeEntries, readMeta, removeManaged, isHandEdited, editJsonPreservingFormat, type JsonPathEdit } from '../json-managed.js';
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 
@@ -72,6 +72,71 @@ async function readJsonOrEmpty(path: string): Promise<Record<string, unknown>> {
   }
 }
 
+/** Read a file's raw text, or null if it doesn't exist / can't be read. */
+async function readRawOrNull(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/** True when `raw` is a parseable JSON object — i.e. safe for format-preserving path edits. */
+function isJsonObjectText(raw: string | null): boolean {
+  if (raw == null) return false;
+  try {
+    const p = JSON.parse(raw);
+    return !!p && typeof p === 'object' && !Array.isArray(p);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Serialize the managed update to `path`. When the file already exists with parseable JSON, edit
+ * ONLY the managed paths on the original text (preserving the user's formatting); otherwise emit a
+ * fresh pretty-printed document. Keeps install merge-not-clobber down to the byte (decision df27e8ef).
+ */
+function serializeManaged(
+  rawOriginal: string | null,
+  nextObject: Record<string, unknown>,
+  edits: JsonPathEdit[],
+): string {
+  if (isJsonObjectText(rawOriginal)) return editJsonPreservingFormat(rawOriginal as string, edits);
+  return JSON.stringify(nextObject, null, 2) + '\n';
+}
+
+function valueAt(obj: Record<string, unknown>, segs: string[]): unknown {
+  let cur: unknown = obj;
+  for (const s of segs) {
+    if (!cur || typeof cur !== 'object') return undefined;
+    cur = (cur as Record<string, unknown>)[s];
+  }
+  return cur;
+}
+
+/**
+ * Path edits that remove every OpenLore-managed entry (the meta's `paths` plus the top-level
+ * `_openlore` marker) from a parsed JSON doc, pruning any parent object our entry was the sole
+ * key of — mirroring `removeManaged`/`deletePath` but as format-preserving text edits.
+ */
+function managedRemovalEdits(parsed: Record<string, unknown>): JsonPathEdit[] {
+  const edits: JsonPathEdit[] = [];
+  const meta = readMeta(parsed);
+  for (const dotted of meta?.paths ?? []) {
+    const segs = dotted.split('.');
+    edits.push({ path: [...segs], value: undefined });
+    for (let i = segs.length - 1; i >= 1; i--) {
+      const parent = valueAt(parsed, segs.slice(0, i));
+      if (parent && typeof parent === 'object' && !Array.isArray(parent) && Object.keys(parent).length === 1) {
+        edits.push({ path: segs.slice(0, i), value: undefined });
+      } else break;
+    }
+  }
+  if ('_openlore' in parsed) edits.push({ path: ['_openlore'], value: undefined });
+  return edits;
+}
+
 async function fileExists(path: string): Promise<boolean> {
   try {
     await readFile(path);
@@ -110,8 +175,12 @@ export const claudeCodeAdapter: Adapter = {
     const { next: nextMcp, action: mcpAction } = mergeEntries(existingMcp, [
       { path: 'mcpServers.openlore', value: MCP_ENTRY },
     ]);
-    const mcpBefore = hadMcp ? JSON.stringify(existingMcp, null, 2) + '\n' : '';
-    const mcpAfter = JSON.stringify(nextMcp, null, 2) + '\n';
+    const rawMcp = hadMcp ? await readRawOrNull(mcpPath) : null;
+    const mcpBefore = hadMcp ? (rawMcp ?? JSON.stringify(existingMcp, null, 2) + '\n') : '';
+    const mcpAfter = serializeManaged(rawMcp, nextMcp, [
+      { path: ['mcpServers', 'openlore'], value: MCP_ENTRY },
+      { path: ['_openlore'], value: (nextMcp as Record<string, unknown>)._openlore },
+    ]);
     mdResult.changes.push({
       path: mcpPath,
       kind: !hadMcp ? 'create' : mcpAction === 'noop' ? 'noop' : 'update',
@@ -133,8 +202,9 @@ export const claudeCodeAdapter: Adapter = {
 
     // --- 2. SessionStart hook → .claude/settings.json (marker-identified) ---
     const settingsPath = join(ctx.root, SETTINGS_PATH);
+    const rawSettings = await readRawOrNull(settingsPath);
+    const had = rawSettings != null;
     const existing = await readJsonOrEmpty(settingsPath);
-    const had = await fileExists(settingsPath);
 
     // Migrate away the legacy mcpServers.openlore + meta a prior version wrote
     // here (settings.json is never read for MCP). removeManaged strips the
@@ -151,9 +221,24 @@ export const claudeCodeAdapter: Adapter = {
     if (!next.hooks || typeof next.hooks !== 'object') next.hooks = {};
     (next.hooks as Record<string, unknown>).SessionStart = nextSessionStart;
 
+    // Edit only what we manage: drop any legacy meta / mis-placed mcpServers.openlore (settings.json
+    // is never read for MCP), and set our marker-identified SessionStart group. Everything else in the
+    // user's settings.json is preserved byte-for-byte.
+    const settingsEdits: JsonPathEdit[] = [];
+    if ('_openlore' in existing) settingsEdits.push({ path: ['_openlore'], value: undefined });
+    const legacyMcp = existing.mcpServers as Record<string, unknown> | undefined;
+    if (legacyMcp && 'openlore' in legacyMcp) {
+      settingsEdits.push(
+        Object.keys(legacyMcp).length === 1
+          ? { path: ['mcpServers'], value: undefined }
+          : { path: ['mcpServers', 'openlore'], value: undefined },
+      );
+    }
+    settingsEdits.push({ path: ['hooks', 'SessionStart'], value: nextSessionStart });
+
     const changed = JSON.stringify(existing) !== JSON.stringify(next);
-    const before = had ? JSON.stringify(existing, null, 2) + '\n' : '';
-    const after = JSON.stringify(next, null, 2) + '\n';
+    const before = had ? (rawSettings ?? '') : '';
+    const after = serializeManaged(rawSettings, next, settingsEdits);
     const change: PlannedChange = {
       path: settingsPath,
       kind: !had ? 'create' : !changed ? 'noop' : 'update',
@@ -188,7 +273,8 @@ export const claudeCodeAdapter: Adapter = {
     // Strip mcpServers.openlore from .mcp.json; delete the file if it was ours.
     const mcpPath = join(ctx.root, MCP_PATH);
     try {
-      const parsedMcp = JSON.parse(await readFile(mcpPath, 'utf8')) as Record<string, unknown>;
+      const rawMcp = await readFile(mcpPath, 'utf8');
+      const parsedMcp = JSON.parse(rawMcp) as Record<string, unknown>;
       const { next, removed } = removeManaged(parsedMcp);
       if (removed) {
         if (Object.keys(next).length === 0) {
@@ -199,7 +285,7 @@ export const claudeCodeAdapter: Adapter = {
             summary: `remove ${MCP_PATH} (was OpenLore-only)`,
           });
         } else {
-          if (!ctx.dryRun) await writeFile(mcpPath, JSON.stringify(next, null, 2) + '\n', 'utf8');
+          if (!ctx.dryRun) await writeFile(mcpPath, serializeManaged(rawMcp, next, managedRemovalEdits(parsedMcp)), 'utf8');
           md.changes.push({
             path: mcpPath,
             kind: 'update',
@@ -212,29 +298,37 @@ export const claudeCodeAdapter: Adapter = {
     }
 
     const settingsPath = join(ctx.root, SETTINGS_PATH);
+    const rawSettings = await readRawOrNull(settingsPath);
+    if (rawSettings == null) return md;
     let parsed: Record<string, unknown>;
     try {
-      parsed = JSON.parse(await readFile(settingsPath, 'utf8'));
+      parsed = JSON.parse(rawSettings);
     } catch {
       return md;
     }
     // Strip our SessionStart entry (identified by the `_openlore` marker, not by
-    // the managed-paths meta).
+    // the managed-paths meta). Build the removal as format-preserving path edits AND mutate a
+    // copy to decide noop / file-now-empty, so the user's other settings stay byte-identical.
     let changed = false;
+    const removalEdits: JsonPathEdit[] = [];
     const hooksObj = parsed.hooks as Record<string, unknown> | undefined;
     if (hooksObj && Array.isArray(hooksObj.SessionStart)) {
       const filtered = stripOurSessionStart(hooksObj.SessionStart);
       if (filtered.length !== hooksObj.SessionStart.length) changed = true;
       if (filtered.length === 0) {
+        removalEdits.push({ path: ['hooks', 'SessionStart'], value: undefined });
+        if (Object.keys(hooksObj).length === 1) removalEdits.push({ path: ['hooks'], value: undefined });
         delete hooksObj.SessionStart;
         if (Object.keys(hooksObj).length === 0) delete parsed.hooks;
       } else {
+        removalEdits.push({ path: ['hooks', 'SessionStart'], value: filtered });
         hooksObj.SessionStart = filtered;
       }
     }
 
     // Also strip any legacy managed entry (mcpServers.openlore + meta) a prior
     // version wrote here before MCP moved to .mcp.json.
+    removalEdits.push(...managedRemovalEdits(parsed));
     const { next, removed } = removeManaged(parsed);
     if (removed) changed = true;
     if (!changed) return md;
@@ -249,7 +343,7 @@ export const claudeCodeAdapter: Adapter = {
         summary: `remove ${SETTINGS_PATH} (was OpenLore-only)`,
       });
     } else {
-      if (!ctx.dryRun) await writeFile(settingsPath, JSON.stringify(next, null, 2) + '\n', 'utf8');
+      if (!ctx.dryRun) await writeFile(settingsPath, serializeManaged(rawSettings, next, removalEdits), 'utf8');
       md.changes.push({
         path: settingsPath,
         kind: 'update',

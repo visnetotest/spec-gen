@@ -241,3 +241,61 @@ describe('openlore install (end-to-end)', () => {
     expect(await exists(join(dir, 'AGENTS.md'))).toBe(true); // universal fallback
   });
 });
+
+// ============================================================================
+// settings.json format preservation (decision df27e8ef)
+// Regression guard for the dogfood finding: install/uninstall reparsed +
+// JSON.stringify'd the user's settings.json, reformatting untouched sections
+// (e.g. a multi-line empty array collapsed; a 4-space/tab file forced to 2-space).
+// ============================================================================
+
+describe('openlore install — settings.json format preservation', () => {
+  let dir: string;
+  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'openlore-fmt-')); });
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  async function writeSettings(text: string) {
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    await writeFile(join(dir, '.claude/settings.json'), text, 'utf8');
+  }
+  const read = () => readFile(join(dir, '.claude/settings.json'), 'utf8');
+
+  it('preserves a 4-space-indented untouched section and indents the added hook to match', async () => {
+    const orig = '{\n    "permissions": {\n        "allow": [\n            "Read"\n        ]\n    }\n}\n';
+    await writeSettings(orig);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false });
+    const after = await read();
+    // the user's block is preserved verbatim
+    expect(after).toContain('    "permissions": {\n        "allow": [\n            "Read"\n        ]\n    }');
+    // the added hook uses the user's 4-space unit, not a forced 2-space
+    expect(after).toMatch(/\n {4}"hooks": \{\n {8}"SessionStart"/);
+    expect(after).toContain('SessionStart');
+  });
+
+  it('preserves a tab-indented file', async () => {
+    const orig = '{\n\t"permissions": {\n\t\t"allow": [\n\t\t\t"Read"\n\t\t]\n\t}\n}\n';
+    await writeSettings(orig);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false });
+    const after = await read();
+    expect(after).toContain('\n\t"permissions": {\n\t\t"allow": [');
+    expect(after).toMatch(/\n\t"hooks": \{\n\t\t"SessionStart"/);
+  });
+
+  it('does not normalize an untouched multi-line empty array', async () => {
+    const orig = '{\n  "permissions": {\n    "deny": [\n    ]\n  }\n}\n';
+    await writeSettings(orig);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false });
+    const after = await read();
+    // the user's hand-formatted empty array survives (would collapse to [] under JSON.stringify)
+    expect(after).toContain('"deny": [\n    ]');
+  });
+
+  it('install then uninstall round-trips a user settings.json byte-for-byte', async () => {
+    const orig = '{\n  "permissions": {\n    "allow": [\n      "Read",\n      "Bash(*)"\n    ],\n    "deny": [\n    ]\n  }\n}\n';
+    await writeSettings(orig);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false });
+    expect(await read()).not.toBe(orig); // hook was added
+    await runInstall({ cwd: dir, agent: 'claude-code', uninstall: true });
+    expect(await read()).toBe(orig); // byte-identical after removal
+  });
+});
