@@ -139,7 +139,8 @@
     "tree-sitter-cli": "file:stubs/tree-sitter-cli-stub",
     "@google/genai": { "protobufjs": "^7.6.4" },
     "ws": "^8.21.0",
-    "js-yaml": "^4.2.0"
+    "js-yaml": "^4.2.0",
+    "hono": "^4.12.25"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.79.0",
