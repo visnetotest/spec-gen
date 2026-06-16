@@ -212,7 +212,7 @@ describe('updateTracker — git hash invalidation', () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
 
-  it('goes stale immediately when git hash changes', () => {
+  it('flags repo-moved and degrades (never forces stale) when git hash changes', () => {
     const t = freshTracker();
     t.graphVersionAtOrient = 'old-hash';
     // Advance past git check interval so the check fires
@@ -220,10 +220,14 @@ describe('updateTracker — git hash invalidation', () => {
     mockSpawnSync.mockReturnValueOnce({ stdout: 'new-hash\n', status: 0 } as ReturnType<typeof spawnSync>);
 
     updateTracker(t, 'search_code', '/fake/repo');
-    expect(t.freshnessState).toBe('stale');
+    // The agent's own commits move HEAD; that is a factual index-lag signal, not a reason
+    // to expire its model — so we flag it and at most nudge fresh → degraded, never stale.
+    expect(t.repoMovedSinceOrient).toBe(true);
+    expect(t.freshnessState).toBe('degraded');
+    expect(t.staleDepth).toBe(0);
   });
 
-  it('stays fresh when git hash unchanged', () => {
+  it('stays fresh and unflagged when git hash unchanged', () => {
     const t = freshTracker();
     t.graphVersionAtOrient = 'same-hash';
     vi.advanceTimersByTime(31_000);
@@ -231,6 +235,7 @@ describe('updateTracker — git hash invalidation', () => {
 
     updateTracker(t, 'search_code', '/fake/repo');
     expect(t.freshnessState).toBe('fresh');
+    expect(t.repoMovedSinceOrient).toBe(false);
   });
 
   it('skips git check within interval window', () => {
@@ -245,14 +250,26 @@ describe('updateTracker — git hash invalidation', () => {
     expect(t.freshnessState).toBe('fresh');
   });
 
-  it('git-divergence stale transition starts at depth 1 (load and age below d2 thresholds)', () => {
+  it('git divergence alone never forces stale or a stale depth', () => {
     const t = freshTracker();
     t.graphVersionAtOrient = 'old-hash';
     vi.advanceTimersByTime(31_000);
     mockSpawnSync.mockReturnValueOnce({ stdout: 'new-hash\n', status: 0 } as ReturnType<typeof spawnSync>);
     updateTracker(t, 'search_code', '/fake/repo');
-    expect(t.freshnessState).toBe('stale');
-    expect(t.staleDepth).toBe(1);
+    expect(t.freshnessState).not.toBe('stale');
+    expect(t.staleDepth).toBe(0);
+  });
+
+  it('repo-moved flag persists once set, even if a later check sees the same new hash', () => {
+    const t = freshTracker();
+    t.graphVersionAtOrient = 'old-hash';
+    vi.advanceTimersByTime(31_000);
+    mockSpawnSync.mockReturnValueOnce({ stdout: 'new-hash\n', status: 0 } as ReturnType<typeof spawnSync>);
+    updateTracker(t, 'search_code', '/fake/repo');
+    expect(t.repoMovedSinceOrient).toBe(true);
+    // orient() clears it (full reset)
+    updateTracker(t, 'orient', '/fake/repo');
+    expect(t.repoMovedSinceOrient).toBe(false);
   });
 
   it('skips git comparison when either hash is empty', () => {
@@ -354,42 +371,40 @@ describe('injectFreshness', () => {
     t.freshnessState = 'degraded';
     const out = injectFreshness('tool result', t);
     expect(out.startsWith('tool result')).toBe(true);
-    expect(out).toContain('EPISTEMIC LEASE: DEGRADED');
+    expect(out).toContain('openlore freshness');
     expect(out).toContain('orient()');
   });
 
-  it('prepends stale block — agent sees it first', () => {
+  it('prepends stale note — agent sees it first', () => {
     const t = freshTracker();
     t.freshnessState = 'stale';
     const out = injectFreshness('tool result', t);
-    expect(out.indexOf('EPISTEMIC LEASE: STALE')).toBeLessThan(out.indexOf('tool result'));
+    expect(out.indexOf('openlore freshness')).toBeLessThan(out.indexOf('tool result'));
   });
 
-  it('stale block contains capability-invalidation language (depth 1)', () => {
+  it('signal is neutral and factual — no coercive / prompt-injection-style language', () => {
     const t = freshTracker();
-    t.freshnessState = 'stale';
-    t.staleDepth = 1;
-    const out = injectFreshness('', t);
-    expect(out).toContain('Cached architectural reasoning reliability: LOW');
-    expect(out).toContain('Cross-module dependency assumptions: UNRELIABLE');
-    expect(out).toContain('Internal repository model: NOT AUTHORITATIVE');
+    // Check every state/depth variant carries none of the old imperative rhetoric.
+    for (const [state, depth] of [['degraded', 0], ['stale', 1], ['stale', 2], ['stale', 3]] as const) {
+      t.freshnessState = state;
+      t.staleDepth = depth;
+      const out = injectFreshness('', t);
+      expect(out).toContain('openlore freshness');
+      expect(out).toContain('orient()');
+      expect(out).toContain('Informational signal');
+      for (const banned of ['STOP', 'EXPIRED', 'Do NOT', 'do not use', 'CRITICAL', 'NOT AUTHORITATIVE', 'HALLUCINATION', '╔', '║']) {
+        expect(out, `depth ${depth} must not contain "${banned}"`).not.toContain(banned);
+      }
+    }
   });
 
-  it('degraded signal contains orient call-to-action', () => {
-    const t = freshTracker();
-    t.freshnessState = 'degraded';
-    const out = injectFreshness('', t);
-    expect(out).toContain('orient()');
-    expect(out).toContain('DEGRADED');
-  });
-
-  it('stale block shows age in minutes', () => {
+  it('stale note shows age in minutes', () => {
     vi.useFakeTimers();
     const t = freshTracker();
     t.freshnessState = 'stale';
     vi.advanceTimersByTime(25 * 60 * 1000);
     const out = injectFreshness('', t);
-    expect(out).toContain('25min');
+    expect(out).toContain('25 min');
     vi.useRealTimers();
   });
 
@@ -399,16 +414,25 @@ describe('injectFreshness', () => {
     t.modulesVisited.add('auth');
     t.modulesVisited.add('billing');
     const out = injectFreshness('', t);
-    expect(out).toContain('modules visited: 2');
+    expect(out).toContain('2 modules');
   });
 
-  it('stale block shows cognitive load score', () => {
+  it('stale note shows the cognitive-load score', () => {
     const t = freshTracker();
     t.freshnessState = 'stale';
     t.staleDepth = 1;
     t.cognitiveLoad = 42;
     const out = injectFreshness('', t);
-    expect(out).toContain('42');
+    expect(out).toContain('42 cognitive-load points');
+  });
+
+  it('surfaces the repo-moved fact only when the repo has moved since orient', () => {
+    const t = freshTracker();
+    t.freshnessState = 'stale';
+    t.staleDepth = 1;
+    expect(injectFreshness('', t)).not.toContain('new commits since then');
+    t.repoMovedSinceOrient = true;
+    expect(injectFreshness('', t)).toContain('new commits since then');
   });
 });
 
@@ -445,22 +469,23 @@ describe('stale depth escalation', () => {
     expect(t.staleDepth).toBe(3);
   });
 
-  it('escalates depth 1 → 2 via time when already stale', () => {
+  it('does NOT escalate depth via elapsed time when already stale (load drives severity)', () => {
     const t = freshTracker();
     t.freshnessState = 'stale';
     t.staleDepth = 1;
-    // Advance to 45+ minutes
-    vi.advanceTimersByTime(46 * 60 * 1000);
-    updateTracker(t, 'list_spec_domains', '/fake/repo');
-    expect(t.staleDepth).toBe(2);
-  });
-
-  it('escalates depth 2 → 3 via time when already stale', () => {
-    const t = freshTracker();
-    t.freshnessState = 'stale';
-    t.staleDepth = 2;
+    t.cognitiveLoad = 60; // depth-1 load; idle time should not push it higher
+    // Even an hour later, a light call does not escalate depth on the clock alone.
     vi.advanceTimersByTime(61 * 60 * 1000);
     updateTracker(t, 'list_spec_domains', '/fake/repo');
+    expect(t.staleDepth).toBe(1);
+  });
+
+  it('escalates to depth 3 on a post-stale burst (heavy architectural tool)', () => {
+    const t = freshTracker();
+    t.freshnessState = 'stale';
+    t.staleDepth = 1;
+    // A heavy architectural trace (weight 8) is a genuine activity burst, not the clock.
+    updateTracker(t, 'trace_execution_path', '/fake/repo');
     expect(t.staleDepth).toBe(3);
   });
 
@@ -482,47 +507,33 @@ describe('stale depth escalation', () => {
     expect(t.freshnessState).toBe('fresh');
   });
 
-  it('depth 1 block contains procedural NOT-DO instructions', () => {
+  it('depth 1 note is the plain factual frame (no severity qualifier)', () => {
     const t = freshTracker();
     t.freshnessState = 'stale';
     t.staleDepth = 1;
     const out = injectFreshness('', t);
-    expect(out).toContain('Do NOT rely on previous dependency assumptions');
-    expect(out).toContain('STALE');
-    expect(out).not.toContain('[ELEVATED]');
-    expect(out).not.toContain('[CRITICAL]');
+    expect(out).toContain('openlore freshness');
+    expect(out).toContain('orient()');
+    expect(out).not.toContain('accumulated since then'); // the depth ≥2 qualifier
   });
 
-  it('depth 2 block names downstream risks', () => {
+  it('depth 2 note adds a neutral "fair amount of analysis" qualifier', () => {
     const t = freshTracker();
     t.freshnessState = 'stale';
     t.staleDepth = 2;
     const out = injectFreshness('', t);
-    expect(out).toContain('[ELEVATED]');
-    expect(out).toContain('HALLUCINATION RISK');
+    expect(out).toContain('fair amount of analysis');
+    expect(out).not.toContain('HALLUCINATION');
   });
 
-  it('depth 3 block is imperative — STOP command present', () => {
+  it('depth 3 note suggests re-orienting (neutral) — no STOP / EXPIRED', () => {
     const t = freshTracker();
     t.freshnessState = 'stale';
     t.staleDepth = 3;
     const out = injectFreshness('', t);
-    expect(out).toContain('[CRITICAL]');
-    expect(out).toContain('STOP');
-    expect(out).toContain('CRITICALLY LOW');
-  });
-
-  it('depth 3 block is shorter than depth 1 — harder to skim', () => {
-    const t = freshTracker();
-    t.freshnessState = 'stale';
-
-    t.staleDepth = 1;
-    const d1 = injectFreshness('', t);
-
-    t.staleDepth = 3;
-    const d3 = injectFreshness('', t);
-
-    expect(d3.length).toBeLessThan(d1.length);
+    expect(out).toContain('re-orienting is likely worthwhile');
+    expect(out).not.toContain('STOP');
+    expect(out).not.toContain('EXPIRED');
   });
 });
 

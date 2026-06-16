@@ -5055,6 +5055,13 @@ The system SHALL support an opt-in personalized-PageRank ranking mode for query-
 > Decision recorded: 0bdd4319
 > Date: 2026-06-16
 
+### Requirement: EpistemicLeaseEmitsNeutralFreshnessFactsNotCoerciveImperatives
+
+The system SHALL surface epistemic-lease freshness as neutral factual signals (elapsed time, cognitive load, index-behind-HEAD) rather than imperative commands directed at the consuming agent.
+
+> Decision recorded: 8e95746d
+> Date: 2026-06-16
+
 ## Technical Notes
 
 - **Implementation**: `src/core/analyzer/repository-mapper.ts, src/api/types.ts, src/core/analyzer/embedding-service.ts, src/core/analyzer/subgraph-extractor.ts, src/core/analyzer/architecture-writer.ts, src/core/analyzer/dependency-graph.ts, src/core/analyzer/spec-vector-index.ts, src/core/analyzer/file-walker.ts, src/core/analyzer/import-resolver-bridge.ts, src/core/analyzer/refactor-analyzer.ts, src/core/analyzer/vector-index.ts, src/core/analyzer/import-parser.ts, src/core/analyzer/signature-extractor.ts, src/core/analyzer/artifact-generator.ts, src/core/analyzer/cpp-header-resolver.ts, src/core/analyzer/call-graph.ts, src/core/analyzer/duplicate-detector.ts, src/core/analyzer/type-inference-engine.ts, src/core/analyzer/significance-scorer.ts, src/core/analyzer/http-route-parser.ts, src/core/analyzer/ast-chunker.ts, src/core/analyzer/codebase-digest.ts, src/utils/progress.ts, src/utils/prompts.ts, src/utils/logger.ts, src/utils/shutdown.ts`
@@ -5421,3 +5428,13 @@ Two distinct same-file symbols that collide on the path-based node id (file::Cla
 Shortest-path distance ranks a candidate by its single cheapest path to the task seeds; it cannot capture multi-path / connectivity-weighted relevance. Personalized PageRank (random-walk-with-restart seeded on the task's matched symbols) ranks a candidate by how many ways and how densely it is connected to the task, which is a better objective for pulling the most task-relevant functions into a fixed token budget. This is exposed strictly as an opt-in retrieval ranking mode on existing handlers (orient, get_minimal_context), seeded by the task-symbol set orient already computes — it is query-conditioned, never a global task-independent importance number. It refines the scope of the add-structural-landmark-salience decision (c6d1ad07 lineage) to global salience only; it does not overturn it. It introduces no new tuning constant — damping (0.85) and convergence tolerance (1e-6) are extracted to shared named constants with the existing PageRank in dependency-graph.ts. It must demonstrate lift over the distance ranker on >=2 real repos or be closed.
 
 **Consequences:** Adds an opt-in rankBy: "pagerank" mode to orient and get_minimal_context; default behavior of every handler stays byte-identical and the distance ranker is retained. A new deterministic personalized-PageRank primitive is added over the in-memory call graph (sorted-id iteration, id tie-break, distance-bounded neighborhood). No new MCP tool and no change to default/minimal/preset tool surfaces. If the acceptance comparison shows no lift, the change is closed and the landmark decision is left intact.
+
+### Epistemic lease emits neutral freshness facts, not coercive imperatives
+
+**Status:** Approved
+**Date:** 2026-06-16
+**ID:** 8e95746d
+
+The epistemic-lease feature injected escalating imperative language into every MCP tool response (STOP, "Repository model: EXPIRED", "do NOT…"). This is structurally a prompt-injection pattern — it trains agents to obey authoritative imperatives in tool output, the exact behavior agents must resist — and contradicts the north-star decision (c6d1ad07: deterministic structural facts, not guessing) and the landmark-salience principle (hand the agent facts, let it rank). Wall-clock age alone escalated to CRITICAL (false positive), and the agent's own commits flipped the lease to stale via git-hash divergence even though committing is the most-informed action in a session. Fix: emit a single neutral, factual freshness note (minutes since orient, cognitive load since orient, whether the analysis index is behind HEAD) phrased as information the agent can act on, not a command. Drive severity from accumulated cognitive load, not wall clock.
+
+**Consequences:** staleBlock/degradedSignal reworded to neutral facts (no STOP/EXPIRED/do-NOT, no system-banner box art); git-hash divergence no longer forces stale — it sets a factual index-behind-HEAD flag and at most contributes to degraded; computeStaleDepth driven by cognitive load, not wall-clock age; decay tracking, cross-module density/oscillation model, and telemetry retained; epistemic-lease gains a spec requirement (mcp-handlers) and ADR where it previously had neither.

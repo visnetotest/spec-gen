@@ -6,23 +6,28 @@
  * that agents drifting toward internally cached reasoning ("repo fiction") see
  * confidence decay even when they have stopped calling orient/graph tools.
  *
- * Decay triggers (any one sufficient):
+ * Decay triggers:
  *   - Time: >15min → degraded, >30min → stale
- *   - Git hash divergence from orient baseline → immediate stale
  *   - Weighted cognitive load: >30 → degraded, >60 → stale
  *   - Cross-module trajectory density: ≥0.15 → degraded, ≥0.30 → stale
  *     Density = module switches in last 15 calls / window size.
  *     Each switch also adds +5 debt; high-density window +15; burst +20.
+ *   - Git divergence from the orient baseline (the repo moved — very often the agent's OWN
+ *     commits) → a factual "repo moved since orient" flag surfaced in the note. It nudges
+ *     fresh→degraded but NEVER forces stale: committing well-understood work is the most-
+ *     informed action in a session, not a reason to expire the agent's model.
  *
- * Stale escalates through 3 depths to prevent warning blindness:
- *   - Depth 1 (load≥60, age≥30min): procedural — explains what NOT to do
- *   - Depth 2 (load≥85, age≥45min): risk-framing — names downstream consequences
- *   - Depth 3 (load≥110, age≥60min): imperative — minimal text, hardest to skim
+ * Severity within stale ("depth") is driven by accumulated cognitive load, NOT the wall
+ * clock (depth 1: load≥60, depth 2: load≥85, depth 3: load≥110), so idle-but-oriented
+ * minutes never escalate to CRITICAL.
  *
- * Injection:
+ * The injected signal is a NEUTRAL, FACTUAL note — facts the agent can act on, not an
+ * imperative it must obey. Injecting authoritative commands ("STOP", "do NOT…") into tool
+ * output is structurally a prompt-injection pattern and contradicts OpenLore's facts-not-
+ * coercion north star (decision 8e95746d, lineage c6d1ad07).
  *   - fresh    → no injection (zero overhead)
- *   - degraded → 3-line signal appended (low friction)
- *   - stale    → depth-varying capability-invalidation block prepended
+ *   - degraded → one-line factual note appended (low friction)
+ *   - stale    → one-line factual note prepended (visible before the result)
  */
 
 import { spawnSync } from 'node:child_process';
@@ -63,6 +68,10 @@ export interface EpistemicTracker {
   lastSwitchAt: number;
   /** V3.2: oscillation score — repeated bigram transitions / total transitions [0,1]. */
   oscillation: number;
+  /** V4: repo HEAD has moved (new commits) since the last orient — a factual index-lag
+   *  signal surfaced in the freshness note. It does NOT by itself force a stale state:
+   *  the agent's own commits are the most-informed action, not a reason to expire its model. */
+  repoMovedSinceOrient: boolean;
 }
 
 // ============================================================================
@@ -138,8 +147,8 @@ const STALE_D3_LOAD_THRESHOLD = 110;
 
 const DEGRADE_AGE_MS  = 15 * 60 * 1000;
 const STALE_AGE_MS    = 30 * 60 * 1000;
-const STALE_D2_AGE_MS = 45 * 60 * 1000;
-const STALE_D3_AGE_MS = 60 * 60 * 1000;
+// Severity (stale depth) is load-driven, not age-driven (see computeStaleDepth), so
+// there are no D2/D3 age thresholds: wall-clock minutes never escalate to CRITICAL.
 
 const GIT_CHECK_INTERVAL_MS    = 30_000;
 
@@ -259,11 +268,15 @@ function computeOscillationScore(window: (string | null)[]): number {
 // ============================================================================
 // STALE DEPTH
 // Monotonic — depth can only increase, never decrease until orient() reset.
+// Driven by accumulated cognitive load (real work done since orient), NOT by the
+// wall clock: an agent that is idle but well-oriented is not "more stale" with
+// every minute. Time still moves fresh→degraded→stale, but severity within stale
+// reflects how much reasoning has piled up, not elapsed minutes.
 // ============================================================================
 
-function computeStaleDepth(load: number, ageMs: number): StaleDepth {
-  if (load >= STALE_D3_LOAD_THRESHOLD || ageMs >= STALE_D3_AGE_MS) return 3;
-  if (load >= STALE_D2_LOAD_THRESHOLD || ageMs >= STALE_D2_AGE_MS) return 2;
+function computeStaleDepth(load: number): StaleDepth {
+  if (load >= STALE_D3_LOAD_THRESHOLD) return 3;
+  if (load >= STALE_D2_LOAD_THRESHOLD) return 2;
   return 1;
 }
 
@@ -286,6 +299,7 @@ export function createTracker(directory: string): EpistemicTracker {
     lastDensityPenaltyAt: 0,
     lastSwitchAt: 0,
     oscillation: 0,
+    repoMovedSinceOrient: false,
   };
 }
 
@@ -302,12 +316,13 @@ function resetTracker(tracker: EpistemicTracker, directory: string): void {
   tracker.lastDensityPenaltyAt = 0;
   tracker.lastSwitchAt = 0;
   tracker.oscillation = 0;
+  tracker.repoMovedSinceOrient = false;
   // sourceRoots not reset — project layout doesn't change during a session
 }
 
-function transitionToStale(tracker: EpistemicTracker, load: number, ageMs: number): void {
+function transitionToStale(tracker: EpistemicTracker, load: number): void {
   tracker.freshnessState = 'stale';
-  tracker.staleDepth = computeStaleDepth(load, ageMs);
+  tracker.staleDepth = computeStaleDepth(load);
 }
 
 export function updateTracker(
@@ -360,7 +375,7 @@ export function updateTracker(
       tracker.staleDepth = 3;
       return;
     }
-    const newDepth = computeStaleDepth(tracker.cognitiveLoad, ageMs);
+    const newDepth = computeStaleDepth(tracker.cognitiveLoad);
     if (newDepth > tracker.staleDepth) {
       emit(directory, 'epistemic-lease', {
         event: 'depth_escalate', from_depth: tracker.staleDepth, to_depth: newDepth,
@@ -396,21 +411,28 @@ export function updateTracker(
   const ageMin = Math.floor(ageMs / 60_000);
   const telCtx = { tool: toolName, module: mod, cognitive_load: tracker.cognitiveLoad, density, oscillation, age_min: ageMin };
 
-  // Rate-limited git hash check (~every 30s) — structural invalidation
+  // Rate-limited git hash check (~every 30s). The repo moving since orient (very often
+  // the agent's OWN commits) is a factual index-lag signal — surfaced in the note — not a
+  // reason to expire the agent's model. Flag it; at most nudge fresh → degraded. Never
+  // force stale/critical: committing well-understood work is the most-informed action.
   if (now - tracker.lastGitCheckAt > GIT_CHECK_INTERVAL_MS) {
     tracker.lastGitCheckAt = now;
     const currentHash = getGitHash(directory);
     if (currentHash && tracker.graphVersionAtOrient && currentHash !== tracker.graphVersionAtOrient) {
-      transitionToStale(tracker, tracker.cognitiveLoad, ageMs);
-      emit(directory, 'epistemic-lease', { event: 'stale', trigger: 'git', depth: tracker.staleDepth as StaleDepth, ...telCtx });
-      return;
+      if (!tracker.repoMovedSinceOrient) {
+        tracker.repoMovedSinceOrient = true;
+        if (tracker.freshnessState === 'fresh') {
+          tracker.freshnessState = 'degraded';
+        }
+        emit(directory, 'epistemic-lease', { event: 'repo_moved', trigger: 'git', state: tracker.freshnessState, ...telCtx });
+      }
     }
   }
 
   // State transitions: stale > degraded > fresh (never reverses)
   if (ageMs >= STALE_AGE_MS || tracker.cognitiveLoad >= STALE_LOAD_THRESHOLD || density >= CROSS_MODULE_STALE_DENSITY) {
     const trigger = density >= CROSS_MODULE_STALE_DENSITY ? 'density' : tracker.cognitiveLoad >= STALE_LOAD_THRESHOLD ? 'load' : 'time';
-    transitionToStale(tracker, tracker.cognitiveLoad, ageMs);
+    transitionToStale(tracker, tracker.cognitiveLoad);
     emit(directory, 'epistemic-lease', { event: 'stale', trigger, depth: tracker.staleDepth as StaleDepth, ...telCtx });
   } else if (
     tracker.freshnessState === 'fresh' && (
@@ -428,64 +450,48 @@ export function updateTracker(
 // ============================================================================
 // FRESHNESS SIGNALS
 //
-// Stale depth variants use different rhetorical strategies to resist blindness:
-//   Depth 1 — procedural: enumerates what NOT to do, offers orient()
-//   Depth 2 — consequential: names downstream risks of ignoring the signal
-//   Depth 3 — imperative: minimal text, command form, hardest to skim past
-//
-// Degraded: appended (low friction, visible but not blocking).
-// Stale:    prepended (agent sees it before reading any result).
+// One neutral, factual note. Severity (depth) only adds a short factual qualifier about how
+// much analysis has accumulated since orient — no escalating rhetoric, no coercion, no
+// system-banner styling. The agent reads the facts and decides.
+//   Degraded: appended (low friction, visible but not blocking).
+//   Stale:    prepended (visible before the result).
 // ============================================================================
 
-function staleBlock(ageMin: number, load: number, depth: StaleDepth): string {
-  const header =
-    `\n╔══════════════════════════════════════════════════════════╗\n` +
-    (depth === 1
-      ? `║  EPISTEMIC LEASE: STALE                                  ║\n`
-      : depth === 2
-      ? `║  EPISTEMIC LEASE: STALE [ELEVATED]                       ║\n`
-      : `║  EPISTEMIC LEASE: STALE [CRITICAL]                       ║\n`) +
-    `╚══════════════════════════════════════════════════════════╝\n` +
-    `Context age: ${ageMin}min | Cognitive load score: ${load}\n\n`;
-
-  const body =
-    depth === 1
-      ? (
-        `Cached architectural reasoning reliability: LOW\n` +
-        `Cross-module dependency assumptions: UNRELIABLE\n` +
-        `Internal repository model: NOT AUTHORITATIVE\n\n` +
-        `Before continuing:\n` +
-        `  - Do NOT rely on previous dependency assumptions\n` +
-        `  - Do NOT infer cross-module relationships from memory\n` +
-        `  - Do NOT compile delegation prompts from cached architectural model\n` +
-        `  - Do NOT continue architectural reasoning from internal state\n\n` +
-        `Call orient() to restore architectural authority.\n`
-      )
-      : depth === 2
-      ? (
-        `Dependency assumptions: NO LONGER AUTHORITATIVE\n` +
-        `Architectural inference from memory: HIGH HALLUCINATION RISK\n` +
-        `Delegation prompt compilation: UNSAFE — context unreliable\n\n` +
-        `Continuing without orient() risks embedding stale architectural\n` +
-        `assumptions into refactor plans, cross-module reasoning, and\n` +
-        `delegation context that cannot easily be corrected downstream.\n\n` +
-        `orient() required before architectural decisions.\n`
-      )
-      : (
-        `Cross-module reasoning reliability: CRITICALLY LOW\n` +
-        `Repository model: EXPIRED — do not use for architectural decisions\n\n` +
-        `STOP. Call orient() before any architectural reasoning.\n`
-      );
-
-  return header + body + `─────────────────────────────────────────────────────────────\n\n`;
+/** Factual clause appended when the repo has new commits since the last orient(). */
+function repoMovedClause(repoMoved: boolean): string {
+  return repoMoved
+    ? ' The repo has new commits since then, so the cached structure may not match HEAD.'
+    : '';
 }
 
-function degradedSignal(ageMin: number, modules: number): string {
+/**
+ * Neutral, factual freshness note — information the agent can act on, NOT an imperative it
+ * must obey. No system-banner box art, no STOP / EXPIRED / "do NOT" language: injecting
+ * authoritative commands into tool output is structurally a prompt-injection pattern, and
+ * it contradicts OpenLore's facts-not-coercion north star (decision 8e95746d, lineage
+ * c6d1ad07). Severity (`depth`) reflects accumulated cognitive load, not elapsed minutes.
+ */
+function staleBlock(ageMin: number, load: number, depth: StaleDepth, repoMoved: boolean): string {
+  const detail =
+    depth >= 3
+      ? ' A lot of analysis has accumulated since then, so re-orienting is likely worthwhile.'
+      : depth === 2
+      ? ' A fair amount of analysis has accumulated since then.'
+      : '';
   return (
-    `\n─────────────────────────────────────────────────────────────\n` +
-    `[EPISTEMIC LEASE: DEGRADED | age: ${ageMin}min | modules visited: ${modules}]\n` +
-    `Cross-module dependency assumptions: reduced confidence.\n` +
-    `Call orient() before architectural decisions or delegation prompt compilation.\n`
+    `\n[openlore freshness] ${ageMin} min and ${load} cognitive-load points since the last ` +
+    `orient().${repoMovedClause(repoMoved)}${detail} Structural facts cached earlier may be out ` +
+    `of date — consider re-running orient(), or get_minimal_context / get_subgraph for a specific ` +
+    `area, before relying on cross-module assumptions. Informational signal; you decide whether ` +
+    `to act on it.\n`
+  );
+}
+
+function degradedSignal(ageMin: number, modules: number, repoMoved: boolean): string {
+  return (
+    `\n[openlore freshness] ${ageMin} min and ${modules} modules since the last orient().` +
+    `${repoMovedClause(repoMoved)} Cached cross-module structure may be drifting — consider ` +
+    `re-running orient() if you're relying on it. Informational signal.\n`
   );
 }
 
@@ -507,13 +513,13 @@ export function getFreshnessSignal(
   if (tracker.freshnessState === 'stale') {
     // staleDepth is always ≥1 when freshnessState === 'stale' — invariant enforced by transitionToStale.
     return {
-      text: staleBlock(ageMin, tracker.cognitiveLoad, tracker.staleDepth as StaleDepth),
+      text: staleBlock(ageMin, tracker.cognitiveLoad, tracker.staleDepth as StaleDepth, tracker.repoMovedSinceOrient),
       prepend: true,
     };
   }
 
   return {
-    text: degradedSignal(ageMin, tracker.modulesVisited.size),
+    text: degradedSignal(ageMin, tracker.modulesVisited.size, tracker.repoMovedSinceOrient),
     prepend: false,
   };
 }
