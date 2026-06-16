@@ -72,24 +72,70 @@ export function qualifiedName(node: FunctionNode): string {
   return node.className ? `${node.className}.${node.name}` : node.name;
 }
 
+/** Index of the matching `)` for the `(` at `open`, or `-1` if unbalanced. */
+function matchingClose(sig: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < sig.length; i++) {
+    if (sig[i] === '(') depth++;
+    else if (sig[i] === ')' && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/**
+ * Does the `(` at `open` genuinely open `name`'s PARAMETER list — as opposed to a
+ * call nested in an expression body (Ruby `def total; compute(5); end`, Scala
+ * `def total = compute(5)`, a paren-less arrow's `g(a)`) or a Go method receiver
+ * `(recv)`? A parameter list is `name(...)`: the token immediately before the `(`
+ * is the symbol's OWN name (or, for operator methods, its operator). The one
+ * exception is a lambda assigned to the symbol (`= (a) => …`), where the `(`
+ * follows `=`/`>` and its matching `)` is followed by `=>`.
+ */
+function opensParamGroup(sig: string, open: number, name: string): boolean {
+  let j = open - 1;
+  while (j >= 0 && /\s/.test(sig[j])) j--;
+  if (j < 0) return true; // signature is just "(...)" — that IS the param group
+  // Identifier run ending at j: `save(` / `helper(`.
+  let k = j;
+  while (k >= 0 && /\w/.test(sig[k])) k--;
+  if (k < j) return sig.slice(k + 1, j + 1) === name; // name(...) yes, helper(...) no
+  // No identifier before `(` → an operator run (`+`, `<=>`) or punctuation (`=`, `:`).
+  let m = j;
+  while (m >= 0 && !/[\w\s()]/.test(sig[m])) m--;
+  if (m < j && sig.slice(m + 1, j + 1) === name) return true; // operator method: +(x)
+  // Punctuation-led (`= (`, `: (`): accept only an assigned lambda `(...) =>`.
+  const close = matchingClose(sig, open);
+  return close !== -1 && /^\s*=>/.test(sig.slice(close + 1));
+}
+
 /**
  * Index of the `(` that opens the PARAMETER group in a captured signature, or
- * `-1` when there is none. Normally the first `(`, but a Go method signature is
- * `func (recv) Name(params)` — the first `(` is the *receiver*, not the params —
- * so for Go, when the text before the first `(` is exactly the `func` keyword (no
- * method name between), the receiver group is skipped and the next `(` is returned.
+ * `-1` when there is none.
  *
- * The skip is GATED ON `language === 'Go'`. `func` is a legal, common identifier
- * in JS/TS/Python/C/Ruby/…; a class method named `func` has signature `func(a)`
- * whose prefix also trims to `func`, so without the language gate the receiver-skip
- * would misfire and silently drop the real parameter group (corrupting that
- * symbol's identity). Go and Swift reserve `func`, so the gate is safe there.
+ * When the symbol's `name` is known, detection is NAME-ANCHORED: the first `(`
+ * that {@link opensParamGroup} (i.e. `name(...)` or an assigned lambda). This
+ * skips a Go method receiver (`func (recv) Name(params)` — the receiver `(` is
+ * preceded by `func`, not the method name) AND, crucially, refuses to mistake a
+ * call inside an expression body for the parameter list — e.g. Ruby
+ * `def total; compute(5); end` or Scala `def total = compute(5)`, whose captured
+ * signature includes the body. Without this the body leaks into the parameter
+ * shape and the `stableId` stops being body-invariant (a body edit would flip it,
+ * so a moved-and-edited symbol would read `orphaned` instead of `drifted`).
+ *
+ * When `name` is absent (bare unit-test calls) the legacy heuristic is used: the
+ * first `(`, with a `language === 'Go'` gate to skip a `func (recv)` receiver.
  */
-function parameterGroupStart(sig: string, language?: string): number {
+function parameterGroupStart(sig: string, language?: string, name?: string): number {
   const first = sig.indexOf('(');
   if (first === -1) return -1;
+  if (name) {
+    for (let i = first; i !== -1; i = sig.indexOf('(', i + 1)) {
+      if (opensParamGroup(sig, i, name)) return i;
+    }
+    return -1; // a paren-less def whose body happens to contain '(' → no param group
+  }
+  // Legacy (no name): first '(', with the Go method receiver skip.
   if (language !== 'Go' || sig.slice(0, first).trim() !== 'func') return first;
-  // Go method: skip the balanced receiver group, then take the next '('.
   let depth = 0;
   for (let i = first; i < sig.length; i++) {
     if (sig[i] === '(') depth++;
@@ -110,7 +156,7 @@ function parameterGroupStart(sig: string, language?: string): number {
 export function arityOf(node: FunctionNode): number | undefined {
   const sig = node.signature;
   if (!sig) return undefined;
-  const open = parameterGroupStart(sig, node.language);
+  const open = parameterGroupStart(sig, node.language, node.name);
   if (open === -1) return undefined;
   // Walk to the matching close paren, counting top-level commas.
   let depth = 0;
@@ -163,14 +209,16 @@ const STABLE_ID_PREFIX = 'sid:';
  *    `stableId` BODY-INVARIANT — essential so a moved-and-edited symbol resolves as
  *    `drifted` (not `orphaned`) via its anchor's `stableId`.
  *
- * For a Go method (`func (recv) Name(params)`) the leading receiver group is
- * skipped (see {@link parameterGroupStart}) so the shape is the real parameters,
- * not the receiver variable. Pass the symbol's `language` so the Go-receiver skip
- * is gated correctly. Returns `''` when there is no parameter group.
+ * Pass the symbol's `name` (and `language`) so the parameter group is located by
+ * {@link parameterGroupStart}: this skips a Go method receiver and refuses to
+ * mistake a call inside an expression body (Ruby/Scala paren-less defs, paren-less
+ * arrows) for the parameters — keeping the shape genuinely body-invariant. With no
+ * `name` (bare unit-test calls) the legacy first-`(` heuristic is used.
+ * Returns `''` when there is no parameter group.
  */
-export function signatureShape(signature: string | undefined, language?: string): string {
+export function signatureShape(signature: string | undefined, language?: string, name?: string): string {
   if (!signature) return '';
-  const open = parameterGroupStart(signature, language);
+  const open = parameterGroupStart(signature, language, name);
   if (open === -1) return '';
   // Walk to the matching close paren (tracking nesting), then slice the group.
   let depth = 0;
@@ -225,7 +273,7 @@ function hasDerivableName(name: string | undefined): boolean {
  */
 export function stableSymbolId(node: FunctionNode): string | undefined {
   if (!hasDerivableName(node.name)) return undefined;
-  const shape = signatureShape(node.signature, node.language);
+  const shape = signatureShape(node.signature, node.language, node.name);
   return `${STABLE_ID_PREFIX}${escapedQualifiedName(node)}${shape || '()'}`;
 }
 

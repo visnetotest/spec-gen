@@ -4949,6 +4949,8 @@ The system SHALL compute, for every named function and class symbol, a content-a
 >
 > Go method receivers and Rust `impl Trait for Struct` / generic `impl` blocks ARE correctly attributed to the implementing type. The `stableId` derivation itself is correct wherever the container is.
 >
+> Parameter group is located by the symbol's own name (`name(...)`), not the first `(` in the captured signature. This is required for genuine body-invariance in languages whose captured signature includes the body of a *paren-less* definition — Ruby (`def total; compute(5); end`), Scala (`def total = compute(5)`), and paren-less arrows (`const f = a => g(a)`): the body call `compute(5)` must NOT be mistaken for the parameter list, or a body edit would flip the `stableId`. A Go method receiver (`func (recv) Name(p)`, the receiver `(` is preceded by `func`, not the method name) and an arg-bearing decorator preceding the def are likewise skipped; an assigned lambda (`= (a) => …`) is recognized as the parameter list.
+>
 > Signature-shape sensitivity: the normalized shape is the source text of the parameter group with whitespace collapsed; it does not strip comments physically inside the parameter list nor canonicalize default-value expressions, so editing an in-parameter comment or a brace-delimited default value changes the `stableId`. This only weakens body/edit-invariance in those narrow cases and always fails *safe* — the symbol falls back to remove+add (diff) or `orphaned` (anchor), never to a wrong identity. A literal-aware comment stripper was deliberately not added (a naive strip would corrupt string-literal defaults such as URLs, *creating* collisions).
 
 ### Requirement: AdditiveStableIdentity

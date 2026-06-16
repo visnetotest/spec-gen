@@ -60,6 +60,32 @@ describe('stableSymbolId (unit)', () => {
     expect(stableSymbolId(v2)).toBe(stableSymbolId(v1));
   });
 
+  it('is body-invariant for paren-less defs whose captured body contains a call', () => {
+    // Ruby/Scala (and paren-less arrows) capture the body in the signature. The
+    // parameter group is `name(...)`, NOT the first `(` — a body call like
+    // `helper(1, 2)` must not be mistaken for the parameters, or a body edit would
+    // flip the id and a moved-and-edited symbol would read orphaned, not drifted.
+    const ruby1 = { name: 'compute', className: 'Repo', language: 'Ruby', signature: 'def compute helper(1, 2) end' } as FunctionNode;
+    const ruby2 = { name: 'compute', className: 'Repo', language: 'Ruby', signature: 'def compute helper(9, 9, 9) end' } as FunctionNode;
+    expect(stableSymbolId(ruby1)).toBe('sid:Repo.compute()');
+    expect(stableSymbolId(ruby2)).toBe(stableSymbolId(ruby1));
+
+    const scala1 = { name: 'total', className: 'Repo', language: 'Scala', signature: 'def total = compute(5, 6)' } as FunctionNode;
+    const scala2 = { name: 'total', className: 'Repo', language: 'Scala', signature: 'def total = compute(7)' } as FunctionNode;
+    expect(stableSymbolId(scala1)).toBe('sid:Repo.total()');
+    expect(stableSymbolId(scala2)).toBe(stableSymbolId(scala1));
+
+    const arrow1 = { name: 'f', signature: 'const f = a => g(a)' } as FunctionNode;
+    const arrow2 = { name: 'f', signature: 'const f = a => h(a, b, c)' } as FunctionNode;
+    expect(stableSymbolId(arrow1)).toBe('sid:f()');
+    expect(stableSymbolId(arrow2)).toBe(stableSymbolId(arrow1));
+
+    // A real parameter list that follows the name is still captured (not dropped),
+    // and an arg'd decorator preceding the def is skipped — the params win.
+    const real = { name: 'list_users', signature: '@app.route("/u", methods=["GET"]) def list_users(req)' } as FunctionNode;
+    expect(stableSymbolId(real)).toBe('sid:list_users(req)');
+  });
+
   it('excludes the return type from the shape (return-type change keeps the id)', () => {
     const a = { name: 'f', signature: 'function f(x: number): void' } as FunctionNode;
     const b = { name: 'f', signature: 'function f(x: number): Promise<void>' } as FunctionNode;

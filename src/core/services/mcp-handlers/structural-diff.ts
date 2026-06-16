@@ -225,7 +225,7 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
   }
   for (const r of removed) {
     for (const a of added) {
-      const sameShape = signatureShape(r.signature, r.language) && signatureShape(r.signature, r.language) === signatureShape(a.signature, a.language);
+      const sameShape = signatureShape(r.signature, r.language, r.name) && signatureShape(r.signature, r.language, r.name) === signatureShape(a.signature, a.language, a.name);
       const sameFile = r.filePath === a.filePath;
       if (!sameShape) continue;
       const confidence = sameFile ? 'high' : 'medium';
