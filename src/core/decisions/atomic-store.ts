@@ -23,7 +23,7 @@
  *      `*.corrupt-<n>` and signal it, instead of silently substituting empty.
  */
 
-import { open, rename, stat, unlink, mkdir, access } from 'node:fs/promises';
+import { open, rename, stat, unlink, mkdir, access, readFile, link } from 'node:fs/promises';
 import { dirname, basename, join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 
@@ -78,31 +78,37 @@ export async function atomicWriteFile(path: string, data: string): Promise<void>
 // ── advisory lock for the tiny compare-and-write commit section ───────────────
 
 // STALE < MAX_WAIT by design: a crashed holder's lock always becomes stealable
-// (10s) well before a waiter gives up (30s), so the best-effort unlocked fallback
-// is only ever reached under genuine sustained contention — implausible for these
-// tiny critical sections — never because of a dead holder.
+// (10s) well before a waiter gives up (30s), so a wait timeout means genuine
+// sustained contention — implausible for these tiny critical sections — never a
+// dead holder. On timeout we fail loud rather than write unlocked: for a store
+// whose promise is "no write is lost," a rare surfaced error the caller can retry
+// beats a rare silent lost update.
 const LOCK_STALE_MS = 10_000; // steal a lock older than this (crashed holder)
 const LOCK_POLL_MS = 25;
 const LOCK_MAX_WAIT_MS = 30_000;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+// Globally-unique-among-live-holders lock token: pid is unique across concurrent
+// processes, the counter across concurrent in-process acquires.
+let lockSeq = 0;
+
 /**
  * Run `fn` while holding a per-file advisory lock (exclusive-create lockfile,
  * polled, with stale-steal for a crashed holder). The lock guards only the brief
- * compare-and-write commit, so contention is minimal. Best-effort on timeout: it
- * proceeds rather than block a writer forever (the CAS check still protects the
- * write from clobbering a committed change).
+ * compare-and-write commit, so contention is minimal. On a wait timeout it throws
+ * rather than proceed unlocked. The lock carries an ownership token and is released
+ * only if it is still ours — so if our hold was stolen as stale (e.g. a long GC
+ * pause) and recreated by another writer, we never delete a lock someone else holds.
  */
 async function withCommitLock<T>(lockPath: string, fn: () => Promise<T>): Promise<T> {
   await mkdir(dirname(lockPath), { recursive: true });
+  const token = `${process.pid}-${lockSeq++}`;
   const start = Date.now();
-  let acquired = false;
   for (;;) {
     try {
       const fh = await open(lockPath, 'wx'); // exclusive create — fails if held
-      await fh.writeFile(`${process.pid}`);
+      await fh.writeFile(token);
       await fh.close();
-      acquired = true;
       break;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
@@ -115,17 +121,23 @@ async function withCommitLock<T>(lockPath: string, fn: () => Promise<T>): Promis
       } catch {
         continue; // lock vanished between open and stat — retry
       }
-      if (Date.now() - start > LOCK_MAX_WAIT_MS) break; // best-effort: proceed unlocked
+      if (Date.now() - start > LOCK_MAX_WAIT_MS) {
+        throw new Error(
+          `store lock: timed out after ${LOCK_MAX_WAIT_MS}ms waiting for ${lockPath} ` +
+            `(sustained write contention) — retry the operation`,
+        );
+      }
       await sleep(LOCK_POLL_MS);
     }
   }
   try {
     return await fn();
   } finally {
-    // Only remove the lock if we actually created it. On a best-effort timeout we
-    // never acquired it, so unlinking here would delete the current holder's lock
-    // and break mutual exclusion exactly when contention is highest.
-    if (acquired) await unlink(lockPath).catch(() => {});
+    // Release only if the on-disk lock is still ours. A token mismatch means our
+    // hold was stolen as stale and another writer now owns it — leave theirs alone.
+    try {
+      if ((await readFile(lockPath, 'utf-8')) === token) await unlink(lockPath).catch(() => {});
+    } catch { /* lock already gone — nothing to release */ }
   }
 }
 
@@ -169,22 +181,55 @@ async function exists(p: string): Promise<boolean> {
  * `${path}.corrupt-<n>` and emit a recoverable signal, instead of silently
  * substituting an empty store (which would present absence as current fact).
  *
- * The suffix is the first free non-negative integer — derived from what is
- * already on disk, never wall-clock time — so recovery is reproducible. Returns
- * the quarantine path, or `null` if the move could not be performed (in which
- * case the caller still degrades to empty, but loudly).
+ * The suffix is the first free non-negative integer — derived from what is already
+ * on disk, never wall-clock time — so recovery is reproducible. The claim is atomic
+ * (a hard link that fails if the destination exists), so two concurrent loaders can
+ * never overwrite each other's quarantine file and lose preserved bytes. Returns the
+ * quarantine path, or `null` when the move was unnecessary or impossible (caller
+ * still degrades to empty, but loudly).
  */
 export async function quarantineCorrupt(path: string, reason: string): Promise<string | null> {
   try {
-    let n = 0;
-    while (await exists(`${path}.corrupt-${n}`)) n++;
-    const dest = `${path}.corrupt-${n}`;
-    await rename(path, dest);
-    logger.warning(
-      `store quarantine: ${path} failed validation (${reason}) — moved to ${dest}. ` +
-        `Persisted data was NOT silently dropped; inspect or restore the quarantined file.`,
-    );
-    return dest;
+    for (let n = 0; ; n++) {
+      const dest = `${path}.corrupt-${n}`;
+      try {
+        // Atomic claim: link succeeds only if `dest` does not yet exist, so a
+        // racing loader that took this `n` is never overwritten.
+        await link(path, dest);
+        await unlink(path); // link + unlink = move-without-clobber
+        logger.warning(
+          `store quarantine: ${path} failed validation (${reason}) — moved to ${dest}. ` +
+            `Persisted data was NOT silently dropped; inspect or restore the quarantined file.`,
+        );
+        return dest;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'EEXIST') continue; // a prior quarantine took this n — try the next
+        if (code === 'ENOENT') {
+          // `path` is already gone — a concurrent loader quarantined it first, so the
+          // bytes are preserved under its own suffix. Not a loss.
+          logger.warning(
+            `store quarantine: ${path} was already moved aside by a concurrent loader (${reason}).`,
+          );
+          return null;
+        }
+        if (code === 'EPERM' || code === 'ENOSYS' || code === 'EXDEV' || code === 'EMLINK') {
+          // Hard links unsupported on this filesystem — fall back to a plain rename
+          // to the first free suffix (loses the atomic-claim guarantee, but such
+          // filesystems are rare and concurrent corrupt-loads rarer still).
+          let m = 0;
+          while (await exists(`${path}.corrupt-${m}`)) m++;
+          const dest2 = `${path}.corrupt-${m}`;
+          await rename(path, dest2);
+          logger.warning(
+            `store quarantine: ${path} failed validation (${reason}) — moved to ${dest2}. ` +
+              `Persisted data was NOT silently dropped; inspect or restore the quarantined file.`,
+          );
+          return dest2;
+        }
+        throw err;
+      }
+    }
   } catch (err) {
     logger.warning(
       `store quarantine: ${path} failed validation (${reason}) and could not be moved aside ` +

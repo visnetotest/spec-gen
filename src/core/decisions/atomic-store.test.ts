@@ -7,7 +7,7 @@
  * ConcurrentMemoryWriteSafety. Plain .test.ts so CI runs it.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, mkdir, writeFile, readFile, readdir, stat } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile, readdir, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -130,6 +130,25 @@ describe('casUpdate', () => {
     expect(final.items.sort()).toEqual(Array.from({ length: N }, (_, i) => `w${i}`).sort());
     expect(final.sequence).toBe(N);
   });
+
+  it('steals a stale lock left by a crashed holder and still commits', async () => {
+    // Simulate a crashed writer: a lock file with an mtime well past the stale
+    // threshold (10s). casUpdate must steal it rather than block, and commit.
+    const lockPath = `${path()}.lock`;
+    await writeFile(lockPath, '99999-0', 'utf-8'); // some other process's token
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lockPath, old, old);
+
+    const result = await casUpdate<Store>({
+      storePath: path(),
+      load,
+      serialize,
+      mutate: (s) => ({ ...s, items: [...s.items, 'after-steal'] }),
+    });
+    expect(result.items).toEqual(['after-steal']);
+    // The lock we acquired (and owned) is released on completion.
+    await expect(readFile(lockPath, 'utf-8')).rejects.toThrow();
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -150,6 +169,32 @@ describe('quarantineCorrupt', () => {
     await writeFile(path, 'garbage', 'utf-8');
     const dest = await quarantineCorrupt(path, 'test');
     expect(dest).toBe(`${path}.corrupt-1`);
+  });
+
+  it('never overwrites an existing quarantine file (atomic claim preserves prior bytes)', async () => {
+    const path = join(root, 'notes.json');
+    await writeFile(`${path}.corrupt-0`, 'PRIOR', 'utf-8');
+    await writeFile(path, 'NEW garbage', 'utf-8');
+    const dest = await quarantineCorrupt(path, 'test');
+    expect(dest).toBe(`${path}.corrupt-1`);
+    // The earlier quarantine's bytes are intact — not clobbered.
+    expect(await readFile(`${path}.corrupt-0`, 'utf-8')).toBe('PRIOR');
+    expect(await readFile(`${path}.corrupt-1`, 'utf-8')).toBe('NEW garbage');
+  });
+
+  it('two concurrent quarantines of the same file preserve the bytes exactly once', async () => {
+    const path = join(root, 'notes.json');
+    await writeFile(path, 'ONLY COPY', 'utf-8');
+    const [a, b] = await Promise.all([
+      quarantineCorrupt(path, 'racer-a'),
+      quarantineCorrupt(path, 'racer-b'),
+    ]);
+    // Exactly one claim succeeds; the other sees the file already moved (null).
+    const winners = [a, b].filter((d): d is string => d !== null);
+    expect(winners).toHaveLength(1);
+    expect(await readFile(winners[0], 'utf-8')).toBe('ONLY COPY');
+    // Original path is gone (moved), not left as a duplicate.
+    await expect(readFile(path, 'utf-8')).rejects.toThrow();
   });
 });
 

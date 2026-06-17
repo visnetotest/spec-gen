@@ -232,11 +232,17 @@ export async function handleApproveDecision(
     if (!decision) return { error: `Decision ${id} not found.` };
     if (decision.status === 'synced') return { error: `Decision ${id} is already synced to spec files — re-approval not allowed.` };
 
-    await updateDecisionStore(rootPath, (s) => patchDecision(s, id, {
+    const committed = await updateDecisionStore(rootPath, (s) => patchDecision(s, id, {
       status: 'approved',
       reviewedAt: new Date().toISOString(),
       reviewNote: note,
     }));
+    // The patch no-ops if the decision was concurrently removed/synced — report
+    // honestly rather than a false success.
+    const after = committed.decisions.find((d) => d.id === id);
+    if (!after || after.status !== 'approved') {
+      return { error: `Decision ${id} could not be approved — it was concurrently removed or changed.` };
+    }
     emit(rootPath, 'decisions', { event: 'decision_approved', id, title: decision.title });
 
     return { id, status: 'approved', title: decision.title };
@@ -261,11 +267,15 @@ export async function handleRejectDecision(
     const decision = store.decisions.find((d) => d.id === id);
     if (!decision) return { error: `Decision ${id} not found.` };
 
-    await updateDecisionStore(rootPath, (s) => patchDecision(s, id, {
+    const committed = await updateDecisionStore(rootPath, (s) => patchDecision(s, id, {
       status: 'rejected',
       reviewedAt: new Date().toISOString(),
       reviewNote: note,
     }));
+    const after = committed.decisions.find((d) => d.id === id);
+    if (!after || after.status !== 'rejected') {
+      return { error: `Decision ${id} could not be rejected — it was concurrently removed or changed.` };
+    }
     emit(rootPath, 'decisions', { event: 'decision_rejected', id, title: decision.title });
 
     return { id, status: 'rejected', title: decision.title };

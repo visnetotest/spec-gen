@@ -50,12 +50,14 @@ never a partially written (torn) file. Each store SHALL carry a monotonic `seque
 change. The read-modify-write SHALL be performed entirely inside a single per-store advisory
 lock so that the lock — not an optimistic sequence guard — is the serialization point:
 `mutate` always runs against the freshest on-disk store and a competing write cannot
-interleave. The advisory lock SHALL be released only by the writer that acquired it, and a
-crashed holder's lock SHALL become stealable well before a waiter gives up. ALL writers of a
-given store (record, approve/reject, consolidation, sync, and HTTP-API equivalents) SHALL go
-through this single compare-and-swap path; a raw lock-free overwrite is prohibited because it
-would defeat the serialization. Implemented in `src/core/decisions/atomic-store.ts`; guarded
-by `atomic-store.test.ts`.
+interleave. The advisory lock SHALL carry an ownership token and be released only by the
+writer that still owns it (so a hold stolen as stale is never freed out from under its new
+owner); a crashed holder's lock SHALL become stealable well before a waiter gives up, and a
+wait that times out SHALL fail loud rather than write unlocked. ALL writers of a given store
+(record, approve/reject, consolidation, sync, and HTTP-API equivalents) SHALL go through this
+single compare-and-swap path; a raw lock-free overwrite is prohibited because it would defeat
+the serialization. Implemented in `src/core/decisions/atomic-store.ts`; guarded by
+`atomic-store.test.ts`.
 
 #### Scenario: A crash mid-write preserves the prior store
 - **GIVEN** a store write interrupted between writing the temporary file and the rename
@@ -75,7 +77,9 @@ aside to a quarantine path (`*.corrupt-<n>`) and emit a recoverable signal. The 
 NOT silently substitute an empty store for a corrupt one, because silently losing persisted
 memory presents absence as current fact and violates the authoritative-recall invariant. The
 quarantine suffix SHALL be derived from on-disk state (the next free index), not wall-clock
-time, to keep recovery reproducible.
+time, to keep recovery reproducible. The claim on a quarantine path SHALL be atomic (it fails
+if the path already exists), so two concurrent loaders can never overwrite each other's
+quarantine file and lose preserved bytes.
 
 #### Scenario: A malformed store is quarantined, not silently emptied
 - **GIVEN** a store file that fails schema or JSON validation
