@@ -50,6 +50,39 @@ import { TOOL_DEFINITIONS, TOOL_PRESETS, selectActiveTools } from './mcp.js';
  */
 const REANALYZE_DEBOUNCE_MS = 4000;
 
+/**
+ * Default minutes of request inactivity before the daemon self-terminates.
+ *
+ * The daemon is spawned detached by clients (the Pi extension, MCP server) and
+ * is deliberately NOT a child of any one of them, so when a client closes it is
+ * not signalled. On Windows especially, a flaky health check can make a client
+ * (or the single-instance guard) miss the live daemon, spawn a fresh one, and
+ * orphan the previous — orphans hold their port + caches forever and pile up in
+ * RAM. Idle self-shutdown bounds every daemon's lifetime: orphans receive zero
+ * requests and reap themselves; the in-use daemon is kept alive by tool calls
+ * and the Pi extension's /health keepalive. Disable with --idle-timeout 0.
+ *
+ * INVARIANT: stays comfortably above the extension keepalive interval (Pi pings
+ * every 5 min); at ~3× it tolerates two consecutive missed pings before an
+ * in-use daemon would wrongly reap. Don't lower this without lowering the ping.
+ */
+const DEFAULT_IDLE_TIMEOUT_MIN = 15;
+
+/**
+ * Resolve the idle-shutdown interval (ms) from the `--idle-timeout` option, in
+ * minutes. Absent or non-numeric → the default; zero/negative → 0 (disabled).
+ */
+export function idleTimeoutMs(option?: string): number {
+  if (option === undefined || option === '') return DEFAULT_IDLE_TIMEOUT_MIN * 60_000;
+  const min = Number(option);
+  if (!Number.isFinite(min)) return DEFAULT_IDLE_TIMEOUT_MIN * 60_000; // non-numeric → default
+  return min > 0 ? min * 60_000 : 0; // explicit 0 / negative disables
+}
+
+/** Health-probe timeout. Generous enough for a cold Node HTTP server on Windows
+ *  so a slow first response isn't misread as "dead" (which orphans daemons). */
+const HEALTH_PROBE_TIMEOUT_MS = 2500;
+
 const _require = createRequire(import.meta.url);
 const _pkgVersion = (_require('../../../package.json') as { version: string }).version;
 
@@ -72,6 +105,8 @@ interface ServeCliOptions {
   stop?: boolean;
   /** false (via --no-watch) disables the freshness watcher + re-analyze lane. */
   watch?: boolean;
+  /** Minutes of request inactivity before the daemon self-terminates. 0 disables. */
+  idleTimeout?: string;
 }
 
 /** Live daemon handle. Returned by {@link startServe} so callers (tests) can
@@ -242,7 +277,7 @@ export async function readDescriptor(root: string): Promise<ServeDescriptor | nu
 async function daemonAlive(desc: ServeDescriptor): Promise<boolean> {
   try {
     const res = await fetch(`http://${desc.host}:${desc.port}/health`, {
-      signal: AbortSignal.timeout(1000),
+      signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
     });
     if (!res.ok) return false;
     const body = (await res.json().catch(() => null)) as { ok?: boolean } | null;
@@ -321,6 +356,23 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     ).map((t) => t.name),
   );
 
+  // Idle self-shutdown: a request resets the timer; firing tears down and exits.
+  // Bounds orphaned-daemon lifetime so they can't accumulate in RAM (see
+  // DEFAULT_IDLE_TIMEOUT_MIN). Declared here so handleRequest can reset it; armed
+  // after listen, once exitAfterTeardown exists.
+  const idleMs = idleTimeoutMs(options.idleTimeout);
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  function touchActivity(): void {
+    if (idleMs <= 0) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      logger.discovery(`[serve] idle ${idleMs / 60_000}min with no requests — shutting down to free memory.`);
+      void exitAfterTeardown();
+    }, idleMs);
+    // Don't keep the event loop alive for the idle timer alone.
+    idleTimer.unref?.();
+  }
+
   // Don't start a second daemon for a root already served by a healthy one —
   // a concurrent spawn (two MCP clients, or pi + MCP) would otherwise leave two
   // watchers racing on the same .openlore/analysis. Reuse the live one instead.
@@ -387,6 +439,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   });
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    touchActivity(); // any request (incl. /health) keeps an in-use daemon alive
     const url = new URL(req.url ?? '/', `http://${host}`);
 
     // DNS-rebinding / cross-origin defense — runs before ANY dispatch, including
@@ -583,6 +636,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     shuttingDown = true;
     process.off('SIGINT',  onSigInt);
     process.off('SIGTERM', onSigTerm);
+    if (idleTimer) clearTimeout(idleTimer);
     if (reanalyzeTimer) clearTimeout(reanalyzeTimer);
     if (watcher) await watcher.stop().catch(() => {});
     await unlink(serveFilePath(root)).catch(() => {});
@@ -596,6 +650,12 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   const onSigTerm = () => void exitAfterTeardown();
   process.on('SIGINT',  onSigInt);
   process.on('SIGTERM', onSigTerm);
+
+  // Arm the idle timer now that teardown exists. Until the first request, the
+  // daemon already counts as idle — a client that spawns one but never calls it
+  // (e.g. a crashed session) will still be reaped.
+  touchActivity();
+  if (idleMs > 0) logger.discovery(`[serve] idle shutdown after ${idleMs / 60_000}min of inactivity`);
 
   return {
     port: boundPort,
@@ -619,6 +679,7 @@ export const serveCommand = new Command('serve')
   )
   .option('--token <token>', 'Require this token as the x-openlore-token header (default: $OPENLORE_SERVE_TOKEN)')
   .option('--no-watch', 'Disable the freshness watcher + debounced call-graph re-analyze')
+  .option('--idle-timeout <minutes>', `Self-terminate after this many minutes with no requests, so orphaned daemons can't pile up in RAM (0 disables). Default: ${DEFAULT_IDLE_TIMEOUT_MIN}`)
   .option('--stop', 'Stop a running daemon for --directory and exit')
   .addHelpText(
     'after',

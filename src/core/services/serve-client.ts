@@ -32,6 +32,10 @@ export interface ServeEndpoint {
 
 const SPAWN_HEALTH_TIMEOUT_MS = 8000;
 const HEALTH_POLL_MS = 150;
+// Per-probe timeout for the reuse check. Generous so a cold Node HTTP server on
+// Windows isn't misread as dead — a false negative spawns a second daemon and
+// orphans the first (orphans pile up in RAM). Matches serve.ts / the Pi extension.
+const HEALTH_PROBE_TIMEOUT_MS = 2500;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -62,7 +66,7 @@ async function readDescriptor(directory: string): Promise<ServeDescriptor | null
 async function healthy(desc: ServeDescriptor): Promise<boolean> {
   try {
     const res = await fetch(`http://${desc.host}:${desc.port}/health`, {
-      signal: AbortSignal.timeout(1000),
+      signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
     });
     if (!res.ok) return false;
     const body = (await res.json().catch(() => null)) as { ok?: boolean } | null;
