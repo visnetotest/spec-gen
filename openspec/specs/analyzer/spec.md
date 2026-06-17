@@ -5547,6 +5547,12 @@ The system SHALL mask Python triple-quoted strings and line comments length-pres
 
 > Decision recorded: 65d4ac12
 > Date: 2026-06-17
+### Requirement: HardenChaPrecisionFromRealooDogfoodingSamefileBaseResolutionVarnewtTypeRecoveryCHierarchyExtraction
+
+The system SHALL resolve base-class references to same-file declarations before falling back to global name matching, and SHALL recover types from `var x = new T()` patterns in Java and C#.
+
+> Decision recorded: 66e47bb4
+> Date: 2026-06-17
 
 ## Technical Notes
 
@@ -6004,3 +6010,13 @@ Retrofit interfaces use identically-named @GET/@POST/@Path annotations from retr
 Route-matching regexes use character offsets (m.index) that are resolved to line numbers via getLine(), which measures against original line lengths. Stripping comments changed string length and could drift line numbers. Additionally, triple-quoted docstrings can contain route-like patterns (e.g. Flask's sansio/scaffold.py code-block examples) that produced false-positive route matches. Length-preserving masking keeps byte alignment while eliminating both failure modes.
 
 **Consequences:** Over-masking (e.g. unmatched triple-quotes) can only drop potential matches, never invent them, consistent with the false-negatives-over-false-positives bias. Any future non-code region handling in route extraction must preserve string length or getLine() will produce wrong line numbers.
+
+### Harden CHA precision from real-OO dogfooding: same-file base resolution, var-new-T type recovery, C# hierarchy extraction
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** 66e47bb4
+
+Adversarial dogfooding CHA on real OO corpora (java-design-patterns, python-patterns, dotnet/samples) surfaced three defects: (1) global first-match base-class resolution linked unrelated same-named classes across files — fixed by preferring same-file ClassNode resolution before global fallback; (2) type-inference required uppercase declared types, so Java 10+/C# `var x = new T()` locals recovered no type and virtual calls fell to broad cha-name-arity — fixed by adding var-new-T matchers for Java and C#; (3) no C# branch in extractClassRelationships left CHA inert for C# — fixed by adding a C# branch over base_list, splitting base-class vs interface by I<Upper> naming convention.
+
+**Consequences:** Same-file base resolution eliminates cross-file name collisions (empty same-file base still falls back to global — rare, documented). var-new-T recovery converts many heuristic cha-name-arity edges into precise type_inference edges (Java cha-name-arity 113→65 on design-patterns slice). C# CHA now functional (0→81 inheritance / 59 override edges on slice). Residual cha-name-arity over-approximation remains for non-locally-recoverable receivers; field-type tracking / RTA-VTA pruning stay out-of-scope per HighPrecisionCHABounds.

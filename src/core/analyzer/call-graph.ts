@@ -2714,6 +2714,31 @@ async function extractClassRelationships(
           if (cls && parent) merge(file.path, cls, [parent], []);
         }
 
+      } else if (file.language === 'C#') {
+        const r = await getCSharpParser();
+        if (!r) continue;
+        const { parser, lang } = r;
+        const tree = (parser as Parser).parse(file.content);
+
+        // C# `class D : B, IFoo, IBar<T>` / `interface I : IBase` — the base_list holds
+        // the base class AND interfaces with no syntactic distinction. Capture every
+        // base (plain or generic) and split by the C# `I<Upper>` interface naming
+        // convention; either way CHA treats both as subtype edges. Without this branch
+        // C# classes had empty parent/interface sets and CHA was inert for C#.
+        for (const declType of ['class_declaration', 'interface_declaration', 'record_declaration', 'struct_declaration']) {
+          const Q = `
+            (${declType}
+              name: (identifier) @cls
+              (base_list [(identifier) @base (generic_name (identifier) @base)]))`;
+          for (const m of safeQuery(lang, Q, tree.rootNode)) {
+            const cls  = m.captures.find(c => c.name === 'cls')?.node.text;
+            const base = m.captures.find(c => c.name === 'base')?.node.text;
+            if (!cls || !base) continue;
+            if (/^I[A-Z]/.test(base)) merge(file.path, cls, [], [base]);
+            else merge(file.path, cls, [base], []);
+          }
+        }
+
       } else if (file.language === 'Ruby') {
         const r = await getRubyParser();
         if (!r) continue;
@@ -2827,20 +2852,30 @@ function buildClassNodes(
     classMap.set(id, cls);
   }
 
-  // Build InheritanceEdge[] — only when both parent and child are in our graph
-  // Parent lookup: match by class name across all ClassNodes (first match wins)
+  // Build InheritanceEdge[] — only when both parent and child are in our graph.
+  // Parent lookup resolves a base/interface NAME to a ClassNode, preferring a class
+  // of that name in the SAME FILE as the child before any global match. Without the
+  // same-file preference, two unrelated classes sharing a name in different files
+  // (e.g. an `observer.py::Subject` and a `proxy.py::Subject`) collapse to one under
+  // a global first-match-wins lookup, so a child resolves its base to the wrong
+  // declaration and CHA then synthesizes a false override edge between semantically
+  // unrelated classes. Same-file-first eliminates that collision for the common case
+  // (a class extending a base declared in its own file / a same-named local shadow);
+  // genuine cross-file inheritance falls back to the global first match.
   const byName = new Map<string, ClassNode>();
   for (const cls of classMap.values()) {
     if (!byName.has(cls.name)) byName.set(cls.name, cls);
   }
+  const resolveParent = (parentName: string, childFile: string): ClassNode | undefined =>
+    classMap.get(`${childFile}::${parentName}`) ?? byName.get(parentName);
 
   const inheritanceEdges: InheritanceEdge[] = [];
   const seenEdges = new Set<string>();
 
   for (const cls of classMap.values()) {
     for (const parentName of cls.parentClasses) {
-      const parent = byName.get(parentName);
-      if (!parent) continue;
+      const parent = resolveParent(parentName, cls.filePath);
+      if (!parent || parent.id === cls.id) continue;
       const edgeId = `${parent.id}->${cls.id}`;
       if (seenEdges.has(edgeId)) continue;
       seenEdges.add(edgeId);
@@ -2849,8 +2884,8 @@ function buildClassNodes(
       inheritanceEdges.push({ id: edgeId, parentId: parent.id, childId: cls.id, kind });
     }
     for (const ifaceName of cls.interfaces) {
-      const parent = byName.get(ifaceName);
-      if (!parent) continue;
+      const parent = resolveParent(ifaceName, cls.filePath);
+      if (!parent || parent.id === cls.id) continue;
       const edgeId = `${parent.id}->${cls.id}`;
       if (seenEdges.has(edgeId)) continue;
       seenEdges.add(edgeId);

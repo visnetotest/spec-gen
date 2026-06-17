@@ -58,6 +58,17 @@ describe('Java', () => {
     expect(inferTypesFromSource('MyService svc = new MyService();', 'Java').get('svc')).toBe('MyService'));
   it('interface var = new ConcreteClass — prefers concrete', () =>
     expect(inferTypesFromSource('IService svc = new MyService();', 'Java').get('svc')).toBe('MyService'));
+  it('var x = new T() — Java 10+ local-variable type inference', () =>
+    expect(inferTypesFromSource('var svc = new MyService();', 'Java').get('svc')).toBe('MyService'));
+});
+
+describe('C#', () => {
+  it('explicit declaration', () =>
+    expect(inferTypesFromSource('MyService svc = new MyService();', 'C#').get('svc')).toBe('MyService'));
+  it('interface var = new ConcreteClass — prefers concrete', () =>
+    expect(inferTypesFromSource('IService svc = new MyService();', 'C#').get('svc')).toBe('MyService'));
+  it('var x = new T() — implicitly-typed local', () =>
+    expect(inferTypesFromSource('var svc = new MyService();', 'C#').get('svc')).toBe('MyService'));
 });
 
 describe('Ruby', () => {

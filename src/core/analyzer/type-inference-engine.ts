@@ -26,6 +26,7 @@ export function inferTypesFromSource(source: string, language: string): Inferred
     case 'Go':         return inferGo(source);
     case 'Rust':       return inferRust(source);
     case 'Java':       return inferJava(source);
+    case 'C#':         return inferCSharp(source);
     case 'Ruby':       return inferRuby(source);
     default:           return new Map();
   }
@@ -119,6 +120,25 @@ function inferJava(source: string): InferredTypes {
   // Interface var = new ConcreteClass(...)  — prefer the concrete type
   for (const m of source.matchAll(/\b([A-Z]\w*)\s+(\w+)\s*=\s*new\s+([A-Z]\w*)\s*\(/g))
     result.set(m[2], m[3]);
+  // var v = new ConcreteClass(...)  — Java 10+ local-variable type inference.
+  // Without this, `var x = new T(); x.m()` recovers no receiver type and falls to
+  // the broad name-arity CHA over-approximation (a precision loss / cross-class leak).
+  for (const m of source.matchAll(/\bvar\s+(\w+)\s*=\s*new\s+([A-Z]\w*)/g))
+    result.set(m[1], m[2]);
+  return result;
+}
+
+function inferCSharp(source: string): InferredTypes {
+  const result: InferredTypes = new Map();
+  // Type var = ...  or  Type var;
+  for (const m of source.matchAll(/\b([A-Z]\w*)\s+(\w+)\s*(?:=|;)/g))
+    result.set(m[2], m[1]);
+  // IInterface var = new ConcreteClass(...)  — prefer the concrete type
+  for (const m of source.matchAll(/\b([A-Z]\w*)\s+(\w+)\s*=\s*new\s+([A-Z]\w*)\s*[(<{]/g))
+    result.set(m[2], m[3]);
+  // var v = new ConcreteClass(...)  — C# implicitly-typed local
+  for (const m of source.matchAll(/\bvar\s+(\w+)\s*=\s*new\s+([A-Z]\w*)/g))
+    result.set(m[1], m[2]);
   return result;
 }
 

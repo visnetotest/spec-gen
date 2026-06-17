@@ -31,6 +31,40 @@
 > unique target**, fan-out ≤ 6, no crash, no false hubs (synthesized edges excluded from structural
 > metrics). All five requirements folded into the canonical `openspec/specs/analyzer/spec.md`
 > (`ProvenanceAwareReachability` replaced with the MODIFIED version); this change is archived.
+>
+> **Real-OO-corpus adversarial dogfood (follow-up, same PR #155).** The initial dogfood used a
+> synthetic Shape fixture + OpenLore's own (functional) src, which produced ZERO override and ZERO
+> `cha-declared-type` edges. A second pass on real inheritance-heavy repos — **java-design-patterns**
+> (GoF patterns), **python-patterns**, and a **dotnet/samples** C# slice — exercised all three edge
+> types and surfaced (and fixed) three real defects:
+> - **Cross-file same-name class collision → false override edge.** `buildClassNodes` resolved a base
+>   class NAME globally (first-match-wins), so `proxy.py::Proxy(Subject)` linked to an unrelated
+>   `observer.py::Subject`, synthesizing a false `Subject.__init__ → Proxy.__init__` override. Fixed:
+>   resolve a base/interface name to a **same-file** class before any global match (a class extending
+>   a base whose name also names an unrelated class elsewhere now links to the local declaration).
+>   Residual: an *empty* same-file base (no methods → not a ClassNode) still falls back to global —
+>   rare, documented.
+> - **`var x = new T()` declared type never recovered (Java/C#).** The type-inference engine required
+>   an uppercase declared type, so Java 10+/C# `var` locals recovered nothing and every virtual call
+>   fell to the broad `cha-name-arity` over-approximation, leaking across packages on method-name
+>   collisions (`Mammoth.timePasses` ↔ `Weather.timePasses`). Fixed: recover `var x = new T()`. Effect
+>   is even better than narrowing CHA — the call now resolves DIRECTLY (`type_inference`) in Pass 2, so
+>   CHA dedups it entirely (Java `cha-name-arity` 113→65, the cross-dir leaks gone, edges now precise
+>   direct edges). Added a C# inference function too.
+> - **CHA was inert for C#.** `extractClassRelationships` had no C# branch, so C# classes had empty
+>   parent/interface sets and zero inheritance edges. Fixed: added a C# branch over the `base_list`
+>   node (class/interface/record/struct), splitting base-class vs interface by the `I<Upper>`
+>   convention. C# went 0 → 81 inheritance edges / 59 override edges on the slice.
+>
+> **Residual (spec-sanctioned, documented):** `cha-name-arity` still over-approximates for a receiver
+> whose type is not locally recoverable — notably a **field** of a library generic type
+> (`private List<X> observers; observers.add(o)` matched a user `LetterComposite.add`). Field-type
+> tracking and RTA/VTA pruning are explicitly Out-of-scope (`HighPrecisionCHABounds`): the edge is
+> labeled with the weakest provenance, bounded by the fan-out cap, excluded from structural metrics,
+> and `directResolvedOnly`-excludable. Also: call-site arity is not extracted from raw edges, so the
+> dispatch path matches by name only (arity is enforced on the override path). Tests: +7
+> (`type-inference-engine.test.ts` Java/C# `var new T`; `cha.test.ts` cross-file resolution + C#
+> override edges). Full suite green (3754).
 
 ## 1. Confirm the surface is purely additive (no type changes)
 - [x] Verify `EdgeConfidence` already includes `'synthesized'` (`call-graph.ts:34`), `CallEdge` already

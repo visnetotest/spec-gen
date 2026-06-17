@@ -219,6 +219,56 @@ describe('CHA — virtual-dispatch edges', () => {
   });
 });
 
+describe('CHA — cross-file same-name class resolution', () => {
+  // Regression for the dogfood finding (python-patterns observer.Subject vs proxy.Subject):
+  // a child whose base name also names an UNRELATED class in another file must resolve
+  // its base to the same-file declaration, not a global first-match — else a false
+  // override edge links two semantically unrelated classes.
+  it('resolves a base class to the same-file declaration, not a same-named class elsewhere', async () => {
+    const b = await new CallGraphBuilder().build([
+      // File A: an unrelated `Subject` that DOES declare init().
+      { path: 'a.ts', content: `export class Subject { init() { return 1; } }`, language: 'TypeScript' },
+      // File B: its own `Subject` (with a different method, so it is a ClassNode), plus a
+      // Proxy extending the LOCAL Subject — mirrors python-patterns observer/proxy Subject.
+      { path: 'b.ts', content: `class Subject { work() { return 0; } } class Proxy extends Subject { init() { return 2; } }`, language: 'TypeScript' },
+    ]);
+    const aInit = [...b.nodes.values()].find(n => n.id === 'a.ts::Subject.init')?.id;
+    const proxyInit = [...b.nodes.values()].find(n => n.id === 'b.ts::Proxy.init')?.id;
+    // No override edge from the unrelated a.ts::Subject.init to b.ts::Proxy.init.
+    expect(b.edges.some(e => e.synthesizedBy === 'override' && e.callerId === aInit && e.calleeId === proxyInit)).toBe(false);
+  });
+});
+
+describe('CHA — C# hierarchy (override edges)', () => {
+  const buildCs = (content: string): Promise<Built> =>
+    new CallGraphBuilder().build([{ path: 'Lights.cs', content, language: 'C#' }]);
+
+  it('synthesizes override edges across a C# interface implementation', async () => {
+    const b = await buildCs(`
+      interface ILight { void SwitchOn(); }
+      class LedLight : ILight { public void SwitchOn() {} }
+      class HalogenLight : ILight { public void SwitchOn() {} }
+    `);
+    const iface = methodId(b, 'ILight', 'SwitchOn');
+    const led = methodId(b, 'LedLight', 'SwitchOn');
+    const halogen = methodId(b, 'HalogenLight', 'SwitchOn');
+    const ledEdge = edge(b, iface, led);
+    expect(ledEdge, 'ILight.SwitchOn -> LedLight.SwitchOn').toBeDefined();
+    expect(ledEdge!.synthesizedBy).toBe('override');
+    expect(edge(b, iface, halogen), 'ILight.SwitchOn -> HalogenLight.SwitchOn').toBeDefined();
+  });
+
+  it('synthesizes override edges across a C# base class', async () => {
+    const b = await buildCs(`
+      abstract class Stream { public virtual void Write() {} }
+      sealed class TransferStream : Stream { public override void Write() {} }
+    `);
+    const e = edge(b, methodId(b, 'Stream', 'Write'), methodId(b, 'TransferStream', 'Write'));
+    expect(e, 'Stream.Write -> TransferStream.Write').toBeDefined();
+    expect(e!.synthesizedBy).toBe('override');
+  });
+});
+
 describe('arityFromSignature', () => {
   it('counts parameters at the top level', () => {
     expect(arityFromSignature('area()')).toBe(0);
