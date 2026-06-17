@@ -129,6 +129,34 @@ step 1 (it extends a core data structure — `EdgeConfidence` / `CallEdge`).
 > (`synthesized_by: callback-registration`) while the unpaired `onClose` handler got no edge
 > (false-negative bias holds). All eight requirements folded into the canonical
 > `openspec/specs/analyzer/spec.md`; this change is archived.
+>
+> **Real-corpus adversarial dogfood (2026-06-17, same PR #155).** Ran the synthesis through the
+> compiled CLI on five real repos and verified every synthesized edge against source: **express**
+> (JS events/routes), **gin** (Go callback-registration), **flask** + **pytransitions** + **django**
+> (Python routes/signals, django = 46k functions). Results:
+> - **gin — clean.** Zero edges, and that is correct: gin's named-handler registrations all live in
+>   `_test.go` (excluded from the production graph by design) and its non-test code passes handler
+>   *variables*/variadics (not resolvable to named nodes). The rule's no-guess posture held; a decoy
+>   `unrelated(namedHandler)` correctly produced no edge.
+> - **flask/django — found + fixed a false positive (commit `c5ef84e`, decision `65d4ac12`).** The
+>   route→handler rule emitted a fabricated edge (`Scaffold.static_url_path → jinja_loader`) because
+>   the Python route extractor matched `@app.route`/`path(...)` inside triple-quoted docstrings and,
+>   compounding it, stripped `#` comments non-length-preservingly so `getLine()` drifted the reported
+>   line and bound the wrong handler / enclosing function. Fix = length-preserving `maskPythonNonCode`.
+>   Verified e2e: the phantom is gone, real edges remain, and django's `admin/sites.py` routes
+>   (previously mis-attributed to `admin_view`/`has_permission`/`inner` by drift) now correctly resolve
+>   to `get_urls`. This directly defends `HighPrecisionSynthesisBounds`.
+> - **express/django — surfaced a PRE-EXISTING, OUT-OF-SCOPE recall gap (documented, not fixed here).**
+>   The JS/TS function-node extractor (`call-graph.ts` `TS_FN_QUERY`) does not index member-assigned or
+>   `var`-bound function expressions — `obj.prop = function(){}`, `exports.x = function(){}`,
+>   `X.prototype.y = function(){}`, `var f = function(){}`. On idiomatic pre-class/CommonJS JS (all of
+>   Express 5's `lib`, and a jQuery-plugin handler in django's admin JS) those methods are never
+>   extracted, so the synthesis rules are starved of caller/handler nodes (e.g. django's `formset:added`
+>   fan-out resolved 1 of 2 handlers). This is upstream of synthesis and changes the node set for
+>   **every** analyzer metric (fanIn/fanOut, hubs, dead-code, all traversal tools), so it is a
+>   cross-cutting change that warrants its own proposal + adversarial review + structural-metric
+>   isolation — deliberately NOT bundled into this close-out. Filed as a follow-up; the synthesis
+>   feature is correct on the nodes it is given.
 
 ## 1. Provenance on the edge model
 - [x] Add `'synthesized'` to `EdgeConfidence` (`call-graph.ts:30`) and `synthesizedBy?: string` to

@@ -1,0 +1,62 @@
+# Widen JS/TS function-node extraction to member-assigned and `var`-bound functions
+
+> Status: DRAFT — filed from the `add-synthesized-dynamic-dispatch-edges` real-corpus dogfood
+> (PR #155, 2026-06-17). No code yet. Scope/risk notes below; needs its own adversarial review.
+> One sentence: **index `obj.prop = function(){}`, `exports.x = function(){}`,
+> `X.prototype.y = function(){}`, and `var f = function(){}` as function nodes so the call graph
+> stops going blind on idiomatic pre-class / CommonJS JavaScript.**
+
+## Why
+
+The TypeScript/JavaScript function extractor (`TS_FN_QUERY`, `src/core/analyzer/call-graph.ts:984`)
+matches only four node shapes: `function_declaration`, exported `function_declaration`, ES6
+`method_definition`, and `lexical_declaration` (`const`/`let`) bound to an arrow/function expression.
+It has **no** clause for:
+
+- `assignment_expression` with a member or identifier LHS and a function RHS —
+  `app.use = function use(){}`, `exports.handler = function(){}`, `Foo.prototype.bar = function(){}`.
+- `variable_declaration` (`var`) bound to a function — `var f = function f(){}`.
+
+These are the dominant method idioms in pre-class / CommonJS / ES5 JavaScript. Dogfooding the
+synthesized-dynamic-dispatch feature surfaced the cost on real code:
+
+- **Express 5 `lib/`** — every method is `app.X = function X(){}` / `res.Y = function Y(){}`; only the
+  two plain `function` declarations in the package were extracted (≈2 of 117 candidate nodes in
+  `application.js`). The call graph — and therefore reachability, impact, dead-code, and the event /
+  callback synthesis rules — has almost no nodes to work with on such files.
+- **Django admin JS** — an event handler defined as a jQuery plugin
+  `$.fn.djangoAdminSelect2 = function(){}` is not indexed, so the `formset:added` event channel
+  resolved only 1 of its 2 real handlers (asymmetric fan-out).
+
+This is upstream of the dispatch-synthesis rules; they are correct on the nodes they are given but are
+starved of input here. It is a general call-graph completeness gap, not a synthesis bug, which is why
+it was deliberately **not** bundled into the synthesis close-out.
+
+## What would change
+
+1. Add two clauses to `TS_FN_QUERY`: an `assignment_expression` whose left is a `member_expression`
+   (or identifier) and whose right is a `function_expression`/`arrow_function`, capturing the
+   member/identifier as the name; and a `variable_declaration` arm alongside the existing
+   `lexical_declaration` one.
+2. Derive a stable, readable node name for member assignments (`app.use`, `Foo.prototype.bar`,
+   `exports.handler`) consistent with how existing nodes are named and identified.
+
+## What does NOT change / scope & risk
+
+- **Blast radius is the whole analyzer, not just synthesis.** Widening the node set changes
+  `fanIn`/`fanOut`, hub/god/entry-point classification, dead-code candidates, duplicate detection, and
+  every traversal tool. It must reuse the same structural-metric isolation discipline the synthesis
+  set already established, and be adversarially reviewed for: duplicate/oversized node counts,
+  `exports.x = require(...)` (not a function — must not match), re-assignments of the same member, and
+  identity/stableId collisions for member-named nodes.
+- No LLM; purely tree-sitter query + naming. Deterministic, on-mission.
+
+## Verification sketch
+
+- Unit: each new shape extracts exactly one node with the right name; `exports.x = require('y')` and
+  `obj.prop = 42` extract nothing.
+- E2e: re-analyze Express 5 `lib/` and confirm `app.*`/`res.*` methods appear as nodes and the
+  event-channel `mount` edge (`app.use → defaultConfiguration`'s `onmount`) synthesizes; re-analyze
+  Django admin JS and confirm the `formset:added` fan-out reaches both handlers.
+- Guard: structural-metric isolation invariant (synthesized edges already excluded) still holds, and
+  hub/dead-code outputs are reviewed for the new nodes rather than silently shifted.
