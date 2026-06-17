@@ -120,43 +120,52 @@ step 1 (it extends a core data structure — `EdgeConfidence` / `CallEdge`).
 > coincidentally same-named function elsewhere (the only false positives the rules produced across the
 > repo's ~3,900 functions — now zero). Single chokepoint in the `resolveHandler` closure covers every
 > reference-based rule; regression-tested.
+>
+> **Close-out (2026-06-17).** Feature shipped to `main` in PR #142. Close-out verification on a clean
+> branch off `main`: full analyzer + mcp-handlers suites green (1738 tests), synthesis suites green
+> (133 tests across `edge-synthesis`, `reachability-synthesis`, `call-graph`), and a fresh
+> compiled-CLI `analyze` on a JS+Go fixture confirmed the persisted edge store carries
+> `boot → onMount` (`synthesized_by: event-channel`) and `setup → handleHealth`
+> (`synthesized_by: callback-registration`) while the unpaired `onClose` handler got no edge
+> (false-negative bias holds). All eight requirements folded into the canonical
+> `openspec/specs/analyzer/spec.md`; this change is archived.
 
 ## 1. Provenance on the edge model
-- [ ] Add `'synthesized'` to `EdgeConfidence` (`call-graph.ts:30`) and `synthesizedBy?: string` to
+- [x] Add `'synthesized'` to `EdgeConfidence` (`call-graph.ts:30`) and `synthesizedBy?: string` to
       `CallEdge` (`call-graph.ts:106-118`).
-- [ ] Add a `'synthesized'` arm to `CALL_DISTANCE_COSTS` (`call-graph.ts:100`) with a cost strictly
+- [x] Add a `'synthesized'` arm to `CALL_DISTANCE_COSTS` (`call-graph.ts:100`) with a cost strictly
       greater than any directly-resolved confidence, and an exhaustive switch arm in `callDistance`
       (`call-graph.ts:125`). → verify: `call-graph.test.ts` exhaustiveness test stays green.
-- [ ] Confirm graph serialization round-trips edges with and without `synthesizedBy`.
+- [x] Confirm graph serialization round-trips edges with and without `synthesizedBy`.
 
 ## 2. Synthesis pass scaffold
-- [ ] Add a deterministic post-resolution pass that runs after direct edges are built, structured as
+- [x] Add a deterministic post-resolution pass that runs after direct edges are built, structured as
       a registry of independent per-pattern rules. → verify: pass is a no-op when no patterns match
       (directly-resolved graph byte-identical).
 
 ## 3. Event-channel rule
-- [ ] Pair `on(k, fn)` / `addEventListener(k, fn)` registrations with `emit(k)` / `dispatch(k)`
+- [x] Pair `on(k, fn)` / `addEventListener(k, fn)` registrations with `emit(k)` / `dispatch(k)`
       dispatch sites on a shared static-literal key; emit edges dispatcher → each handler, tagged
       `synthesizedBy: 'event-channel'`. → verify: scenarios "Event handler is reachable", "Mismatched
       channel keys produce no edge".
-- [ ] Enforce the fan-out cap (default 8); drop + log over-cap channels. → verify: "Over-cap channel
+- [x] Enforce the fan-out cap (default 8); drop + log over-cap channels. → verify: "Over-cap channel
       is dropped, not guessed".
 
 ## 4. Route → handler rule
-- [ ] Wire each route detected by route inventory to its bound handler as a `calls`-kind edge tagged
+- [x] Wire each route detected by route inventory to its bound handler as a `calls`-kind edge tagged
       `synthesizedBy: 'route-handler'`. → verify: "Route is wired to its handler".
 
 ## 5. Reachability & traversal provenance
-- [ ] In `reachability.ts`, exclude synthesized-only-reachable nodes from `high`-confidence dead
+- [x] In `reachability.ts`, exclude synthesized-only-reachable nodes from `high`-confidence dead
       (reclassify reachable or downgrade to `low` with rule-named reason). → verify:
       "Callback-only-reachable symbol is not high-confidence dead"; retire the matching false-positive
       called out in the `reachability.ts` header.
-- [ ] Add a directly-resolved-only traversal option to reachability, `analyze_impact`, `select_tests`,
+- [x] Add a directly-resolved-only traversal option to reachability, `analyze_impact`, `select_tests`,
       `get_subgraph`, `find_path`; default includes synthesized edges. → verify: "Strict mode excludes
       synthesized edges".
 
 ## 6. Regression & docs
-- [ ] Run the analyzer + mcp-handlers suites: `npx vitest run src examples`.
-- [ ] Update the `reachability.ts` HONEST LIMITS comment to note that callback/event/route dispatch is
+- [x] Run the analyzer + mcp-handlers suites: `npx vitest run src examples`.
+- [x] Update the `reachability.ts` HONEST LIMITS comment to note that callback/event/route dispatch is
       now partially recovered (single-language, statically-paired) and which limits remain (reflection,
       computed dispatch, cross-language).
