@@ -22,7 +22,7 @@ import { createLLMService } from '../../core/services/llm-service.js';
 import { isGitRepository, getChangedFiles, getFileDiff, getCommitMessages, resolveBaseRef, buildSpecMap } from '../../core/drift/index.js';
 import {
   loadDecisionStore,
-  saveDecisionStore,
+  updateDecisionStore,
   replaceDecisions,
   patchDecision,
   getDecisionsByStatus,
@@ -488,12 +488,13 @@ Examples:
         process.exitCode = 1;
         return;
       }
-      const updated = patchDecision(store, id, {
-        status: 'approved',
+      const approvePatch = {
+        status: 'approved' as const,
         reviewedAt: new Date().toISOString(),
         reviewNote: options.note ?? options.reason,
-      });
-      await saveDecisionStore(rootPath, updated);
+      };
+      // CAS so the write can't clobber a concurrent record/consolidate write.
+      const updated = await updateDecisionStore(rootPath, (s) => patchDecision(s, id, approvePatch));
       emit(rootPath, 'decisions', { event: 'decision_approved', id, title: decision.title, transport: 'cli' });
       logger.success(`Decision ${id} approved.`);
       if (!options.json) displayDecision({ ...decision, status: 'approved' }, true);
@@ -530,12 +531,11 @@ Examples:
         process.exitCode = 1;
         return;
       }
-      const updated = patchDecision(store, id, {
+      await updateDecisionStore(rootPath, (s) => patchDecision(s, id, {
         status: 'rejected',
         reviewedAt: new Date().toISOString(),
         reviewNote: options.note ?? options.reason,
-      });
-      await saveDecisionStore(rootPath, updated);
+      }));
       emit(rootPath, 'decisions', { event: 'decision_rejected', id, title: decision.title, transport: 'cli' });
       logger.success(`Decision ${id} rejected.`);
 
@@ -635,14 +635,10 @@ Examples:
         : { verified: consolidated.map((d) => ({ ...d, status: 'verified' as const, confidence: 'medium' as const })), phantom: [], missing: [] };
 
       // Step 4 — Persist
-      let updatedStore = { ...store };
       // Reject all original drafts — they've been replaced by consolidated decisions.
       // Also reject any explicitly superseded IDs from prior sessions.
       const originalDraftIds = new Set(drafts.map((d) => d.id));
       const originalById = new Map(store.decisions.map((d) => [d.id, d]));
-      for (const id of [...originalDraftIds, ...supersededIds]) {
-        updatedStore = patchDecision(updatedStore, id, { status: 'rejected' });
-      }
       // Preserve recordedAt provenance:
       // - Direct match: consolidated decision ID matches original draft → use its recordedAt.
       // - Merged decision (new ID, no match): use earliest recordedAt across all superseded
@@ -658,11 +654,18 @@ Examples:
         if (earliestSupersededAt) return { ...d, recordedAt: earliestSupersededAt };
         return d;
       });
-      // replaceDecisions (not upsertDecisions) — consolidated decisions share IDs
-      // with their original drafts; upsert would silently no-op after the reject above.
-      updatedStore = replaceDecisions(updatedStore, withProvenance);
-      updatedStore = { ...updatedStore, lastConsolidatedAt: new Date().toISOString() };
-      await saveDecisionStore(rootPath, updatedStore);
+      // CAS persist: apply the consolidation result to the FRESHEST store, so a
+      // record_decision/approve committed concurrently (different lock) is preserved
+      // rather than clobbered by this stale snapshot. replaceDecisions (not upsert)
+      // because consolidated decisions share IDs with their original drafts.
+      const updatedStore = await updateDecisionStore(rootPath, (s) => {
+        let next = s;
+        for (const id of [...originalDraftIds, ...supersededIds]) {
+          next = patchDecision(next, id, { status: 'rejected' });
+        }
+        next = replaceDecisions(next, withProvenance);
+        return { ...next, lastConsolidatedAt: new Date().toISOString() };
+      });
 
       if (options.json) {
         process.stdout.write(JSON.stringify({ verified, phantom, missing }, null, 2) + '\n');
@@ -674,18 +677,17 @@ Examples:
       if (options.gate && process.stdin.isTTY && process.stdout.isTTY && verified.length > 0) {
         const results = await runTuiApproval(verified);
 
-        let gateStore = updatedStore;
+        const reviewedAt = new Date().toISOString();
+        const tuiPatches: Array<{ id: string; status: 'approved' | 'rejected' }> = [];
         for (const [id, decision] of results) {
           if (decision === 'approved' || decision === 'rejected') {
-            gateStore = patchDecision(gateStore, id, {
-              status: decision,
-              reviewedAt: new Date().toISOString(),
-            });
+            tuiPatches.push({ id, status: decision });
             const d = updatedStore.decisions.find((x) => x.id === id);
             emit(rootPath, 'decisions', { event: `decision_${decision}`, id, title: d?.title, transport: 'cli-tui' });
           }
         }
-        await saveDecisionStore(rootPath, gateStore);
+        await updateDecisionStore(rootPath, (s) =>
+          tuiPatches.reduce((acc, p) => patchDecision(acc, p.id, { status: p.status, reviewedAt }), s));
 
         const stillPending = verified.filter(
           (d) => !results.has(d.id) || results.get(d.id) === 'skipped',
@@ -870,16 +872,15 @@ Examples:
       // TTY: interactive TUI
       if (process.stdin.isTTY && process.stdout.isTTY && verified.length > 0) {
         const results = await runTuiApproval(verified);
-        let gateStore = store;
+        const reviewedAt = new Date().toISOString();
+        const tuiPatches: Array<{ id: string; status: 'approved' | 'rejected' }> = [];
         for (const [id, decision] of results) {
           if (decision === 'approved' || decision === 'rejected') {
-            gateStore = patchDecision(gateStore, id, {
-              status: decision,
-              reviewedAt: new Date().toISOString(),
-            });
+            tuiPatches.push({ id, status: decision });
           }
         }
-        await saveDecisionStore(rootPath, gateStore);
+        await updateDecisionStore(rootPath, (s) =>
+          tuiPatches.reduce((acc, p) => patchDecision(acc, p.id, { status: p.status, reviewedAt }), s));
         const stillPending = verified.filter(
           (d) => !results.has(d.id) || results.get(d.id) === 'skipped',
         );

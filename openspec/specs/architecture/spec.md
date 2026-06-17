@@ -41,14 +41,21 @@ The system SHALL implement security via: API key-based authentication for LLM pr
 ### Requirement: DurableAtomicStorePersistence
 
 The persisted memory and decision stores (`.openlore/memory/notes.json`,
-`.openlore/decisions/pending.json`) SHALL be written atomically: a write goes to a temporary
-file and is moved into place with an atomic rename (after `fsync`), so a crash or
-interruption mid-write leaves the previously committed store intact and never a partially
-written (torn) file. Each store SHALL carry a monotonic `sequence` field used to order writes
-and detect conflicts; the field defaults to `0` for legacy stores. Saves use compare-and-swap
-on `sequence`: on a conflict the save re-reads the current store and re-applies the pending
-append/upsert rather than overwriting a competing write. Implemented in
-`src/core/decisions/atomic-store.ts`; guarded by `atomic-store.test.ts`.
+`.openlore/decisions/pending.json`) SHALL be written atomically: a write goes to a
+uniquely-named temporary file, is `fsync`'d, and is moved into place with an atomic rename,
+after which the containing directory is `fsync`'d (best-effort) so the rename itself is
+durable. A crash or interruption mid-write leaves the previously committed store intact and
+never a partially written (torn) file. Each store SHALL carry a monotonic `sequence` field
+(defaults to `0` for legacy stores) that orders writes and lets external readers detect
+change. The read-modify-write SHALL be performed entirely inside a single per-store advisory
+lock so that the lock — not an optimistic sequence guard — is the serialization point:
+`mutate` always runs against the freshest on-disk store and a competing write cannot
+interleave. The advisory lock SHALL be released only by the writer that acquired it, and a
+crashed holder's lock SHALL become stealable well before a waiter gives up. ALL writers of a
+given store (record, approve/reject, consolidation, sync, and HTTP-API equivalents) SHALL go
+through this single compare-and-swap path; a raw lock-free overwrite is prohibited because it
+would defeat the serialization. Implemented in `src/core/decisions/atomic-store.ts`; guarded
+by `atomic-store.test.ts`.
 
 #### Scenario: A crash mid-write preserves the prior store
 - **GIVEN** a store write interrupted between writing the temporary file and the rename

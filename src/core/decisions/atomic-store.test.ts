@@ -22,9 +22,16 @@ import {
   updateMemoryStore,
   memoryDir,
 } from './memory-store.js';
-import { loadDecisionStore, saveDecisionStore, decisionsDir } from './store.js';
+import {
+  loadDecisionStore,
+  saveDecisionStore,
+  updateDecisionStore,
+  upsertDecisions,
+  patchDecision,
+  decisionsDir,
+} from './store.js';
 import { MEMORY_NOTES_FILE, DECISIONS_PENDING_FILE } from '../../constants.js';
-import type { AnchoredMemory, MemoryStore } from '../../types/index.js';
+import type { AnchoredMemory, MemoryStore, PendingDecision } from '../../types/index.js';
 
 vi.mock('../../utils/logger.js', () => ({
   logger: { warning: vi.fn(), info: vi.fn(), error: vi.fn(), success: vi.fn(), section: vi.fn(), discovery: vi.fn(), analysis: vi.fn(), blank: vi.fn() },
@@ -97,23 +104,17 @@ describe('casUpdate', () => {
     expect(b.items).toEqual(['a', 'b']);
   });
 
-  it('re-applies the mutate when the on-disk sequence changed mid-update (no lost write)', async () => {
+  it('applies the mutate to the freshest on-disk store, never clobbering a prior write', async () => {
     // A competing writer has already committed {items:['other'], sequence:1} to disk.
     await writeFile(path(), serialize({ items: ['other'], sequence: 1 }));
-    // Make the FIRST outer load return a stale (sequence 0) view so the commit
-    // re-read detects the conflict and forces exactly one re-apply.
-    let calls = 0;
-    const staleThenFresh = async (): Promise<Store> => {
-      calls++;
-      return calls === 1 ? { items: [], sequence: 0 } : load();
-    };
     const result = await casUpdate<Store>({
       storePath: path(),
-      load: staleThenFresh,
+      load,
       serialize,
       mutate: (s) => ({ ...s, items: [...s.items, 'mine'] }),
     });
-    // The competing 'other' write is NOT clobbered; 'mine' is re-applied on top.
+    // The mutate runs against the latest store read inside the lock: 'other' is
+    // preserved and 'mine' is merged on top; the sequence advances from 1 to 2.
     expect(result.items).toEqual(['other', 'mine']);
     expect(result.sequence).toBe(2);
   });
@@ -247,5 +248,59 @@ describe('decision store — quarantine + sequence', () => {
     const corrupt = (await readdir(dir)).find((e) => e.startsWith(`${DECISIONS_PENDING_FILE}.corrupt-`))!;
     expect(await readFile(join(dir, corrupt), 'utf-8')).toBe(original);
     await stat(join(dir, corrupt)); // exists
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// decision store — concurrent mixed-mutation writers lose no write (C1 regression)
+// ════════════════════════════════════════════════════════════════════════════
+describe('decision store — concurrent CAS writers across mutation kinds', () => {
+  function decision(id: string, status: PendingDecision['status'] = 'draft'): PendingDecision {
+    return {
+      id, status, title: `decision ${id}`, rationale: '', consequences: '',
+      proposedRequirement: null, affectedDomains: [], affectedFiles: [],
+      sessionId: 's', recordedAt: '2026-01-01T00:00:00Z', confidence: 'medium', syncedToSpecs: [],
+    };
+  }
+
+  it('N concurrent upserts (record-style) persist every decision', async () => {
+    const N = 25;
+    await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        updateDecisionStore(root, (s) => upsertDecisions(s, [decision(`d${i}`)])),
+      ),
+    );
+    const final = await loadDecisionStore(root);
+    expect(final.decisions.map((d) => d.id).sort()).toEqual(
+      Array.from({ length: N }, (_, i) => `d${i}`).sort(),
+    );
+  });
+
+  it('a consolidation-style replace racing concurrent record upserts loses neither', async () => {
+    // Seed two drafts the "consolidation" will reject+replace.
+    await updateDecisionStore(root, (s) => upsertDecisions(s, [decision('draftA'), decision('draftB')]));
+
+    // Race: a consolidation that rejects draftA/draftB and writes a consolidated
+    // decision, concurrently with two fresh record_decision-style upserts. With CAS
+    // on a single lock, the consolidation snapshot cannot clobber the new records.
+    await Promise.all([
+      updateDecisionStore(root, (s) => {
+        let next = patchDecision(s, 'draftA', { status: 'rejected' });
+        next = patchDecision(next, 'draftB', { status: 'rejected' });
+        return upsertDecisions(next, [decision('consolidated', 'verified')]);
+      }),
+      updateDecisionStore(root, (s) => upsertDecisions(s, [decision('lateX')])),
+      updateDecisionStore(root, (s) => upsertDecisions(s, [decision('lateY')])),
+    ]);
+
+    const final = await loadDecisionStore(root);
+    const byId = new Map(final.decisions.map((d) => [d.id, d]));
+    // Every write survived — no lost update across mutation kinds.
+    expect(byId.has('consolidated')).toBe(true);
+    expect(byId.has('lateX')).toBe(true);
+    expect(byId.has('lateY')).toBe(true);
+    // The consolidation's rejects also applied.
+    expect(byId.get('draftA')?.status).toBe('rejected');
+    expect(byId.get('draftB')?.status).toBe('rejected');
   });
 });

@@ -32,6 +32,11 @@ export interface SequencedStore {
   sequence?: number;
 }
 
+// Monotonic per-process counter so two concurrent writers to the SAME path never
+// share a temp filename (which would let one truncate the other's temp before its
+// rename). Combined with the pid it is unique per in-flight write.
+let tmpCounter = 0;
+
 /**
  * Write `data` to `path` atomically. The data goes to a sibling temp file, is
  * flushed to disk (`fsync`), and is moved into place with a single atomic
@@ -39,24 +44,44 @@ export interface SequencedStore {
  * committed file untouched — never a partially written (torn) file.
  */
 export async function atomicWriteFile(path: string, data: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  // pid-scoped temp name: each writer holds the store lock during commit, but a
-  // distinct name per process keeps concurrent best-effort writers from sharing a
-  // temp file even outside the lock.
-  const tmp = join(dirname(path), `.${basename(path)}.tmp-${process.pid}`);
-  const fh = await open(tmp, 'w');
+  const dir = dirname(path);
+  await mkdir(dir, { recursive: true });
+  // Unique temp name per in-flight write (pid + monotonic counter): concurrent
+  // writers to the same path — even outside the commit lock — never collide on a
+  // shared temp file.
+  const tmp = join(dir, `.${basename(path)}.tmp-${process.pid}-${tmpCounter++}`);
+  let renamed = false;
   try {
-    await fh.writeFile(data, 'utf-8');
-    await fh.sync(); // durability barrier: bytes are on disk before the rename
+    const fh = await open(tmp, 'w');
+    try {
+      await fh.writeFile(data, 'utf-8');
+      await fh.sync(); // durability barrier: bytes are on disk before the rename
+    } finally {
+      await fh.close();
+    }
+    await rename(tmp, path); // atomic replace
+    renamed = true;
   } finally {
-    await fh.close();
+    // If we never renamed (write/sync threw), remove the orphaned temp so a failed
+    // write does not litter the store directory.
+    if (!renamed) await unlink(tmp).catch(() => {});
   }
-  await rename(tmp, path); // atomic replace
+  // Best-effort: fsync the directory so the rename (a metadata op) is durable
+  // across a crash. POSIX allows fsync on a directory fd; platforms that reject it
+  // (e.g. Windows) simply skip — the data fsync above already bounds the loss.
+  try {
+    const dh = await open(dir, 'r');
+    try { await dh.sync(); } finally { await dh.close(); }
+  } catch { /* directory fsync unsupported — skip */ }
 }
 
 // ── advisory lock for the tiny compare-and-write commit section ───────────────
 
-const LOCK_STALE_MS = 30_000; // steal a lock older than this (crashed holder)
+// STALE < MAX_WAIT by design: a crashed holder's lock always becomes stealable
+// (10s) well before a waiter gives up (30s), so the best-effort unlocked fallback
+// is only ever reached under genuine sustained contention — implausible for these
+// tiny critical sections — never because of a dead holder.
+const LOCK_STALE_MS = 10_000; // steal a lock older than this (crashed holder)
 const LOCK_POLL_MS = 25;
 const LOCK_MAX_WAIT_MS = 30_000;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -71,11 +96,13 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 async function withCommitLock<T>(lockPath: string, fn: () => Promise<T>): Promise<T> {
   await mkdir(dirname(lockPath), { recursive: true });
   const start = Date.now();
+  let acquired = false;
   for (;;) {
     try {
       const fh = await open(lockPath, 'wx'); // exclusive create — fails if held
       await fh.writeFile(`${process.pid}`);
       await fh.close();
+      acquired = true;
       break;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
@@ -88,28 +115,33 @@ async function withCommitLock<T>(lockPath: string, fn: () => Promise<T>): Promis
       } catch {
         continue; // lock vanished between open and stat — retry
       }
-      if (Date.now() - start > LOCK_MAX_WAIT_MS) break; // best-effort
+      if (Date.now() - start > LOCK_MAX_WAIT_MS) break; // best-effort: proceed unlocked
       await sleep(LOCK_POLL_MS);
     }
   }
   try {
     return await fn();
   } finally {
-    await unlink(lockPath).catch(() => {});
+    // Only remove the lock if we actually created it. On a best-effort timeout we
+    // never acquired it, so unlinking here would delete the current holder's lock
+    // and break mutual exclusion exactly when contention is highest.
+    if (acquired) await unlink(lockPath).catch(() => {});
   }
 }
 
-const MAX_CAS_ATTEMPTS = 50;
-
 /**
- * Atomically read-modify-write a sequenced JSON store with optimistic
- * compare-and-swap. Loads the current store, applies `mutate`, and commits at
- * `sequence + 1` only if the on-disk sequence is still what was loaded; on a
- * conflict it re-reads and re-applies `mutate` to the newer store rather than
- * overwrite the competing write. Returns the committed store.
+ * Atomically read-modify-write a sequenced JSON store. The load → mutate →
+ * write happens entirely inside the per-store advisory lock, so the lock — not an
+ * optimistic sequence guard — is the real serialization point: `mutate` always
+ * runs against the freshest on-disk store, and a competing write cannot interleave
+ * between the read and the write. The monotonic `sequence` is still bumped (it
+ * orders writes, names quarantine files, and lets external readers detect change),
+ * but correctness no longer depends on every writer honoring it.
  *
  * `mutate` MUST be a pure merge over the loaded store (append / id-keyed
- * upsert / supersede) so that re-applying it after a conflict is correct.
+ * upsert / supersede) so that applying it to the latest store is always correct.
+ * ALL writers of a given store MUST go through this function (or a wrapper of it)
+ * — a raw, lock-free write to the same path defeats the serialization.
  */
 export async function casUpdate<T extends SequencedStore>(opts: {
   storePath: string;
@@ -118,23 +150,12 @@ export async function casUpdate<T extends SequencedStore>(opts: {
   serialize: (next: T) => string;
 }): Promise<T> {
   const lockPath = `${opts.storePath}.lock`;
-  for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
-    const current = await opts.load();
-    const baseSeq = current.sequence ?? 0;
-    const next = { ...opts.mutate(current), sequence: baseSeq + 1 } as T;
-
-    const committed = await withCommitLock(lockPath, async () => {
-      const onDisk = await opts.load(); // re-read under the lock
-      if ((onDisk.sequence ?? 0) !== baseSeq) return false; // conflict → re-apply
-      await atomicWriteFile(opts.storePath, opts.serialize(next));
-      return true;
-    });
-    if (committed) return next;
-    // else: a competing writer advanced the sequence — loop, re-read, re-apply.
-  }
-  throw new Error(
-    `casUpdate: exhausted ${MAX_CAS_ATTEMPTS} attempts on ${opts.storePath} (persistent write contention)`,
-  );
+  return withCommitLock(lockPath, async () => {
+    const current = await opts.load(); // fresh read inside the lock
+    const next = { ...opts.mutate(current), sequence: (current.sequence ?? 0) + 1 } as T;
+    await atomicWriteFile(opts.storePath, opts.serialize(next));
+    return next;
+  });
 }
 
 // ── corrupt-store quarantine ──────────────────────────────────────────────────
