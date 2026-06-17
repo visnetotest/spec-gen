@@ -391,6 +391,32 @@ public class BaseEntity {
     expect(tables[0].fields[0].nullable).toBe(false);
   });
 
+  it('captures fields whose annotation is inline with the declaration (#138)', async () => {
+    // javax.persistence + inline annotations (`@Id private Long id;`) — the
+    // common style that a per-line "starts with @" check would drop.
+    const fp = await createFile(tmpDir, 'LegacyUser.java', `
+package com.example;
+
+import javax.persistence.Entity;
+import javax.persistence.Id;
+import javax.persistence.Column;
+
+@Entity
+public class LegacyUser {
+    @Id private Long id;
+    @Column(nullable = false) private String email;
+    private String nickname;
+}
+`);
+    const tables = await extractSchemas([fp], tmpDir);
+    expect(tables).toHaveLength(1);
+    const byName = Object.fromEntries(tables[0].fields.map(f => [f.name, f]));
+    expect(Object.keys(byName).sort()).toEqual(['email', 'id', 'nickname']);
+    expect(byName['id'].nullable).toBe(false);     // @Id ⇒ non-null
+    expect(byName['email'].nullable).toBe(false);  // nullable = false
+    expect(byName['nickname'].nullable).toBe(true);
+  });
+
   it('ignores Java files that are not entities', async () => {
     const fp = await createFile(tmpDir, 'PlainService.java', `
 package com.example;

@@ -5085,6 +5085,12 @@ The system SHALL inject call-graph edges into the file-level dependency graph fo
 
 > Decision recorded: 67580817
 > Date: 2026-06-17
+### Requirement: JaxrsRouteDetectionRequiresJavaxjakartawsrsImportToAvoidFalsePositivesFromHttpClientLibraries
+
+The system SHALL only classify a Java/Kotlin file as a JAX-RS server endpoint when it imports from the javax.ws.rs or jakarta.ws.rs package, to prevent false positives from HTTP client annotation libraries.
+
+> Decision recorded: f9de2e30
+> Date: 2026-06-17
 
 ## Technical Notes
 
@@ -5502,3 +5508,33 @@ The analyzer hardcoded JS/TS/Python extensions in several places, causing Java/K
 Java/Kotlin require imports only for cross-package references; same-package classes are used with no import. The dependency graph was built purely from import edges, so a Java project's file-level graph was nearly empty (spring-petclinic: 10 edges) while its call graph held 1261 — same-package relationships were invisible, hurting structural comprehension and leaving cluster views empty. Fix: (1) run injection for Java/Kotlin regardless of import-edge count, (2) seed the dedup set with existing edges so injected call edges never duplicate an import edge, (3) resolve call-graph file paths to absolute so the two id spaces align.
 
 **Consequences:** New exported SAME_PACKAGE_IMPLICIT_LANGS set (Java, Kotlin). injectCallGraphEdges now dedupes against pre-existing edges, making it safe to run alongside import edges. The absolute-path resolution also repairs the previously-silent no-op injection for Swift/C/C++. Java/Kotlin dependency graphs are now populated (petclinic 10→70 edges, gson 318→1517) with structural clusters; injected edges carry isCallEdge:true.
+
+### Require a ws.rs import for JAX-RS route detection
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** 954eac79
+
+JAX-RS route detection fired on any Java file containing both @Path and an HTTP-method annotation (@GET/@POST/...). Retrofit — an HTTP CLIENT library — uses identically-named @GET/@POST/@Path from retrofit2.http on interface methods (client request templates), so OpenLore hallucinated 28 phantom server routes for it (adversarial-audit finding). The defining signal for a real JAX-RS server resource is the javax.ws.rs / jakarta.ws.rs import, which Retrofit never has and Spring does not need. Gating JAX-RS detection on that import removes the false positives without affecting Spring (separate detection path) or genuine JAX-RS resources (which always import ws.rs).
+
+**Consequences:** extractJavaRouteDefinitions now requires an `import javax|jakarta.ws.rs` before classifying a file as JAX-RS. Retrofit/OkHttp client interfaces yield 0 routes; petclinic Spring routes (17) and JAX-RS resources (which import ws.rs) are unaffected.
+
+### JPA field parser handles inline annotations on the same line as the field declaration
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** 8605684f
+
+Common JPA patterns place annotations inline with the field (e.g. `@Id private Long id;`). The previous parser only recognized annotations on their own line, causing inline-annotated fields — including primary keys — to be silently dropped from schema extraction.
+
+**Consequences:** The parser now iteratively strips leading annotations before testing for a field match, correctly capturing inline-annotated fields. Pure-annotation lines still accumulate in pendingAnn for multi-line annotation stacks.
+
+### JAX-RS route detection requires javax/jakarta.ws.rs import to avoid false positives from HTTP client libraries
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** f9de2e30
+
+Retrofit interfaces use identically-named @GET/@POST/@Path annotations from retrofit2.http, which are client request templates, not server endpoints. Without checking the import package, the parser would emit phantom server routes for HTTP client definitions.
+
+**Consequences:** JAX-RS routes are only detected when the file imports from javax.ws.rs or jakarta.ws.rs; projects using non-standard JAX-RS re-exports would not be recognized. Retrofit and similar HTTP client interfaces are correctly excluded.

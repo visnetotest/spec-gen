@@ -553,7 +553,14 @@ export async function extractJavaRouteDefinitions(filePath: string): Promise<Rou
   }
 
   const isSpring = /@(?:Rest)?Controller\b|@(?:Get|Post|Put|Delete|Patch)Mapping\b|@RequestMapping\b/.test(clean);
-  const isJaxrs = /@Path\b/.test(clean) && /@(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/.test(clean);
+  // JAX-RS server annotations come from javax/jakarta.ws.rs. Require that import
+  // so we don't mistake an HTTP CLIENT library for a server: Retrofit interfaces
+  // use identically-named @GET/@POST/@Path from retrofit2.http (client request
+  // templates, not server endpoints) and would otherwise yield phantom routes.
+  const hasJaxrsImport = /\bimport\s+(?:static\s+)?(?:javax|jakarta)\.ws\.rs\b/.test(clean);
+  const isJaxrs = hasJaxrsImport
+    && /@Path\b/.test(clean)
+    && /@(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/.test(clean);
 
   // ── Spring: shorthand mappings (@GetMapping, @PostMapping, …) ──────────────
   if (isSpring) {

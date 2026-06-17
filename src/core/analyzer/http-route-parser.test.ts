@@ -1125,6 +1125,30 @@ public class UserResource {
     expect(paths).toContain('POST /users');
     expect(paths).toContain('GET /users/{id}');
   });
+
+  it('does NOT treat a Retrofit client interface as server routes (#138)', async () => {
+    // Retrofit's @GET/@Path come from retrofit2.http — client request templates,
+    // not server endpoints. Without the JAX-RS (ws.rs) import these must yield 0
+    // routes, otherwise OpenLore hallucinates a server API for a client library.
+    const file = await createFile(tempDir, 'GitHubService.java', `
+package com.example;
+
+import retrofit2.Call;
+import retrofit2.http.GET;
+import retrofit2.http.Path;
+
+public interface GitHubService {
+    @GET("/repos/{owner}/{repo}")
+    Call<Repo> getRepo(@Path("owner") String owner, @Path("repo") String repo);
+
+    @GET("/users/{user}/repos")
+    Call<List<Repo>> listRepos(@Path("user") String user);
+}
+`);
+
+    const routes = await extractJavaRouteDefinitions(file);
+    expect(routes).toEqual([]);
+  });
 });
 
 describe('extractAllHttpEdges with Java', () => {

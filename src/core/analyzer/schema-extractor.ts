@@ -275,12 +275,21 @@ function parseJpaEntity(source: string, rel: string): SchemaTable[] {
 
     // Only inspect declarations directly inside the class body (depth 1), so
     // calls and locals inside method bodies (depth ≥ 2) are ignored.
-    if (depth === 1) {
-      if (trimmed.startsWith('@')) {
-        pendingAnn.push(trimmed);
-      } else if (trimmed) {
-        const fieldMatch = trimmed.match(JPA_FIELD_RE);
-        const isStatic = /\bstatic\b/.test(trimmed);
+    if (depth === 1 && trimmed) {
+      // Peel leading annotations into pendingAnn. They may be on their own line
+      // OR inline with the declaration (`@Id private Long id;`), so we strip them
+      // and then test whatever remains as a field — otherwise inline-annotated
+      // fields (very common, e.g. the @Id primary key) would be lost.
+      let rest = trimmed;
+      let am: RegExpMatchArray | null;
+      while ((am = rest.match(/^@[\w.]+(?:\([^)]*\))?\s*/))) {
+        pendingAnn.push(am[0].trim());
+        rest = rest.slice(am[0].length);
+      }
+
+      if (rest) {
+        const fieldMatch = rest.match(JPA_FIELD_RE);
+        const isStatic = /\bstatic\b/.test(rest);
         const isTransient = /@Transient\b/.test(pendingAnn.join(' '));
         if (fieldMatch && !isStatic && !isTransient) {
           const fieldName = fieldMatch[2];
@@ -295,6 +304,7 @@ function parseJpaEntity(source: string, rel: string): SchemaTable[] {
         }
         pendingAnn = [];
       }
+      // else: the line was pure annotation(s) — keep pendingAnn for the next line.
     }
 
     const opens = (lineText.match(/\{/g) ?? []).length;
