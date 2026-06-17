@@ -1637,6 +1637,57 @@ function dedupeOverlappingCalls(
   return rawEdges;
 }
 
+/**
+ * Synthesize call edges for Java `super(...)` explicit constructor invocations.
+ *
+ * A `super(...)` call targets the PARENT class's constructor, which is keyed in
+ * the graph by the parent's simple name (constructors are named after their
+ * class). We read each class's parent from its `extends` clause and emit a
+ * constructor-typed edge from the enclosing constructor to the parent name.
+ *
+ * `this(...)` is intentionally skipped: overloaded constructors collapse to a
+ * single node, so a `this(...)` edge would only ever be a self-loop.
+ *
+ * Edges whose parent does not resolve to an internal node (e.g. `extends
+ * RuntimeException`) are dropped during resolution — the `callType: 'constructor'`
+ * marker tells Strategy 4 not to manufacture an external leaf node for them, so
+ * the external-node set stays clean.
+ */
+function synthesizeJavaSuperCalls(
+  root: Parser.SyntaxNode,
+  nodes: FunctionNode[],
+  lang: unknown
+): RawEdge[] {
+  // class simple-name → parent simple-name, from `extends` clauses.
+  const parentOf = new Map<string, string>();
+  const clsQuery = new _NativeQuery!(
+    lang as Parser.Language,
+    `(class_declaration name: (identifier) @cls (superclass (type_identifier) @parent))`
+  );
+  for (const m of clsQuery.matches(root)) {
+    const cls = m.captures.find(c => c.name === 'cls')?.node.text;
+    const parent = m.captures.find(c => c.name === 'parent')?.node.text;
+    if (cls && parent) parentOf.set(cls, parent);
+  }
+  if (parentOf.size === 0) return [];
+
+  const out: RawEdge[] = [];
+  const ctorQuery = new _NativeQuery!(
+    lang as Parser.Language,
+    `(explicit_constructor_invocation (super)) @node`
+  );
+  for (const m of ctorQuery.matches(root)) {
+    const node = m.captures.find(c => c.name === 'node')?.node;
+    if (!node) continue;
+    const caller = findEnclosingFunction(nodes, node.startIndex);
+    if (!caller?.className) continue;
+    const parent = parentOf.get(caller.className);
+    if (!parent) continue;
+    out.push({ callerId: caller.id, calleeName: parent, line: node.startPosition.row + 1, callType: 'constructor' });
+  }
+  return out;
+}
+
 async function extractJavaGraph(
   filePath: string,
   content: string
@@ -1703,6 +1754,9 @@ async function extractJavaGraph(
   // and polluting the external-node set. Collapse to one edge per invocation node,
   // preferring the qualified match (it carries the receiver).
   const rawEdges = dedupeOverlappingCalls(callQuery, tree.rootNode, nodes, 'Java');
+
+  // super(...) constructor-chain edges (this(...) intentionally omitted).
+  rawEdges.push(...synthesizeJavaSuperCalls(tree.rootNode, nodes, lang));
 
   return { nodes, rawEdges, cfg };
 }
@@ -4226,6 +4280,10 @@ export class CallGraphBuilder {
       if (!calleeNode && !raw.calleeObject) {
         const candidates = trie.findBySimpleName(raw.calleeName);
         if (candidates.length === 0) {
+          // A synthesized super(...) edge whose parent class is not in the
+          // analyzed code (e.g. `extends RuntimeException`) is dropped rather
+          // than turned into an external leaf — keeps the external-node set clean.
+          if (raw.callType === 'constructor') continue;
           // Unresolved bare call — create a synthetic external leaf node
           calleeNode = getOrCreateExternalNode(raw.calleeName, allNodes);
           confidence = 'external';

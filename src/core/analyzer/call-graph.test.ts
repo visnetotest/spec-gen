@@ -644,6 +644,54 @@ public class UserRepository {
     expect(nodeNames(result)).toContain('UserRepository');
     expect(nodeNames(result)).toContain('init');
   });
+
+  it('captures super(...) as an edge to the parent class constructor (#138)', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([
+      { path: 'Person.java', language: 'Java', content: `
+public class Person {
+    public Person(String name) {}
+}
+      ` },
+      { path: 'Owner.java', language: 'Java', content: `
+public class Owner extends Person {
+    public Owner(String name, int age) { super(name); }
+}
+      ` },
+    ]);
+
+    // Constructor nodes are keyed by the class name; super(name) → Person's ctor.
+    const ctorEdges = result.edges.filter(e => e.callType === 'constructor');
+    expect(ctorEdges).toHaveLength(1);
+    expect(edgePairs(result)).toContain('Owner→Person');
+  });
+
+  it('omits this(...) self-delegation (overloads collapse to one node) (#138)', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'Point.java', language: 'Java', content: `
+public class Point {
+    public Point(int x, int y) {}
+    public Point() { this(0, 0); }
+}
+      ` }]);
+    // No constructor edge: this(...) would only be a self-loop on the collapsed node.
+    expect(result.edges.filter(e => e.callType === 'constructor')).toHaveLength(0);
+  });
+
+  it('drops super(...) to an external superclass without creating an external node (#138)', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'FooException.java', language: 'Java', content: `
+public class FooException extends RuntimeException {
+    public FooException(String m) { super(m); }
+}
+      ` }]);
+    // The parent (RuntimeException) is not in the codebase → no edge, no external node.
+    expect(result.edges.filter(e => e.callType === 'constructor')).toHaveLength(0);
+    expect(nodeNames(result)).not.toContain('RuntimeException');
+    expect(Array.from(result.nodes.keys()).some(id => id.includes('RuntimeException'))).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
