@@ -239,6 +239,24 @@ describe('CHA — cross-file same-name class resolution', () => {
   });
 });
 
+describe('CHA — ambiguous cross-file base names', () => {
+  // Regression for the PHP dogfood finding (two unrelated `Logger` interfaces in
+  // different namespaces). When a child's base name is NOT declared in the child's
+  // file AND is ambiguous (several classes share it across files), resolution must
+  // skip — guessing a global first-match both fabricates a false override edge and
+  // steals the real one. Bias: false-negatives over false-positives.
+  it('does not synthesize an override edge to an ambiguous cross-file base', async () => {
+    const b = await new CallGraphBuilder().build([
+      { path: 'a.ts', content: `export class Logger { log() { return 1; } }`, language: 'TypeScript' },
+      { path: 'b.ts', content: `export class Logger { log() { return 2; } }`, language: 'TypeScript' },
+      { path: 'c.ts', content: `import { Logger } from './a'; class MyLogger extends Logger { log() { return 3; } }`, language: 'TypeScript' },
+    ]);
+    // Neither same-named Logger.log is wired to MyLogger.log (ambiguous → skipped).
+    const myLog = [...b.nodes.values()].find(n => n.id === 'c.ts::MyLogger.log')?.id;
+    expect(b.edges.some(e => e.synthesizedBy === 'override' && e.calleeId === myLog)).toBe(false);
+  });
+});
+
 describe('CHA — C# hierarchy (override edges)', () => {
   const buildCs = (content: string): Promise<Built> =>
     new CallGraphBuilder().build([{ path: 'Lights.cs', content, language: 'C#' }]);
@@ -266,6 +284,68 @@ describe('CHA — C# hierarchy (override edges)', () => {
     const e = edge(b, methodId(b, 'Stream', 'Write'), methodId(b, 'TransferStream', 'Write'));
     expect(e, 'Stream.Write -> TransferStream.Write').toBeDefined();
     expect(e!.synthesizedBy).toBe('override');
+  });
+});
+
+describe('CHA — multi-language hierarchy (override edges)', () => {
+  // Each language previously had NO branch in extractClassRelationships, so CHA was
+  // inert for it (zero inheritance edges). These lock the hierarchy extraction that
+  // makes override edges form. Swift/Scala use a concrete base because protocol/trait
+  // abstract methods (no body) are not extracted as nodes (documented boundary);
+  // Kotlin/PHP interface methods ARE extracted, so the interface idiom works.
+  const overrideEdgeNames = (b: Built): Set<string> =>
+    new Set(b.edges.filter(e => e.synthesizedBy === 'override').map(e => {
+      const caller = [...b.nodes.values()].find(n => n.id === e.callerId);
+      const callee = [...b.nodes.values()].find(n => n.id === e.calleeId);
+      return `${caller?.className}.${caller?.name}->${callee?.className}.${callee?.name}`;
+    }));
+
+  it('Kotlin interface implementation', async () => {
+    const b = await new CallGraphBuilder().build([{ path: 'S.kt', language: 'Kotlin', content:
+      `interface Shape { fun area(): Double }
+       class Circle : Shape { override fun area(): Double { return 1.0 } }` }]);
+    expect(overrideEdgeNames(b).has('Shape.area->Circle.area')).toBe(true);
+  });
+
+  it('PHP interface implementation', async () => {
+    const b = await new CallGraphBuilder().build([{ path: 'S.php', language: 'PHP', content:
+      `<?php
+       interface Shape { public function area(); }
+       class Circle implements Shape { public function area() { return 1; } }` }]);
+    expect(overrideEdgeNames(b).has('Shape.area->Circle.area')).toBe(true);
+  });
+
+  it('PHP class extends', async () => {
+    const b = await new CallGraphBuilder().build([{ path: 'A.php', language: 'PHP', content:
+      `<?php
+       class Animal { public function speak() { return "a"; } }
+       class Dog extends Animal { public function speak() { return "woof"; } }` }]);
+    expect(overrideEdgeNames(b).has('Animal.speak->Dog.speak')).toBe(true);
+  });
+
+  it('Swift concrete base class override', async () => {
+    const b = await new CallGraphBuilder().build([{ path: 'S.swift', language: 'Swift', content:
+      `class Base { func speak() -> String { return "b" } }
+       class Derived: Base { func speak() -> String { return "d" } }` }]);
+    expect(overrideEdgeNames(b).has('Base.speak->Derived.speak')).toBe(true);
+  });
+
+  it('Scala concrete base class override', async () => {
+    const b = await new CallGraphBuilder().build([{ path: 'S.scala', language: 'Scala', content:
+      `class Base { def speak(): String = "b" }
+       class Derived extends Base { def speak(): String = "d" }` }]);
+    expect(overrideEdgeNames(b).has('Base.speak->Derived.speak')).toBe(true);
+  });
+
+  it('Kotlin qualified supertype (Outer.Inner) does not wire to the outer type', async () => {
+    // Regression for the kotlinx.coroutines finding: `Job : CoroutineContext.Element`
+    // must NOT create a `Job <: CoroutineContext` edge (which wired extension-function
+    // receivers as phantom override bases). A class named `Outer` exists with method m;
+    // a class extending the nested `Outer.Inner` must not inherit-link to `Outer`.
+    const b = await new CallGraphBuilder().build([{ path: 'Q.kt', language: 'Kotlin', content:
+      `class Outer { fun m() {} }
+       class C : Outer.Inner { fun m() {} }` }]);
+    expect(overrideEdgeNames(b).has('Outer.m->C.m')).toBe(false);
   });
 });
 

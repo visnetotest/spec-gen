@@ -5553,6 +5553,24 @@ The system SHALL resolve base-class references to same-file declarations before 
 
 > Decision recorded: 66e47bb4
 > Date: 2026-06-17
+### Requirement: ExtendChaHierarchyExtractionToKotlinphpswiftscalaWithAmbiguityskipAndQualifiedsupertypeskipGuards
+
+The system SHALL extract class-hierarchy relationships for Kotlin, PHP, Swift, and Scala, skipping ambiguous cross-file base names and qualified supertypes to avoid false-positive dispatch edges.
+
+> Decision recorded: 9d87726f
+> Date: 2026-06-17
+### Requirement: ExtendChaTypehierarchyExtractionToKotlinPhpSwiftAndScala
+
+The system SHALL extract class-hierarchy relationships (extends/implements/mixin edges) from Kotlin, PHP, Swift, and Scala source files using tree-sitter grammars.
+
+> Decision recorded: bf52c392
+> Date: 2026-06-17
+### Requirement: AmbiguousCrossfileParentResolutionPrefersFalsenegativeOverFalsepositive
+
+The system SHALL skip cross-file parent resolution when the parent name is ambiguous (declared in more than one file), preferring false-negatives over false-positives in inheritance edges.
+
+> Decision recorded: d5967a48
+> Date: 2026-06-17
 
 ## Technical Notes
 
@@ -6020,3 +6038,33 @@ Route-matching regexes use character offsets (m.index) that are resolved to line
 Adversarial dogfooding CHA on real OO corpora (java-design-patterns, python-patterns, dotnet/samples) surfaced three defects: (1) global first-match base-class resolution linked unrelated same-named classes across files — fixed by preferring same-file ClassNode resolution before global fallback; (2) type-inference required uppercase declared types, so Java 10+/C# `var x = new T()` locals recovered no type and virtual calls fell to broad cha-name-arity — fixed by adding var-new-T matchers for Java and C#; (3) no C# branch in extractClassRelationships left CHA inert for C# — fixed by adding a C# branch over base_list, splitting base-class vs interface by I<Upper> naming convention.
 
 **Consequences:** Same-file base resolution eliminates cross-file name collisions (empty same-file base still falls back to global — rare, documented). var-new-T recovery converts many heuristic cha-name-arity edges into precise type_inference edges (Java cha-name-arity 113→65 on design-patterns slice). C# CHA now functional (0→81 inheritance / 59 override edges on slice). Residual cha-name-arity over-approximation remains for non-locally-recoverable receivers; field-type tracking / RTA-VTA pruning stay out-of-scope per HighPrecisionCHABounds.
+
+### Extend CHA hierarchy extraction to Kotlin/PHP/Swift/Scala with ambiguity-skip and qualified-supertype-skip guards
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** 9d87726f
+
+CHA was inert for Kotlin, PHP, Swift, and Scala because extractClassRelationships had no branch for them, producing zero inheritance and dispatch edges. Added hierarchy-extraction branches for each language (Kotlin/Swift via delegation/inheritance specifiers; PHP distinguishing extends from implements; Scala via extends_clause with a new getScalaParser). Real-repo dogfooding then surfaced two false-positive bugs: (1) cross-file/cross-namespace same-name class collisions wired by the global first-match fallback — fixed by skipping resolution when a base name is non-same-file AND ambiguous; (2) Kotlin/Swift qualified supertypes (Outer.Inner) mis-captured the outer segment as the base — fixed by taking the leaf name and skipping dotted types.
+
+**Consequences:** CHA now has hierarchy support for 11 languages (TS/JS, Python, Java, C++, C#, Ruby, Go, Kotlin, PHP, Swift, Scala). The ambiguity-skip is language-agnostic and eliminates cross-file collision false positives everywhere, at the cost of skipping legitimate cross-file override edges whose base name is reused (FQCN/namespace-aware resolution is the future enhancement). Swift/Scala protocol/trait abstract methods without bodies are not extracted as nodes, so only concrete-base hierarchies get edges.
+
+### Extend CHA type-hierarchy extraction to Kotlin, PHP, Swift, and Scala
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** bf52c392
+
+The polymorphic-dispatch (CHA) feature requires class-hierarchy edges for each supported language; adding tree-sitter-based extraction for these four languages broadens the cross-language coverage of resolved virtual-call edges.
+
+**Consequences:** New runtime dependency on tree-sitter-scala; each language follows the same pattern (lazy parser init + query-based extraction) so maintenance cost is linear; qualified/nested type names are deliberately skipped to avoid phantom edges.
+
+### Ambiguous cross-file parent resolution prefers false-negative over false-positive
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** d5967a48
+
+When multiple classes share a bare name across different files (e.g. two unrelated `Logger` interfaces in different PHP namespaces), a global first-match would fabricate a false override edge and steal the real one from the correct twin; skipping the resolution entirely is safer for downstream dispatch accuracy.
+
+**Consequences:** Some legitimate cross-file inheritance edges will be missed when name collisions exist; this is an acceptable precision-over-recall tradeoff that avoids polluting the call graph with phantom dispatch targets.

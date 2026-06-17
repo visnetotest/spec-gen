@@ -30,6 +30,7 @@ import {
   buildAdjacency,
   bfs,
   buildWeightedAdjacency,
+  bfsFromDB,
   weightedBfs,
   computeRiskScore,
   recommendStrategy,
@@ -131,6 +132,25 @@ describe('CHA edges in adjacency builders', () => {
     const cg = makeGraph([caller, impl], [chaCallEdge(caller.id, impl.id)]);
     const { forward } = buildWeightedAdjacency(cg);
     expect((forward.get(caller.id) ?? []).some(e => e.to === impl.id)).toBe(true);
+  });
+
+  // The DB-backed lazy path (bfsFromDB) must traverse the SAME materialized override
+  // edges as the in-memory buildAdjacency — so analyze_impact/get_subgraph agree with
+  // find_dead_code — and directResolvedOnly must exclude them in this path too.
+  // (spec: add-type-hierarchy-resolved-dispatch — ProvenanceAwareReachability)
+  it('bfsFromDB traverses override edges by default and excludes them in strict mode', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ol-bfsdb-'));
+    const store = EdgeStore.open(join(dir, 'call-graph.db'));
+    try {
+      store.insertEdges([overrideEdge('a.ts::Animal.speak', 'a.ts::Dog.speak')]);
+      const reached = bfsFromDB(['a.ts::Animal.speak'], 'forward', 3, store);
+      expect(reached.has('a.ts::Dog.speak')).toBe(true);
+      const strict = bfsFromDB(['a.ts::Animal.speak'], 'forward', 3, store, { directResolvedOnly: true });
+      expect(strict.has('a.ts::Dog.speak')).toBe(false);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

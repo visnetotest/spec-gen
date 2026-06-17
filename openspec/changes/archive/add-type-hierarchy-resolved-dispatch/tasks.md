@@ -65,6 +65,36 @@
 > dispatch path matches by name only (arity is enforced on the override path). Tests: +7
 > (`type-inference-engine.test.ts` Java/C# `var new T`; `cha.test.ts` cross-file resolution + C#
 > override edges). Full suite green (3754).
+>
+> **Multi-language coverage + dogfood pass (follow-up, same PR #155).** Auditing
+> `extractClassRelationships` against the languages OpenLore parses revealed CHA was **inert for
+> Kotlin, PHP, Swift, and Scala** — they extract classes but had no hierarchy-extraction branch (the
+> exact C# defect, ×4: zero inheritance edges → zero override/dispatch edges). Added a branch for each
+> (Kotlin/Swift via delegation/inheritance specifiers, PHP splitting `base_clause` vs
+> `class_interface_clause`, Scala via `extends_clause` + a new `getScalaParser`). Ruby and Go already
+> worked; C++ has a branch (its abstract-pure-virtual-base case is the documented node boundary).
+> Real-repo dogfood (DesignPatternsPHP, kotlinx.coroutines) confirmed correct edges at scale (PHP 71,
+> Kotlin 157 override edges) **and** surfaced two false-positive bugs, both fixed:
+> - **Cross-file / cross-namespace same-name collision → false override edge.** Two unrelated `Logger`
+>   (and `Formatter`) interfaces in different PHP namespaces: the child's implementers live in other
+>   files, so same-file-first missed and the global first-match wired the wrong twin (and *stole* the
+>   real edge). Fixed language-agnostically in `buildClassNodes`: when a base name is not same-file
+>   AND is ambiguous (several classes share it across files), **skip** rather than guess —
+>   false-negatives over false-positives. (Cost: some legitimate reused-name cross-file edges are also
+>   skipped; namespace/FQCN-aware resolution is the future enhancement, like RTA/VTA pruning.)
+> - **Kotlin qualified supertype mis-captured.** `interface Job : CoroutineContext.Element` matched the
+>   outer segment `CoroutineContext` (a phantom class from extension-function receivers `fun
+>   CoroutineContext.x()`), synthesizing false `CoroutineContext.x → Job.x` overrides. Fixed by taking
+>   the supertype's leaf name and **skipping qualified types** (`Outer.Inner`); applied to Swift too
+>   (identical `user_type` structure, same latent bug). Generic supertypes (`Segment<T>`) still
+>   resolve correctly to `Segment`.
+>
+> Also verified the last unproven scenario end-to-end: **override propagation through the DB-backed
+> lazy path** — a `bfsFromDB` test (real `EdgeStore`) confirms override edges are traversed by default
+> and excluded under `directResolvedOnly`, matching the in-memory `buildAdjacency` path. Tests: +8
+> (`cha.test.ts` Kotlin/PHP/Swift/Scala override + ambiguous-cross-file + Kotlin-qualified-supertype;
+> `graph.test.ts` bfsFromDB DB-path propagation). Full suite green (3762). Languages with CHA hierarchy
+> support: TS/JS, Python, Java, C++, C#, Ruby, Go, Kotlin, PHP, Swift, Scala.
 
 ## 1. Confirm the surface is purely additive (no type changes)
 - [x] Verify `EdgeConfidence` already includes `'synthesized'` (`call-graph.ts:34`), `CallEdge` already

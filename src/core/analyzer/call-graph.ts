@@ -459,6 +459,7 @@ let _swiftParser: Parser | undefined;
 let _phpParser: Parser | undefined;
 let _csParser: Parser | undefined;
 let _ktParser: Parser | undefined;
+let _scalaParser: Parser | undefined;
 let _exParser: Parser | undefined;
 
 // null = tried and unavailable; undefined = not yet tried
@@ -489,6 +490,7 @@ let _SwiftLanguage: object | undefined;
 let _PhpLanguage: object | undefined;
 let _CsLanguage: object | undefined;
 let _KtLanguage: object | undefined;
+let _ScalaLanguage: object | undefined;
 let _ExLanguage: object | undefined;
 
 async function getTSParser(): Promise<{ parser: Parser; lang: object } | null> {
@@ -597,6 +599,18 @@ async function getKotlinParser(): Promise<{ parser: Parser; lang: object } | nul
     _ktParser.setLanguage(_KtLanguage as unknown as Parser.Language);
   }
   return { parser: _ktParser!, lang: _KtLanguage! };
+}
+
+async function getScalaParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
+  if (!_scalaParser) {
+    const scalaModule = await import('tree-sitter-scala');
+    _ScalaLanguage = (scalaModule as { default: object }).default;
+    _scalaParser = new NP();
+    _scalaParser.setLanguage(_ScalaLanguage as unknown as Parser.Language);
+  }
+  return { parser: _scalaParser!, lang: _ScalaLanguage! };
 }
 
 async function getElixirParser(): Promise<{ parser: Parser; lang: object } | null> {
@@ -2739,6 +2753,92 @@ async function extractClassRelationships(
           }
         }
 
+      } else if (file.language === 'Kotlin') {
+        const r = await getKotlinParser();
+        if (!r) continue;
+        const { parser, lang } = r;
+        const tree = (parser as Parser).parse(file.content);
+
+        // Kotlin `class C : Base(), IFace` — every supertype is a `delegation_specifier`
+        // with no syntactic class/interface distinction (a superclass may carry a
+        // constructor_invocation). Capture the whole user_type and take its leaf name,
+        // SKIPPING qualified types (`Outer.Inner`, e.g. `Job : CoroutineContext.Element`):
+        // those resolve to a nested/stdlib type, and matching the outer segment wires the
+        // class to a phantom (an extension-function receiver such as `CoroutineContext`).
+        for (const declType of ['class_declaration', 'object_declaration', 'interface_declaration']) {
+          for (const wrap of ['(user_type) @put', '(constructor_invocation (user_type) @put)']) {
+            const Q = `(${declType} (type_identifier) @cls (delegation_specifier ${wrap}))`;
+            for (const m of safeQuery(lang, Q, tree.rootNode)) {
+              const cls = m.captures.find(c => c.name === 'cls')?.node.text;
+              const put = m.captures.find(c => c.name === 'put')?.node.text;
+              if (!cls || !put) continue;
+              const parent = put.replace(/<[\s\S]*$/, '').trim(); // strip generic args
+              if (parent.includes('.')) continue;                 // skip qualified/nested types
+              merge(file.path, cls, [parent], []);
+            }
+          }
+        }
+
+      } else if (file.language === 'PHP') {
+        const r = await getPhpParser();
+        if (!r) continue;
+        const { parser, lang } = r;
+        const tree = (parser as Parser).parse(file.content);
+
+        // PHP distinguishes `extends` (base_clause, one parent) from `implements`
+        // (class_interface_clause, many interfaces).
+        const EXTENDS_Q = `(class_declaration name: (name) @cls (base_clause (name) @parent))`;
+        const IMPLEMENTS_Q = `(class_declaration name: (name) @cls (class_interface_clause (name) @iface))`;
+        for (const m of safeQuery(lang, EXTENDS_Q, tree.rootNode)) {
+          const cls    = m.captures.find(c => c.name === 'cls')?.node.text;
+          const parent = m.captures.find(c => c.name === 'parent')?.node.text;
+          if (cls && parent) merge(file.path, cls, [parent], []);
+        }
+        for (const m of safeQuery(lang, IMPLEMENTS_Q, tree.rootNode)) {
+          const cls   = m.captures.find(c => c.name === 'cls')?.node.text;
+          const iface = m.captures.find(c => c.name === 'iface')?.node.text;
+          if (cls && iface) merge(file.path, cls, [], [iface]);
+        }
+
+      } else if (file.language === 'Swift') {
+        const r = await getSwiftParser();
+        if (!r) continue;
+        const { parser, lang } = r;
+        const tree = (parser as Parser).parse(file.content);
+
+        // Swift `class C: Base, Proto` — every supertype/protocol is an
+        // `inheritance_specifier` with no syntactic distinction. (class_declaration in
+        // this grammar also covers struct/enum/extension.) Take the user_type leaf name
+        // and skip qualified types (`Module.Type`) for the same reason as Kotlin.
+        for (const declType of ['class_declaration', 'protocol_declaration']) {
+          const Q = `(${declType} (type_identifier) @cls (inheritance_specifier (user_type) @put))`;
+          for (const m of safeQuery(lang, Q, tree.rootNode)) {
+            const cls = m.captures.find(c => c.name === 'cls')?.node.text;
+            const put = m.captures.find(c => c.name === 'put')?.node.text;
+            if (!cls || !put) continue;
+            const parent = put.replace(/<[\s\S]*$/, '').trim();
+            if (parent.includes('.')) continue;
+            merge(file.path, cls, [parent], []);
+          }
+        }
+
+      } else if (file.language === 'Scala') {
+        const r = await getScalaParser();
+        if (!r) continue;
+        const { parser, lang } = r;
+        const tree = (parser as Parser).parse(file.content);
+
+        // Scala `class C extends Base with Trait` — the superclass and every mixed-in
+        // trait sit in one `extends_clause`. Treat each as a subtype edge.
+        for (const declType of ['class_definition', 'trait_definition', 'object_definition']) {
+          const Q = `(${declType} (identifier) @cls (extends_clause (type_identifier) @parent))`;
+          for (const m of safeQuery(lang, Q, tree.rootNode)) {
+            const cls    = m.captures.find(c => c.name === 'cls')?.node.text;
+            const parent = m.captures.find(c => c.name === 'parent')?.node.text;
+            if (cls && parent) merge(file.path, cls, [parent], []);
+          }
+        }
+
       } else if (file.language === 'Ruby') {
         const r = await getRubyParser();
         if (!r) continue;
@@ -2863,11 +2963,22 @@ function buildClassNodes(
   // (a class extending a base declared in its own file / a same-named local shadow);
   // genuine cross-file inheritance falls back to the global first match.
   const byName = new Map<string, ClassNode>();
+  const nameCount = new Map<string, number>();
   for (const cls of classMap.values()) {
+    nameCount.set(cls.name, (nameCount.get(cls.name) ?? 0) + 1);
     if (!byName.has(cls.name)) byName.set(cls.name, cls);
   }
-  const resolveParent = (parentName: string, childFile: string): ClassNode | undefined =>
-    classMap.get(`${childFile}::${parentName}`) ?? byName.get(parentName);
+  const resolveParent = (parentName: string, childFile: string): ClassNode | undefined => {
+    const sameFile = classMap.get(`${childFile}::${parentName}`);
+    if (sameFile) return sameFile;
+    // The base is not declared in the child's file and its bare name is AMBIGUOUS
+    // (several classes share it across files — e.g. two unrelated `Logger` interfaces
+    // in different PHP namespaces). A global first-match would both fabricate a false
+    // override edge AND steal the real one from the correct twin, so skip rather than
+    // guess — false-negatives over false-positives.
+    if ((nameCount.get(parentName) ?? 0) > 1) return undefined;
+    return byName.get(parentName);
+  };
 
   const inheritanceEdges: InheritanceEdge[] = [];
   const seenEdges = new Set<string>();
