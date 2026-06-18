@@ -303,13 +303,13 @@ export async function dispatchTool(
     const { directory, dryRun = false, id } = args as { directory: string; dryRun?: boolean; id?: string };
     return handleSyncDecisions(directory, dryRun, id);
   } else if (name === 'remember') {
-    const { directory, content, anchors, tags } =
-      args as { directory: string; content: string; anchors?: AnchorHint[]; tags?: string[] };
-    return handleRemember(directory, content, anchors, tags);
+    const { directory, content, anchors, tags, type, supersedes } =
+      args as { directory: string; content: string; anchors?: AnchorHint[]; tags?: string[]; type?: string; supersedes?: string };
+    return handleRemember(directory, content, anchors, tags, type, supersedes);
   } else if (name === 'recall') {
-    const { directory, task, limit = 10, tokenBudget } =
-      args as { directory: string; task?: string; limit?: number; tokenBudget?: number };
-    return handleRecall(directory, task, limit, tokenBudget);
+    const { directory, task, limit = 10, tokenBudget, asOf, changedSince, type } =
+      args as { directory: string; task?: string; limit?: number; tokenBudget?: number; asOf?: string; changedSince?: string; type?: string };
+    return handleRecall(directory, task, limit, tokenBudget, asOf, changedSince, type);
   }
   throw new UnknownToolError(name);
 }

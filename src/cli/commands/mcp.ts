@@ -1510,9 +1510,10 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'remember',
     description:
-      'Persist a durable, code-anchored memory for future sessions to recall (an invariant, ' +
-      'gotcha, or rationale). Pass anchors (a symbol and/or file) so the memory self-invalidates ' +
-      'when that code changes or dies. For decisions that sync to specs, use record_decision.',
+      'Persist a durable, code-anchored memory to recall later (invariant/gotcha/rationale). Pass ' +
+      'anchors (symbol and/or file) so it self-invalidates when that code changes. Optional: type ' +
+      '(default note) and supersedes=<id> to retire a prior memory; re-recording the same ' +
+      'content+anchor updates in place. For spec-synced decisions use record_decision.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1530,6 +1531,12 @@ export const TOOL_DEFINITIONS = [
           },
         },
         tags: { type: 'array', items: { type: 'string' }, description: 'Optional retrieval tags.' },
+        type: {
+          type: 'string',
+          enum: ['invariant', 'gotcha', 'rationale', 'convention', 'preference', 'todo', 'note'],
+          description: 'Classification (default note); never inferred.',
+        },
+        supersedes: { type: 'string', description: 'Id of a prior memory to retire (kept queryable via asOf).' },
       },
       required: ['directory', 'content'],
     },
@@ -1537,10 +1544,10 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'recall',
     description:
-      'Recall code-anchored memories (notes + decisions) for a task, each with a deterministic ' +
-      'freshness verdict vs the current graph: fresh, drifted (code changed — verify), or orphaned ' +
-      '(code gone). Orphaned memories go in needsReanchoring, never authoritative. Omit task to ' +
-      'scan all memory for staleness.',
+      'Recall code-anchored memories (notes + decisions) for a task with a freshness verdict: fresh, ' +
+      'drifted (verify), or orphaned (in needsReanchoring, never authoritative). Two authoritative ' +
+      'memories on one symbol surface in unreconciled. Optional: asOf/changedSince (commit-ish) for ' +
+      'history, type filter. Omit task to scan all.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1548,6 +1555,9 @@ export const TOOL_DEFINITIONS = [
         task: { type: 'string', description: 'What you are about to work on (optional).' },
         limit: { type: 'number', description: 'Max memories to return (default: 10).' },
         tokenBudget: { type: 'number', description: 'Optional token cap; reports withheld count.' },
+        asOf: { type: 'string', description: 'Commit-ish: memory authoritative as of that commit.' },
+        changedSince: { type: 'string', description: 'Commit-ish: memory recorded/invalidated after it.' },
+        type: { type: 'string', description: 'Restrict notes to this type (decisions excluded when set).' },
       },
       required: ['directory'],
     },

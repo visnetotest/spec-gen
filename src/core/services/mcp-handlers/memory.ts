@@ -18,15 +18,29 @@ import { validateDirectory, sanitizeMcpError } from './utils.js';
 import { loadDecisionStore, INACTIVE_STATUSES } from '../../decisions/store.js';
 import { loadMemoryStore, updateMemoryStore, makeMemoryId } from '../../decisions/memory-store.js';
 import { AnchorContext } from '../../decisions/anchor-adapter.js';
-import { memoryFreshness, decisionAnchors, type GraphFreshnessView } from '../../decisions/anchor.js';
+import {
+  memoryFreshness,
+  decisionAnchors,
+  findUnreconciled,
+  type GraphFreshnessView,
+  type AnchoredItem,
+} from '../../decisions/anchor.js';
+import { getHeadCommit, resolveCommitSha, isAncestor } from '../../decisions/git-time.js';
 import { queryTerms, scoreMemory, type RankFields } from './memory-ranking.js';
-import type {
-  AnchoredMemory,
-  StructuralAnchor,
-  PendingDecision,
-  AnchorVerdict,
-  GroundingCertificate,
+import {
+  MEMORY_TYPES,
+  type AnchoredMemory,
+  type MemoryType,
+  type StructuralAnchor,
+  type PendingDecision,
+  type AnchorVerdict,
+  type GroundingCertificate,
 } from '../../../types/index.js';
+
+/** Normalize a caller-supplied type to the closed set; unknown/absent ⇒ `note`. No inference. */
+function normalizeMemoryType(type?: string): MemoryType {
+  return (type && (MEMORY_TYPES as readonly string[]).includes(type)) ? (type as MemoryType) : 'note';
+}
 
 // ── remember ────────────────────────────────────────────────────────────────
 
@@ -40,6 +54,8 @@ export async function handleRemember(
   content: string,
   anchorHints?: AnchorHint[],
   tags?: string[],
+  type?: string,
+  supersedes?: string,
 ): Promise<unknown> {
   try {
     if (!content?.trim()) return { error: 'content is required and must not be empty.' };
@@ -62,30 +78,66 @@ export async function handleRemember(
       }
     }
 
+    // Valid-time marker: the HEAD commit this memory describes (deterministic, no LLM).
+    // Undefined in a non-git repo / pre-first-commit — the memory is then always-valid.
+    const validFromCommit = await getHeadCommit(rootPath);
+
     const recordedAt = new Date().toISOString();
     const memory: AnchoredMemory = {
-      id: makeMemoryId(content.trim(), recordedAt),
+      // Identity is content + resolved anchors, so re-recording the same fact about the
+      // same code updates in place (content-anchor dedup) instead of accumulating.
+      id: makeMemoryId(content.trim(), anchors),
       kind: 'note',
       content: content.trim(),
       anchors,
       recordedAt,
       tags: tags?.length ? tags : undefined,
+      type: normalizeMemoryType(type),
+      ...(validFromCommit ? { validFromCommit } : {}),
+      ...(supersedes ? { supersedes } : {}),
     };
 
     // CAS update so concurrent remember calls never lose a write: the id-keyed
-    // upsert is re-applied to the latest store on a write conflict.
-    await updateMemoryStore(rootPath, (store) => ({
-      ...store,
-      memories: [...store.memories.filter((m) => m.id !== memory.id), memory],
-    }));
+    // upsert is re-applied to the latest store on a write conflict. When `supersedes`
+    // names a prior memory, mark it invalidated (it leaves the authoritative set per
+    // the memory-integrity invariant, but stays queryable via `asOf` for history).
+    let supersededFound = false;
+    await updateMemoryStore(rootPath, (store) => {
+      const memories = store.memories.map((m) => {
+        if (supersedes && m.id === supersedes && !m.invalidatedAt) {
+          supersededFound = true;
+          return {
+            ...m,
+            invalidatedAt: recordedAt,
+            ...(validFromCommit ? { invalidatedByCommit: validFromCommit } : {}),
+          };
+        }
+        return m;
+      });
+      return {
+        ...store,
+        memories: [...memories.filter((m) => m.id !== memory.id), memory],
+      };
+    });
+
+    const supersedeNote = supersedes
+      ? supersededFound
+        ? `Superseded prior memory ${supersedes} (now invalidated; queryable via asOf).`
+        : `supersedes target "${supersedes}" was not found or already invalidated — recorded without retiring it.`
+      : undefined;
 
     return {
       id: memory.id,
+      type: memory.type,
       anchored: anchors.length > 0,
+      validFromCommit: validFromCommit ?? null,
       anchors: anchors.map(summarizeAnchor),
-      message: anchors.length
-        ? `Memory recorded with ${anchors.length} structural anchor(s).`
-        : 'Memory recorded (unanchored — recall will not be able to verify it against code).',
+      message: [
+        anchors.length
+          ? `Memory recorded with ${anchors.length} structural anchor(s).`
+          : 'Memory recorded (unanchored — recall will not be able to verify it against code).',
+        supersedeNote,
+      ].filter(Boolean).join(' '),
     };
   } catch (err) {
     return { error: sanitizeMcpError(err) };
@@ -100,6 +152,12 @@ interface RecalledMemory {
   text: string;
   freshness: 'fresh' | 'drifted' | 'orphaned';
   anchored: boolean;
+  /** Caller-supplied classification (notes only); decisions omit it. */
+  type?: MemoryType;
+  /** Bitemporal valid-from marker (notes only), when known. */
+  validFromCommit?: string;
+  /** Set on a memory returned by `asOf`/`changedSince` that has since been invalidated. */
+  invalidated?: boolean;
   /** Set on drifted memories: the described code changed since recording. */
   verify?: boolean;
   anchors: ReturnType<typeof summarizeVerdict>[];
@@ -121,6 +179,9 @@ export async function handleRecall(
   task?: string,
   limit = 10,
   tokenBudget?: number,
+  asOf?: string,
+  changedSince?: string,
+  typeFilter?: string,
 ): Promise<unknown> {
   try {
     const rootPath = await validateDirectory(directory);
@@ -129,6 +190,25 @@ export async function handleRecall(
       loadMemoryStore(rootPath),
       loadDecisionStore(rootPath),
     ]);
+
+    // ── Bitemporal scoping (add-bitemporal-typed-memory-operations) ────────────
+    // `asOf` / `changedSince` resolve a commit-ish to a SHA and compare each note's
+    // valid-time markers via git ancestry — opt-in, so the common path shells out to
+    // git zero times. Decisions are governed by the gate/sync lifecycle, not the memory
+    // bitemporal model, so they are excluded whenever a temporal filter is active.
+    const warnings: string[] = [];
+    const asOfSha = asOf ? await resolveCommitSha(rootPath, asOf) : undefined;
+    if (asOf && !asOfSha) warnings.push(`asOf "${asOf}" did not resolve to a commit — ignoring it.`);
+    const sinceSha = changedSince ? await resolveCommitSha(rootPath, changedSince) : undefined;
+    if (changedSince && !sinceSha) warnings.push(`changedSince "${changedSince}" did not resolve to a commit — ignoring it.`);
+    const temporal = !!(asOfSha || sinceSha);
+
+    const wantType = normalizeMemoryTypeFilter(typeFilter);
+    if (typeFilter && !wantType) warnings.push(`type "${typeFilter}" is not a known memory type — ignoring the filter.`);
+
+    // Decide which notes are in scope before scoring. Without a temporal filter,
+    // invalidated notes are history and excluded entirely (the integrity invariant).
+    const noteInScope = await selectNotesInScope(rootPath, memStore.memories, { asOfSha, sinceSha });
 
     const ctx = AnchorContext.open(rootPath);
     const view: GraphFreshnessView = ctx
@@ -152,7 +232,13 @@ export async function handleRecall(
         return certificates.length ? { verifiedCurrent: true, certificates } : {};
       };
 
+      // Track the freshness-anchor view of every authoritative memory (pre-limit) so
+      // contradiction detection sees the full set, not a `limit`-truncated slice.
+      const contradictionItems: AnchoredItem[] = [];
+
       for (const m of memStore.memories) {
+        if (!noteInScope.has(m.id)) continue;           // out of temporal scope / invalidated
+        if (wantType && (m.type ?? 'note') !== wantType) continue; // type filter
         const f = memoryFreshness(m.anchors, view);
         const r = scoreMemory(terms, {
           anchorSymbols: m.anchors.map((a) => a.symbolName).filter((s): s is string => !!s),
@@ -160,12 +246,16 @@ export async function handleRecall(
           anchorFiles: m.anchors.map((a) => a.filePath),
           content: m.content,
         });
+        const invalidated = !!m.invalidatedAt;
         items.push({
           kind: 'note',
           id: m.id,
           text: m.content,
           freshness: f.freshness,
           anchored: f.anchored,
+          type: m.type ?? 'note',
+          ...(m.validFromCommit ? { validFromCommit: m.validFromCommit } : {}),
+          ...(invalidated ? { invalidated: true } : {}),
           verify: f.freshness === 'drifted' ? true : undefined,
           anchors: f.verdicts.map(summarizeVerdict),
           recordedAt: m.recordedAt,
@@ -173,26 +263,43 @@ export async function handleRecall(
           ...certify(f.freshness, m.anchors),
           score: r.score,
         });
+        contradictionItems.push({ id: m.id, anchors: m.anchors, freshness: f.freshness, invalidated });
       }
 
-      for (const d of activeDecisions(decisionStore.decisions)) {
-        const anchors = decisionAnchors(d);
-        const f = memoryFreshness(anchors, view);
-        const r = scoreMemory(terms, decisionFields(d, anchors));
-        items.push({
-          kind: 'decision',
-          id: d.id,
-          text: d.title,
-          freshness: f.freshness,
-          anchored: f.anchored,
-          verify: f.freshness === 'drifted' ? true : undefined,
-          anchors: f.verdicts.map(summarizeVerdict),
-          recordedAt: d.recordedAt,
-          match: hasQuery ? { fields: r.matched, anchorBoost: r.anchorBoost } : undefined,
-          ...certify(f.freshness, anchors),
-          score: r.score,
-        });
+      // Decisions are outside the bitemporal model — skip them when a temporal filter
+      // or a type filter is active (they are untyped and lifecycle-governed).
+      if (!temporal && !wantType) {
+        for (const d of activeDecisions(decisionStore.decisions)) {
+          const anchors = decisionAnchors(d);
+          const f = memoryFreshness(anchors, view);
+          const r = scoreMemory(terms, decisionFields(d, anchors));
+          items.push({
+            kind: 'decision',
+            id: d.id,
+            text: d.title,
+            freshness: f.freshness,
+            anchored: f.anchored,
+            verify: f.freshness === 'drifted' ? true : undefined,
+            anchors: f.verdicts.map(summarizeVerdict),
+            recordedAt: d.recordedAt,
+            match: hasQuery ? { fields: r.matched, anchorBoost: r.anchorBoost } : undefined,
+            ...certify(f.freshness, anchors),
+            score: r.score,
+          });
+          contradictionItems.push({ id: d.id, anchors, freshness: f.freshness });
+        }
       }
+
+      // Deterministic contradiction surfacing: two authoritative (fresh, non-invalidated)
+      // memories on the same symbol are `unreconciled` — flagged, never double-served.
+      // Computed over the score-filtered set so a task scopes it, but before `limit` so
+      // truncation can never hide a contradiction.
+      const inScoreScope = hasQuery
+        ? new Set(items.filter((i) => i.score > 0).map((i) => i.id))
+        : null;
+      const unreconciled = findUnreconciled(
+        inScoreScope ? contradictionItems.filter((i) => inScoreScope.has(i.id)) : contradictionItems,
+      );
 
       const filtered = (hasQuery ? items.filter((i) => i.score > 0) : items)
         .sort((a, b) => b.score - a.score || (b.recordedAt ?? '').localeCompare(a.recordedAt ?? ''))
@@ -229,10 +336,16 @@ export async function handleRecall(
       const reanchorNote = needsReanchoring.length
         ? 'needsReanchoring entries reference code that no longer exists — do not treat them as authoritative; re-record them against current code.'
         : undefined;
+      const unreconciledNote = unreconciled.length
+        ? `${unreconciled.length} symbol(s) have two or more authoritative memories — reconcile or supersede one (see unreconciled).`
+        : undefined;
 
       return {
         task: task ?? null,
         graphAvailable: ctx !== null,
+        ...(asOfSha ? { asOf: asOfSha } : {}),
+        ...(sinceSha ? { changedSince: sinceSha } : {}),
+        ...(wantType ? { type: wantType } : {}),
         total: filtered.length,
         summary: {
           fresh: filtered.filter((i) => i.freshness === 'fresh').length,
@@ -241,8 +354,9 @@ export async function handleRecall(
         },
         authoritative: authoritativeOut.map(stripScore),
         needsReanchoring: needsReanchoring.map(stripScore),
+        unreconciled: unreconciled.length ? unreconciled : undefined,
         budget,
-        note: [budgetNote, reanchorNote].filter(Boolean).join(' ') || undefined,
+        note: [budgetNote, reanchorNote, unreconciledNote, ...warnings].filter(Boolean).join(' ') || undefined,
       };
     } finally {
       ctx?.close();
@@ -256,6 +370,61 @@ export async function handleRecall(
 
 function activeDecisions(decisions: PendingDecision[]): PendingDecision[] {
   return decisions.filter((d) => !INACTIVE_STATUSES.has(d.status));
+}
+
+/** Normalize a caller `type` filter to the closed set; unknown ⇒ undefined (no filter). */
+function normalizeMemoryTypeFilter(type?: string): MemoryType | undefined {
+  if (!type) return undefined;
+  return (MEMORY_TYPES as readonly string[]).includes(type) ? (type as MemoryType) : undefined;
+}
+
+/**
+ * The set of note ids in scope for this recall (add-bitemporal-typed-memory-operations).
+ * Without a temporal filter, every non-invalidated note is in scope (invalidated notes are
+ * history). With `asOf` / `changedSince`, scope is decided by git-ancestry comparison of the
+ * note's valid-time markers — deterministic and reproducible for a fixed repo state.
+ */
+async function selectNotesInScope(
+  rootPath: string,
+  memories: readonly AnchoredMemory[],
+  opts: { asOfSha?: string; sinceSha?: string },
+): Promise<Set<string>> {
+  const { asOfSha, sinceSha } = opts;
+  if (!asOfSha && !sinceSha) {
+    return new Set(memories.filter((m) => !m.invalidatedAt).map((m) => m.id));
+  }
+  const inScope = new Set<string>();
+  for (const m of memories) {
+    let keep = true;
+    if (asOfSha) keep = keep && (await isAuthoritativeAsOf(rootPath, m, asOfSha));
+    if (sinceSha) keep = keep && (await isChangedSince(rootPath, m, sinceSha));
+    if (keep) inScope.add(m.id);
+  }
+  return inScope;
+}
+
+/** A note is authoritative as of `asOfSha`: recorded at/before it and not invalidated at/before it. */
+async function isAuthoritativeAsOf(rootPath: string, m: AnchoredMemory, asOfSha: string): Promise<boolean> {
+  const recordedBefore = !m.validFromCommit || (await isAncestor(rootPath, m.validFromCommit, asOfSha));
+  if (!recordedBefore) return false;
+  if (!m.invalidatedAt) return true;
+  // Invalidated but no commit anchor ⇒ cannot place on the commit axis; treat as already retired.
+  if (!m.invalidatedByCommit) return false;
+  return !(await isAncestor(rootPath, m.invalidatedByCommit, asOfSha));
+}
+
+/** A note changed after `sinceSha`: its record commit, or its invalidation commit, is a strict descendant. */
+async function isChangedSince(rootPath: string, m: AnchoredMemory, sinceSha: string): Promise<boolean> {
+  if (
+    m.validFromCommit && m.validFromCommit !== sinceSha &&
+    (await isAncestor(rootPath, sinceSha, m.validFromCommit))
+  ) {
+    return true;
+  }
+  return !!(
+    m.invalidatedByCommit && m.invalidatedByCommit !== sinceSha &&
+    (await isAncestor(rootPath, sinceSha, m.invalidatedByCommit))
+  );
 }
 
 /** Map a decision onto the ranker's weighted fields. */
