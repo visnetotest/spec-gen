@@ -487,7 +487,14 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         sendJson(res, 400, { error: err instanceof Error ? err.message : 'bad request' });
         return;
       }
-      const args = (body.args as Record<string, unknown>) ?? {};
+      // `args` must be a plain object; a primitive/array (e.g. {"args":"foo"}) would throw
+      // on the `args.directory = …` assignment below — coerce it to {} so a malformed body
+      // yields a clean validation error downstream, not a raw TypeError.
+      const rawArgs = body.args;
+      const args: Record<string, unknown> =
+        rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
+          ? (rawArgs as Record<string, unknown>)
+          : {};
       // Directory precedence: explicit body.directory → args.directory → served root.
       const directory = (typeof body.directory === 'string' && body.directory)
         || (typeof args.directory === 'string' && args.directory)

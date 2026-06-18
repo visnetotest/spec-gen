@@ -463,4 +463,18 @@ describe('tool argument validation', () => {
     });
     expect(res.status).toBe(200);
   });
+
+  it('does not leak a TypeError when args is a non-object primitive', async () => {
+    const h = await boot();
+    const res = await fetch(`${h.baseUrl}/tool/get_route_inventory`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ args: 'notanobject' }),
+    });
+    // args coerced to {} → clean dispatch (or clean validation error), never a 500
+    // "Cannot create property 'directory' on string" leak.
+    expect(res.status).not.toBe(500);
+    const body = await jsonOf(res);
+    expect(String(body.error ?? '')).not.toContain('Cannot create property');
+  });
 });
