@@ -42,6 +42,7 @@ import { EdgeStore } from '../../core/services/edge-store.js';
 import { McpWatcher } from '../../core/services/mcp-watcher.js';
 import { openloreAnalyze } from '../../api/analyze.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS, selectActiveTools } from './mcp.js';
+import { validateToolArgs } from '../../core/services/mcp-handlers/tool-guard.js';
 
 /**
  * Debounce before a full call-graph re-analyze after edits settle. Longer than
@@ -530,6 +531,21 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         const rebuilt = await waitForGraphRebuild(directory, 60_000);
         schemaResetByDir.set(directory, !rebuilt);
         if (!rebuilt) logger.warning(`[serve] Graph rebuild timed out — graph tools may return empty results.`);
+      }
+
+      // Validate args against the tool's declared inputSchema before dispatch, so a
+      // missing/malformed required argument returns a clear "Invalid arguments" message
+      // instead of a raw handler TypeError (e.g. "Cannot read properties of undefined").
+      // The MCP stdio transport validates the same way; this keeps the daemon transport —
+      // used directly by the Pi extension and other HTTP clients — from leaking internal
+      // errors to weak tool-callers.
+      const toolDef = TOOL_DEFINITIONS.find(t => t.name === name);
+      if (toolDef) {
+        const argError = validateToolArgs(args, toolDef.inputSchema);
+        if (argError) {
+          sendJson(res, 400, { error: `Invalid arguments for "${name}": ${argError}` });
+          return;
+        }
       }
 
       try {
