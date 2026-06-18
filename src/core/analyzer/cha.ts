@@ -13,8 +13,10 @@
  *  - **Virtual-dispatch** (`kind: 'calls'`): from an unpinned `recv.m()` call site
  *    to each implementation of `m` in `recv`'s subtree. Labeled `cha-declared-type`
  *    when the receiver type was statically recovered (so the target set is narrowed
- *    to that type's subtree) and `cha-name-arity` when it was not (a deliberately
- *    weaker over-approximation over the whole hierarchy).
+ *    to that type's subtree) and `cha-name-only` when it was not (a deliberately
+ *    weaker over-approximation: every implementation of `m` by method NAME across the
+ *    whole hierarchy — the call site's argument count is not recovered, so no arity
+ *    narrowing is applied here).
  *  - **Override** (`kind: 'overrides'`): from a base method `B.m` to every overriding
  *    `D.m` where `D <: B` and both declare `m` with compatible arity. The precise,
  *    consistent replacement for the legacy class-level N×M adjacency cross-product.
@@ -269,7 +271,7 @@ function synthesizeVirtualDispatchEdges(
 
     // ── Resolve targets + provenance label ──────────────────────────────────
     let targets: FunctionNode[];
-    let rule: 'cha-declared-type' | 'cha-name-arity';
+    let rule: 'cha-declared-type' | 'cha-name-only';
     if (declaredType) {
       // A statically-recovered receiver type that is NOT a user-defined hierarchy
       // class is an external/stdlib type (e.g. Array) — emit nothing, don't guess.
@@ -277,8 +279,11 @@ function synthesizeVirtualDispatchEdges(
       targets = h.methodsInSubtree(h.subtreeClassIds(declaredType), call.method);
       rule = 'cha-declared-type';
     } else {
+      // No receiver type recovered: over-approximate by method name across the whole
+      // hierarchy. Arity is NOT matched here — the call site's argument count isn't
+      // captured in RawMethodCall — so the label reflects name-only resolution.
       targets = h.methodsNamed(call.method);
-      rule = 'cha-name-arity';
+      rule = 'cha-name-only';
     }
 
     // Drop targets already directly resolved from this call site, and self-edges.

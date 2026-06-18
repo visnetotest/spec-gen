@@ -167,7 +167,7 @@ describe('CHA — virtual-dispatch edges', () => {
     expect(preciseEdges.length).toBeGreaterThan(0);
     expect(preciseEdges.every(e => e.synthesizedBy === 'cha-declared-type')).toBe(true);
     expect(looseEdges.length).toBeGreaterThan(0);
-    expect(looseEdges.every(e => e.synthesizedBy === 'cha-name-arity')).toBe(true);
+    expect(looseEdges.every(e => e.synthesizedBy === 'cha-name-only')).toBe(true);
   });
 
   it('Virtual-dispatch edges cost more than a directly-resolved path', async () => {
@@ -189,8 +189,8 @@ describe('CHA — virtual-dispatch edges', () => {
       ${classes}
       function dispatch(x) { return x.handle(); }
     `);
-    // > cap name+arity candidates → the whole call site is dropped.
-    expect(b.edges.some(e => e.callerId === fnId(b, 'dispatch') && e.synthesizedBy === 'cha-name-arity')).toBe(false);
+    // > cap name-only candidates → the whole call site is dropped.
+    expect(b.edges.some(e => e.callerId === fnId(b, 'dispatch') && e.synthesizedBy === 'cha-name-only')).toBe(false);
   });
 
   it('Unresolvable method emits nothing', async () => {
