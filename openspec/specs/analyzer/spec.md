@@ -5092,6 +5092,498 @@ The system SHALL only classify a Java/Kotlin file as a JAX-RS server endpoint wh
 > Decision recorded: f9de2e30
 > Date: 2026-06-17
 
+### Requirement: SynthesizedDynamicDispatchEdges
+
+The system SHALL augment the directly-resolved call graph with a deterministic synthesis pass that
+adds call edges for dynamic-dispatch patterns that direct name resolution cannot recover, deriving
+each edge from statically-paired sites in the AST. The pass SHALL NOT use an LLM, SHALL run after
+direct resolution, and SHALL only add edges — it SHALL NOT modify or remove any directly-resolved
+edge. At minimum the pass SHALL recover:
+
+- **Event channels** — an edge from a dispatch site (`emit(k)` / `dispatch(k)`) to every handler
+  registered on the same channel key `k` (`on(k, fn)` / `addEventListener(k, fn)`), when the key is a
+  static key (string literal, substitution-free template, or constant member reference) shared by
+  both sites. Event-channel recovery is **per-language**: it applies to each language whose
+  registration and dispatch sites are both statically visible, starting with JavaScript/TypeScript
+  and extending to further languages one at a time (see `MultiLanguageEventChannelSynthesis`).
+- **Route → handler** — an edge from a route node already detected by route inventory to the handler
+  function the route binds.
+
+The pass SHALL be structured as independent per-pattern rules so that each rule is testable in
+isolation and adding a rule does not alter the output of existing rules.
+
+#### Scenario: Event handler is reachable through a synthesized edge
+
+- **GIVEN** a handler function registered with `on('mount', handler)` and a separate site calling
+  `emit('mount')`, with no direct call to `handler`
+- **WHEN** the call graph is built
+- **THEN** a synthesized edge exists from the `emit('mount')` site's enclosing function to `handler`
+
+#### Scenario: Route is wired to its handler
+
+- **GIVEN** a route that route inventory detects and the handler function it binds
+- **WHEN** the call graph is built
+- **THEN** a synthesized `calls`-kind edge exists from the route node to the handler function
+
+#### Scenario: Mismatched channel keys produce no edge
+
+- **GIVEN** a handler registered with `on('open', handler)` and a dispatch site calling `emit('close')`
+- **WHEN** the call graph is built
+- **THEN** no synthesized edge is created between the dispatch site and `handler`
+
+#### Scenario: Direct edges are unchanged by synthesis
+
+- **GIVEN** a call graph built with the synthesis pass enabled and the same graph built with it disabled
+- **WHEN** the two graphs are compared
+- **THEN** every directly-resolved edge is identical in both, and the synthesis-enabled graph differs
+  only by added edges
+
+### Requirement: MultiLanguageEventChannelSynthesis
+
+The system SHALL recover event-channel edges across the languages it parses, not only
+JavaScript/TypeScript, applying the same high-precision discipline per language: an edge is emitted
+only when a registration site (`on`/`once`/`addListener`/`subscribe`/… with a static key and a
+resolvable handler) and a dispatch site (`emit`/`dispatch`/`publish`/… on the same static key) are
+both statically visible in that language. Each language's collector resolves the channel key and the
+handler from that language's own AST; the pairing, fan-out cap, and provenance labeling are shared
+and language-agnostic. Adding a language SHALL NOT change the edges synthesized for any other
+language, and a language whose idioms are not statically pairable SHALL emit no edges rather than
+guess.
+
+Languages are added one at a time. The set in effect is JavaScript/TypeScript, Python, Ruby, PHP, and
+Swift (NotificationCenter `addObserver(forName:)` ↔ `post(name:)`); the handler may be a function
+reference, a member/attribute reference (`self.handler`), a bound reference, a Ruby block, a PHP
+callable (`'fn'` / `[$this, 'm']`), or an inline function/lambda/closure (wired to the internal
+functions its body calls). Keys are namespaced by kind (string / symbol / constant) so a key of one
+kind never pairs with a same-text key of another.
+
+#### Scenario: Python event handler is reachable through a synthesized edge
+
+- **GIVEN** a Python handler registered with `emitter.on('mount', handler)` and a separate site
+  calling `emitter.emit('mount')`, with no direct call to `handler`
+- **WHEN** the call graph is built
+- **THEN** a synthesized event-channel edge exists from the `emit('mount')` site's enclosing function
+  to `handler`
+
+#### Scenario: Python dispatch with a mismatched key produces no edge
+
+- **GIVEN** a Python handler registered on `'open'` and a dispatch site on `'close'`
+- **WHEN** the call graph is built
+- **THEN** no synthesized edge is created between them
+
+#### Scenario: Adding a language leaves other languages' edges unchanged
+
+- **GIVEN** a project mixing JavaScript/TypeScript and Python event channels
+- **WHEN** the call graph is built
+- **THEN** the JavaScript/TypeScript synthesized edges are identical to those produced when no Python
+  source is present, and the Python edges are added independently
+
+### Requirement: TypeBasedEventSynthesis
+
+The system SHALL recover **type-based** event edges in languages whose event systems key on an event
+**type** rather than a string channel: a handler is registered by an annotation or a typed interface,
+and a dispatch carries a constructed event instance. An edge SHALL be emitted from a dispatch site to
+a handler when the handler's event type and the dispatched event's constructed type match, derived
+statically from the AST with no LLM. The key is the event type name; pairing, the fan-out cap, and
+provenance are shared with the string-key rule, but the producing rule is labeled distinctly
+(`synthesizedBy: 'type-event'`). Type-based recovery is per-language and added one language at a time;
+in effect it covers **Java** and **Kotlin** (Guava `@Subscribe` / Spring `@EventListener` handler methods paired with
+`post(new T(...))` / `publishEvent(new T(...))`) and **C#** (a class implementing a handler interface
+such as `INotificationHandler<T>` / `IRequestHandler<T>` paired with `Publish(new T(...))` /
+`Send(new T(...))`). A dispatch whose argument is not a statically-typed construction SHALL emit no
+edge rather than guess.
+
+#### Scenario: Java annotated handler is reachable from its publisher
+
+- **GIVEN** a method annotated `@Subscribe` (or `@EventListener`) whose first parameter type is `T`,
+  and a separate site calling `post(new T(...))` (or `publishEvent(new T(...))`)
+- **WHEN** the call graph is built
+- **THEN** a synthesized `type-event` edge exists from the dispatch site's enclosing method to the
+  annotated handler method
+
+#### Scenario: C# typed handler is reachable from its publisher
+
+- **GIVEN** a class implementing `INotificationHandler<T>` whose handler method takes `T`, and a
+  separate site calling `Publish(new T(...))` (or `Send(new T(...))`)
+- **WHEN** the call graph is built
+- **THEN** a synthesized `type-event` edge exists from the dispatch site's enclosing method to the
+  handler method
+
+#### Scenario: Mismatched event types produce no edge
+
+- **GIVEN** a handler for type `A` and a dispatch constructing type `B`
+- **WHEN** the call graph is built
+- **THEN** no synthesized edge is created between them
+
+### Requirement: CallbackRegistrationSynthesis
+
+The system SHALL recover edges for handlers that are **registered as callbacks** with a framework or
+runtime that later invokes them, where there is no in-code dispatch site to pair against. When a
+**named internal function** is passed as an argument to a **curated registrar** (an API known to
+invoke its callback), the system SHALL add an edge from the registration site's enclosing function to
+that handler, labeled `synthesizedBy: 'callback-registration'`. Only curated registrars SHALL match,
+so a function passed to an unrelated call is never treated as a callback; and inline function/closure
+arguments SHALL NOT be matched here (their bodies are already attributed to the enclosing function by
+direct resolution, so an edge would be redundant). Recovery is per-language; in effect it covers
+**Go** (`net/http` `HandleFunc`/`Handle` and router verbs `GET`/`POST`/… of gin/echo/chi),
+**JavaScript/TypeScript** (scheduler registrars `setTimeout`/`setInterval`/`setImmediate`/
+`queueMicrotask`/`requestAnimationFrame`/`requestIdleCallback`/`nextTick`), and **C++** (Qt
+`connect(sender, &S::sig, receiver, &R::slot)` — the slot member function is wired; the signal, a Qt
+declaration with no body, does not resolve and is left alone).
+
+#### Scenario: Go HTTP handler registered by name is reachable
+
+- **GIVEN** a function `handleX` passed to `mux.HandleFunc("/x", handleX)` (or `http.HandleFunc`, or a
+  router `GET("/x", handleX)`), with no direct call to `handleX`
+- **WHEN** the call graph is built
+- **THEN** a synthesized `callback-registration` edge exists from the registration's enclosing
+  function to `handleX`
+
+#### Scenario: JS/TS scheduler callback registered by name is reachable
+
+- **GIVEN** a named function `tick` passed to `setTimeout(tick, 1000)` (or `setInterval`), with no
+  direct call to `tick`
+- **WHEN** the call graph is built
+- **THEN** a synthesized `callback-registration` edge exists from the enclosing function to `tick`
+
+#### Scenario: C++ Qt slot is reachable from connect
+
+- **GIVEN** `connect(button, &QPushButton::clicked, this, &MyWidget::onClicked)` where `onClicked` is a
+  member function, with no direct call to `onClicked`
+- **WHEN** the call graph is built
+- **THEN** a synthesized `callback-registration` edge exists from the `connect` site's enclosing
+  function to `onClicked` (and the external Qt signal `clicked`, having no internal definition, is
+  not wired)
+
+#### Scenario: A function passed to a non-registrar is not treated as a callback
+
+- **GIVEN** a named function passed as an argument to a call whose method is not a curated registrar
+- **WHEN** the call graph is built
+- **THEN** no `callback-registration` edge is synthesized for it
+
+### Requirement: ActorMessageSynthesis
+
+The system SHALL recover edges for the actor/message-passing model where it is statically pairable to
+a named handler: a message dispatch and a message handler keyed on the message tag. In Elixir, a
+GenServer dispatch (`GenServer.cast`/`GenServer.call`, or `send` for `handle_info`) carrying a message
+whose tag is a leading atom (including the tag of a `{:tag, …}` tuple) SHALL pair with the matching
+`handle_cast`/`handle_call`/`handle_info` clause, emitting an edge from the dispatch site's enclosing
+function to that clause, labeled `synthesizedBy: 'actor-message'`. The key SHALL be namespaced by
+handler kind so a `cast` never pairs with a `handle_call` of the same tag. A dispatch whose message
+tag is not a static atom SHALL emit no edge. Actor/channel mechanisms that expose no named handler to
+pair — Go channels, and Akka/Scala `receive` blocks — SHALL NOT synthesize edges.
+
+#### Scenario: Elixir GenServer cast reaches its handle_cast clause
+
+- **GIVEN** `def handle_cast({:add, x}, state)` and a separate `GenServer.cast(pid, {:add, 1})`
+- **WHEN** the call graph is built
+- **THEN** a synthesized `actor-message` edge exists from the cast site's enclosing function to the
+  `handle_cast` clause
+
+#### Scenario: cast does not pair with a same-tag handle_call
+
+- **GIVEN** `def handle_call(:fetch, _from, state)` and a `GenServer.cast(pid, :fetch)`
+- **WHEN** the call graph is built
+- **THEN** no synthesized edge is created between them (cast pairs only with `handle_cast`)
+
+### Requirement: EdgeProvenanceLabeling
+
+The system SHALL label every synthesized edge with a provenance distinct from directly-resolved
+edges, by setting its `confidence` to `synthesized` and recording the rule that produced it in an
+optional `synthesizedBy` property naming the pattern (for example `event-channel`, `route-handler`,
+`callback-arg`). Directly-resolved edges SHALL retain their existing `confidence` value and SHALL NOT
+carry `synthesizedBy`. A serialized call graph that predates this property SHALL load unchanged, with
+absent `synthesizedBy` treated as a directly-resolved edge.
+
+#### Scenario: Synthesized edge carries provenance
+
+- **GIVEN** a synthesized event-channel edge
+- **WHEN** the edge is inspected
+- **THEN** its `confidence` is `synthesized` and its `synthesizedBy` names the producing rule
+
+#### Scenario: Directly-resolved edge is distinguishable
+
+- **GIVEN** a directly-resolved import edge
+- **WHEN** the edge is inspected
+- **THEN** its `confidence` is its resolution method (not `synthesized`) and it has no `synthesizedBy`
+
+#### Scenario: Synthesized edges cost more in call distance
+
+- **GIVEN** two paths from A to B, one entirely directly-resolved and one that traverses a synthesized edge
+- **WHEN** call distance is computed for each path
+- **THEN** the path traversing the synthesized edge has the greater total cost
+
+### Requirement: HighPrecisionSynthesisBounds
+
+The system SHALL bias edge synthesis toward false-negatives over false-positives: it SHALL emit an
+edge only when a registration site and a dispatch site are statically paired on a shared key or
+binding, and SHALL NOT fan a dispatch site out to functions it cannot pair. Per-channel handler
+fan-out SHALL be capped by a fixed bound (default 8); a channel whose registered-handler count
+exceeds the bound SHALL be dropped (no edges emitted for it) rather than partially or speculatively
+wired, and the drop SHALL be logged with the channel key and count.
+
+#### Scenario: Unpaired dispatch emits nothing
+
+- **GIVEN** a dispatch site `emit('change')` with no statically-visible registration on `'change'`
+- **WHEN** the synthesis pass runs
+- **THEN** no synthesized edge is emitted for that dispatch site
+
+#### Scenario: Over-cap channel is dropped, not guessed
+
+- **GIVEN** a channel key with more registered handlers than the fan-out cap
+- **WHEN** the synthesis pass runs
+- **THEN** no synthesized edges are emitted for that channel and the drop is logged with the key and count
+
+### Requirement: TypeHierarchyResolvedDispatch
+
+The system SHALL augment the call graph with a deterministic Class Hierarchy Analysis (CHA) pass that
+resolves polymorphic (virtual) method dispatch through inheritance and interface implementation,
+deriving each edge from the class hierarchy already extracted into `ClassNode` / `InheritanceEdge` and
+from the AST. The pass SHALL NOT use an LLM, SHALL run after the class hierarchy is built, and SHALL
+only add edges — it SHALL NOT modify or remove any directly-resolved edge. For a method call
+`recv.m(args)` that direct name resolution did not already pin to a callee, the pass SHALL add a
+`calls`-kind edge from the call site's enclosing function to each implementation of a method named
+`m` with compatible arity that is reachable in the type subtree of `recv`'s type, where:
+
+- when `recv`'s declared type `T` is statically recoverable (an explicit type annotation, a
+  `new T()` initializer, a parameter type, or a result from the existing type-inference engine), the
+  set of targets SHALL be restricted to `T` and its subtypes in the hierarchy; and
+- when `recv`'s declared type is not statically recoverable, the targets SHALL be every hierarchy
+  class that declares a method named `m` with compatible arity.
+
+The pass SHALL be structured as independent per-rule synthesis so each rule is testable in isolation
+and adding a rule does not alter the output of existing rules.
+
+#### Scenario: Virtual call resolves to all overrides in the receiver's subtree
+
+- **GIVEN** an abstract type `Shape` with method `area`, subtypes `Circle` and `Square` that each
+  override `area`, and a call `shape.area()` where `shape` has declared type `Shape`
+- **WHEN** the call graph is built
+- **THEN** a `calls`-kind edge exists from the call site's enclosing function to both `Circle.area`
+  and `Square.area`
+
+#### Scenario: Declared receiver type narrows the target set
+
+- **GIVEN** the hierarchy above and a call `c.area()` where `c` has declared type `Circle`
+- **WHEN** the call graph is built
+- **THEN** an edge exists to `Circle.area` and no edge is created to `Square.area`
+
+#### Scenario: Unrelated method names produce no edge
+
+- **GIVEN** a call `shape.area()` and a subtype method `Circle.render` with no `area` declaration on
+  `Circle`
+- **WHEN** the call graph is built
+- **THEN** no edge is created from the call site to `Circle.render`
+
+#### Scenario: Calls on external types do not resolve
+
+- **GIVEN** a call `arr.map(fn)` where `arr` is a built-in array type that is not present in the
+  extracted class hierarchy
+- **WHEN** the CHA pass runs
+- **THEN** no virtual-dispatch edge is synthesized for that call
+
+#### Scenario: Direct edges are unchanged by CHA synthesis
+
+- **GIVEN** a call graph built with the CHA pass enabled and the same graph built with it disabled
+- **WHEN** the two graphs are compared
+- **THEN** every directly-resolved edge is identical in both, and the CHA-enabled graph differs only
+  by added edges
+
+### Requirement: MethodLevelOverrideEdges
+
+The system SHALL materialize a method-level override edge for each base method `B.m` that is
+overridden by a derived method `D.m`, where `D` is a subtype of `B` in the class hierarchy and both
+`B` and `D` declare a method named `m` with compatible arity. The edge SHALL be directed from the
+base method to the overriding method (`B.m → D.m`), SHALL use `kind: 'overrides'`, and SHALL be
+provenance-labeled (see `EdgeProvenanceLabeling`). Override edges SHALL be derived from name and arity
+matching only — the system SHALL NOT connect a base method to a derived method of a different name or
+incompatible arity. This requirement replaces the prior class-level all-parent-methods-to-all-child-
+methods adjacency expansion, which produced edges between unrelated methods, silently dropped large
+class pairs, and was applied inconsistently across reachability paths.
+
+#### Scenario: Override edge connects matching methods only
+
+- **GIVEN** a base class `Animal` with methods `speak` and `feed`, and a subclass `Dog` that
+  overrides `speak` but not `feed`
+- **WHEN** the call graph is built
+- **THEN** an `overrides`-kind edge exists from `Animal.speak` to `Dog.speak`, and no override edge
+  exists from `Animal.feed` to `Dog.speak`
+
+#### Scenario: Override propagation is consistent across reachability paths
+
+- **GIVEN** a base method change analyzed once through the in-memory adjacency and once through the
+  database-backed lazy reachability path
+- **WHEN** the impacted set is computed by each path
+- **THEN** both paths reach the overriding methods through the same materialized override edges and
+  report the same overrides as impacted
+
+#### Scenario: Override edges do not contribute to call distance
+
+- **GIVEN** a base method `B.m`, an override `D.m`, and a `find_path` query whose only connection
+  between two functions runs through the `B.m → D.m` override edge
+- **WHEN** call distance is computed
+- **THEN** the override edge is not treated as a call hop and does not appear as a step in a returned
+  call path
+
+#### Scenario: No silent drop on large class pairs
+
+- **GIVEN** a base class and a subclass whose combined method count is large enough that the prior
+  cross-product expansion would have been skipped
+- **WHEN** the call graph is built
+- **THEN** override edges are still emitted for every name-and-arity-matched override pair, and none
+  are silently dropped
+
+### Requirement: CHAProvenanceLabeling
+
+The system SHALL label every CHA-synthesized edge with a provenance distinct from directly-resolved
+edges by setting its `confidence` to `synthesized` and recording the producing rule in the
+`synthesizedBy` property, using `cha-declared-type` for a virtual-dispatch edge whose target set was
+narrowed by a statically-recovered receiver type, `cha-name-arity` for a virtual-dispatch edge
+resolved by name and arity over the whole hierarchy, and `override` for a method-level override edge.
+Directly-resolved edges SHALL retain their existing `confidence` value and SHALL NOT carry
+`synthesizedBy`. A virtual-dispatch edge SHALL NOT introduce a new `EdgeConfidence` member or a new
+call-distance cost — it SHALL reuse the existing `synthesized` cost, which is strictly greater than
+any directly-resolved confidence. A serialized call graph that predates these edges SHALL load
+unchanged.
+
+#### Scenario: Precise and over-approximating dispatch are distinguishable
+
+- **GIVEN** one virtual-dispatch edge resolved via a recovered declared type and one resolved only by
+  name and arity
+- **WHEN** the two edges are inspected
+- **THEN** the first carries `synthesizedBy: 'cha-declared-type'` and the second carries
+  `synthesizedBy: 'cha-name-arity'`, and both carry `confidence: 'synthesized'`
+
+#### Scenario: Override edge carries provenance
+
+- **GIVEN** a materialized override edge
+- **WHEN** the edge is inspected
+- **THEN** its `confidence` is `synthesized`, its `kind` is `overrides`, and its `synthesizedBy` is
+  `override`
+
+#### Scenario: Virtual-dispatch edges cost more than a directly-resolved path
+
+- **GIVEN** two call paths from A to B, one entirely directly-resolved and one traversing a
+  virtual-dispatch edge
+- **WHEN** call distance is computed for each path
+- **THEN** the path traversing the virtual-dispatch edge has the greater total cost, and the
+  `callDistance` confidence switch remains exhaustive without a new arm
+
+### Requirement: HighPrecisionCHABounds
+
+The system SHALL bias CHA edge synthesis toward false-negatives over false-positives. It SHALL emit a
+virtual-dispatch edge only when the called method name resolves to at least one implementation in the
+extracted hierarchy. Per-call-site target fan-out SHALL be capped by a fixed bound (default 8); a
+call site whose name-and-arity candidate set exceeds the bound SHALL be dropped (no edges emitted for
+it) rather than partially or speculatively wired, and the drop SHALL be logged with the method name
+and candidate count. The system SHALL NOT maintain a hard-coded denylist of method names; bounding is
+achieved by resolving only against user-defined hierarchy types and by the fan-out cap.
+
+#### Scenario: Ubiquitous method name exceeding the cap is dropped, not guessed
+
+- **GIVEN** a call `x.handle()` whose name-and-arity candidate set across the hierarchy exceeds the
+  fan-out cap
+- **WHEN** the CHA pass runs
+- **THEN** no virtual-dispatch edges are emitted for that call site and the drop is logged with the
+  method name and candidate count
+
+#### Scenario: Unresolvable method emits nothing
+
+- **GIVEN** a call `x.frobnicate()` where no hierarchy class declares a method named `frobnicate`
+- **WHEN** the CHA pass runs
+- **THEN** no virtual-dispatch edge is emitted for that call site
+
+### Requirement: ProvenanceAwareReachability
+
+The system SHALL prevent synthesized edges from manufacturing false dead-code positives while still
+benefiting from them: a symbol reachable from a root only through one or more synthesized edges
+(including dynamic-dispatch edges, CHA virtual-dispatch edges, and method-level override edges) SHALL
+NOT be reported as `high`-confidence dead by dead-code analysis. Such a symbol SHALL be reclassified
+as reachable, or at minimum reported at `low` confidence with a reason that names the synthesizing
+rule. A symbol reachable through at least one fully directly-resolved path is unaffected.
+
+The system SHALL include synthesized edges by default when computing reachability, impact, subgraphs,
+paths, and execution traces, and SHALL provide an option to restrict traversal to directly-resolved
+edges only, so a caller can trade completeness for certainty. This `directResolvedOnly` option SHALL
+apply uniformly across the in-memory adjacency, the database-backed lazy reachability path, and
+weighted (call-distance) traversal, excluding CHA virtual-dispatch and override edges identically to
+dynamic-dispatch edges. The system SHALL NOT expand the class hierarchy into reachability through any
+mechanism other than materialized, provenance-labeled override and virtual-dispatch edges (retiring
+the prior unlabeled all-methods cross-product, which strict mode could not exclude and which differed
+between reachability paths).
+
+#### Scenario: Override-only-reachable symbol is not high-confidence dead
+
+- **GIVEN** an overriding method reachable from an entry point only through a base method via a
+  materialized override edge
+- **WHEN** dead-code analysis runs
+- **THEN** the override is not reported as `high`-confidence dead, and if reported at all it is `low`
+  confidence with a reason naming the synthesizing rule
+
+#### Scenario: Polymorphic-call-only-reachable symbol is not high-confidence dead
+
+- **GIVEN** a method implementation reachable from an entry point only through a CHA virtual-dispatch
+  edge
+- **WHEN** dead-code analysis runs
+- **THEN** the implementation is not reported as `high`-confidence dead
+
+#### Scenario: Strict mode excludes CHA edges in every reachability path
+
+- **GIVEN** a traversal requested in directly-resolved-only mode, run once through the in-memory
+  adjacency and once through the database-backed lazy path
+- **WHEN** reachability is computed by each
+- **THEN** neither path traverses CHA virtual-dispatch or override edges, and a symbol reachable only
+  through them is treated as unreached by both
+
+#### Scenario: Test selection follows a base-method change to subtype tests
+
+- **GIVEN** a base method `B.m`, an overriding `D.m`, and a test that exercises `D.m`
+- **WHEN** `B.m` is changed and tests are selected with synthesized edges included
+- **THEN** the test exercising `D.m` is selected, reached through the override edge
+
+### Requirement: LengthpreservingMaskingOfPythonNoncodeRegionsBeforeRouteExtraction
+
+The system SHALL mask Python triple-quoted strings and line comments length-preservingly before route-pattern matching so that character offsets remain byte-aligned with the original source.
+
+> Decision recorded: 65d4ac12
+> Date: 2026-06-17
+### Requirement: HardenChaPrecisionFromRealooDogfoodingSamefileBaseResolutionVarnewtTypeRecoveryCHierarchyExtraction
+
+The system SHALL resolve base-class references to same-file declarations before falling back to global name matching, and SHALL recover types from `var x = new T()` patterns in Java and C#.
+
+> Decision recorded: 66e47bb4
+> Date: 2026-06-17
+### Requirement: ExtendChaHierarchyExtractionToKotlinphpswiftscalaWithAmbiguityskipAndQualifiedsupertypeskipGuards
+
+The system SHALL extract class-hierarchy relationships for Kotlin, PHP, Swift, and Scala, skipping ambiguous cross-file base names and qualified supertypes to avoid false-positive dispatch edges.
+
+> Decision recorded: 9d87726f
+> Date: 2026-06-17
+### Requirement: ExtendChaTypehierarchyExtractionToKotlinPhpSwiftAndScala
+
+The system SHALL extract class-hierarchy relationships (extends/implements/mixin edges) from Kotlin, PHP, Swift, and Scala source files using tree-sitter grammars.
+
+> Decision recorded: bf52c392
+> Date: 2026-06-17
+### Requirement: AmbiguousCrossfileParentResolutionPrefersFalsenegativeOverFalsepositive
+
+The system SHALL skip cross-file parent resolution when the parent name is ambiguous (declared in more than one file), preferring false-negatives over false-positives in inheritance edges.
+
+> Decision recorded: d5967a48
+> Date: 2026-06-17
+### Requirement: ResolveChaBaseClassesByLayeredEvidenceSamefileImportSamedirectoryGlobaluniqueInsteadOfBarenamethenskip
+
+The system SHALL resolve CHA base-class references using layered evidence (same-file, import, same-directory, global-unique) before falling back to ambiguity-skip.
+
+> Decision recorded: 320bf215
+> Date: 2026-06-17
+### Requirement: DetectGoStructEmbedsByAnonymousFieldNotFieldTypeAndUnwrapPointerEmbeds
+
+The system SHALL detect Go struct embedding only via anonymous fields (with pointer unwrapping), never via named fields.
+
+> Decision recorded: db3b354b
+> Date: 2026-06-17
+
 ## Technical Notes
 
 - **Implementation**: `src/core/analyzer/repository-mapper.ts, src/api/types.ts, src/core/analyzer/embedding-service.ts, src/core/analyzer/subgraph-extractor.ts, src/core/analyzer/architecture-writer.ts, src/core/analyzer/dependency-graph.ts, src/core/analyzer/spec-vector-index.ts, src/core/analyzer/file-walker.ts, src/core/analyzer/import-resolver-bridge.ts, src/core/analyzer/refactor-analyzer.ts, src/core/analyzer/vector-index.ts, src/core/analyzer/import-parser.ts, src/core/analyzer/signature-extractor.ts, src/core/analyzer/artifact-generator.ts, src/core/analyzer/cpp-header-resolver.ts, src/core/analyzer/call-graph.ts, src/core/analyzer/duplicate-detector.ts, src/core/analyzer/type-inference-engine.ts, src/core/analyzer/significance-scorer.ts, src/core/analyzer/http-route-parser.ts, src/core/analyzer/ast-chunker.ts, src/core/analyzer/codebase-digest.ts, src/utils/progress.ts, src/utils/prompts.ts, src/utils/logger.ts, src/utils/shutdown.ts`
@@ -5538,3 +6030,73 @@ Common JPA patterns place annotations inline with the field (e.g. `@Id private L
 Retrofit interfaces use identically-named @GET/@POST/@Path annotations from retrofit2.http, which are client request templates, not server endpoints. Without checking the import package, the parser would emit phantom server routes for HTTP client definitions.
 
 **Consequences:** JAX-RS routes are only detected when the file imports from javax.ws.rs or jakarta.ws.rs; projects using non-standard JAX-RS re-exports would not be recognized. Retrofit and similar HTTP client interfaces are correctly excluded.
+
+### Length-preserving masking of Python non-code regions before route extraction
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** 65d4ac12
+
+Route-matching regexes use character offsets (m.index) that are resolved to line numbers via getLine(), which measures against original line lengths. Stripping comments changed string length and could drift line numbers. Additionally, triple-quoted docstrings can contain route-like patterns (e.g. Flask's sansio/scaffold.py code-block examples) that produced false-positive route matches. Length-preserving masking keeps byte alignment while eliminating both failure modes.
+
+**Consequences:** Over-masking (e.g. unmatched triple-quotes) can only drop potential matches, never invent them, consistent with the false-negatives-over-false-positives bias. Any future non-code region handling in route extraction must preserve string length or getLine() will produce wrong line numbers.
+
+### Harden CHA precision from real-OO dogfooding: same-file base resolution, var-new-T type recovery, C# hierarchy extraction
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** 66e47bb4
+
+Adversarial dogfooding CHA on real OO corpora (java-design-patterns, python-patterns, dotnet/samples) surfaced three defects: (1) global first-match base-class resolution linked unrelated same-named classes across files — fixed by preferring same-file ClassNode resolution before global fallback; (2) type-inference required uppercase declared types, so Java 10+/C# `var x = new T()` locals recovered no type and virtual calls fell to broad cha-name-arity — fixed by adding var-new-T matchers for Java and C#; (3) no C# branch in extractClassRelationships left CHA inert for C# — fixed by adding a C# branch over base_list, splitting base-class vs interface by I<Upper> naming convention.
+
+**Consequences:** Same-file base resolution eliminates cross-file name collisions (empty same-file base still falls back to global — rare, documented). var-new-T recovery converts many heuristic cha-name-arity edges into precise type_inference edges (Java cha-name-arity 113→65 on design-patterns slice). C# CHA now functional (0→81 inheritance / 59 override edges on slice). Residual cha-name-arity over-approximation remains for non-locally-recoverable receivers; field-type tracking / RTA-VTA pruning stay out-of-scope per HighPrecisionCHABounds.
+
+### Extend CHA hierarchy extraction to Kotlin/PHP/Swift/Scala with ambiguity-skip and qualified-supertype-skip guards
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** 9d87726f
+
+CHA was inert for Kotlin, PHP, Swift, and Scala because extractClassRelationships had no branch for them, producing zero inheritance and dispatch edges. Added hierarchy-extraction branches for each language (Kotlin/Swift via delegation/inheritance specifiers; PHP distinguishing extends from implements; Scala via extends_clause with a new getScalaParser). Real-repo dogfooding then surfaced two false-positive bugs: (1) cross-file/cross-namespace same-name class collisions wired by the global first-match fallback — fixed by skipping resolution when a base name is non-same-file AND ambiguous; (2) Kotlin/Swift qualified supertypes (Outer.Inner) mis-captured the outer segment as the base — fixed by taking the leaf name and skipping dotted types.
+
+**Consequences:** CHA now has hierarchy support for 11 languages (TS/JS, Python, Java, C++, C#, Ruby, Go, Kotlin, PHP, Swift, Scala). The ambiguity-skip is language-agnostic and eliminates cross-file collision false positives everywhere, at the cost of skipping legitimate cross-file override edges whose base name is reused (FQCN/namespace-aware resolution is the future enhancement). Swift/Scala protocol/trait abstract methods without bodies are not extracted as nodes, so only concrete-base hierarchies get edges.
+
+### Extend CHA type-hierarchy extraction to Kotlin, PHP, Swift, and Scala
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** bf52c392
+
+The polymorphic-dispatch (CHA) feature requires class-hierarchy edges for each supported language; adding tree-sitter-based extraction for these four languages broadens the cross-language coverage of resolved virtual-call edges.
+
+**Consequences:** New runtime dependency on tree-sitter-scala; each language follows the same pattern (lazy parser init + query-based extraction) so maintenance cost is linear; qualified/nested type names are deliberately skipped to avoid phantom edges.
+
+### Ambiguous cross-file parent resolution prefers false-negative over false-positive
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** d5967a48
+
+When multiple classes share a bare name across different files (e.g. two unrelated `Logger` interfaces in different PHP namespaces), a global first-match would fabricate a false override edge and steal the real one from the correct twin; skipping the resolution entirely is safer for downstream dispatch accuracy.
+
+**Consequences:** Some legitimate cross-file inheritance edges will be missed when name collisions exist; this is an acceptable precision-over-recall tradeoff that avoids polluting the call graph with phantom dispatch targets.
+
+### Resolve CHA base classes by layered evidence (same-file → import → same-directory → global-unique) instead of bare-name-then-skip
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** 320bf215
+
+The prior ambiguity-skip in buildClassNodes dropped cross-file override edges whenever the base class name was reused anywhere in the codebase — measured at ~37% of all base-references on Laravel (1034/2810). Replaced with layered, most-specific-evidence-first resolution: (1) class in child's own file; (2) file the child imports the name from via importMap; (3) class unique within child's directory (same package); (4) globally-unique class; (5) skip. Each layer carries real evidence, so only genuinely-ambiguous cross-directory bases with no import are skipped, preserving the false-negatives-over-false-positives bias while recovering legitimate edges.
+
+**Consequences:** Threads the existing importMap into buildClassNodes (new optional param). Recall recovered substantially with no precision loss: DesignPatternsPHP 71→87 override edges, Laravel 1758 override edges / 512 cross-package at ~100% precision. Residual: globally-duplicated base names without import or same-dir co-location are still skipped. True FQCN/namespace extraction for non-importMap languages (PHP/Kotlin/Swift/Scala/C#) remains a future enhancement.
+
+### Detect Go struct embeds by anonymous field (not field type), and unwrap pointer embeds
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** db3b354b
+
+Real-repo dogfood (cobra) showed the Go hierarchy extractor misread NAMED struct fields as embeds: the query captured the type of every field_declaration, so `CompletionOptions CompletionOptions` (a named field) produced phantom `embeds` inheritance edges and polluted ClassNode.parentClasses with field types. Go embedding is an ANONYMOUS field (a type with no field name); a named field is composition, not embedding. Changed the Go branch in extractClassRelationships to treat a field_declaration as an embed only when it has no `name:` child, and to unwrap a leading pointer (`*Base`) which the prior query had also missed (false negative).
+
+**Consequences:** Go embedding edges are now precise: anonymous Base and *Mixin embeds wire; named fields do not. parentClasses is no longer polluted with field types. Verified on cobra and a synthetic struct. Go structural interface satisfaction remains unsupported (future work).

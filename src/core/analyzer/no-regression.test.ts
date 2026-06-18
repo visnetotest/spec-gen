@@ -13,7 +13,10 @@ function normalize(g: SerializedCallGraph) {
       .map(n => ({ id: n.id, name: n.name, className: n.className ?? null, language: n.language }))
       .sort((a, b) => a.id.localeCompare(b.id)),
     edges: g.edges
-      .filter(e => !e.kind || e.kind === 'calls')
+      // Lock DIRECT extraction only: synthesized edges (CHA virtual-dispatch,
+      // dynamic-dispatch) are an additive post-pass, covered by their own suites,
+      // and must not churn this extraction-regression guard.
+      .filter(e => (!e.kind || e.kind === 'calls') && e.confidence !== 'synthesized')
       .map(e => `${e.callerId} -> ${e.calleeId}`)
       .sort(),
     classes: g.classes

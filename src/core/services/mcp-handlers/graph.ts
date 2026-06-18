@@ -51,8 +51,14 @@ import { readOpenLoreConfig } from '../config-manager.js';
  * Build forward (caller→callees) and backward (callee→callers) adjacency maps
  * from a serialised call graph, returning both maps and a node lookup.
  *
- * Includes inheritance edges: parent class methods point forward to all child
- * class methods so blast-radius BFS propagates through the class hierarchy.
+ * Inheritance propagation rides on the materialized, provenance-labeled override
+ * edges (`kind: 'overrides'`, `confidence: 'synthesized'`) the CHA pass writes into
+ * `cg.edges` (spec: add-type-hierarchy-resolved-dispatch) — read here through the
+ * same edge loop as call edges, so the in-memory and DB-backed paths agree and
+ * `directResolvedOnly` excludes them for free. This replaces the prior class-level
+ * all-parent-methods × all-child-methods cross-product, which connected unrelated
+ * methods, silently dropped class pairs whose product exceeded 200, and existed
+ * only here (so it disagreed with the DB-backed reachability path).
  */
 export function buildAdjacency(cg: SerializedCallGraph, opts?: { directResolvedOnly?: boolean }) {
   const nodeMap = new Map(cg.nodes.map(n => [n.id, n]));
@@ -66,33 +72,14 @@ export function buildAdjacency(cg: SerializedCallGraph, opts?: { directResolvedO
   for (const e of cg.edges) {
     if (!e.calleeId) continue;
     // Strict mode (spec: add-synthesized-dynamic-dispatch-edges): skip synthesized
-    // dynamic-dispatch edges so traversal rests only on directly-resolved edges —
-    // trading completeness for certainty.
+    // edges (dynamic-dispatch, CHA virtual-dispatch, and override) so traversal
+    // rests only on directly-resolved edges — trading completeness for certainty.
     if (opts?.directResolvedOnly && e.confidence === 'synthesized') continue;
     // Ensure external nodes (not in cg.nodes) get adjacency entries
     if (!forward.has(e.calleeId))  forward.set(e.calleeId,  new Set());
     if (!backward.has(e.calleeId)) backward.set(e.calleeId, new Set());
     forward.get(e.callerId)?.add(e.calleeId);
     backward.get(e.calleeId)?.add(e.callerId);
-  }
-
-  // Expand class-level inheritance: parent method → child method
-  // (changing a parent propagates blast radius to all child class methods)
-  const classMap = new Map((cg.classes ?? []).map(c => [c.id, c]));
-  for (const ie of (cg.inheritanceEdges ?? [])) {
-    const parentClass = classMap.get(ie.parentId);
-    const childClass  = classMap.get(ie.childId);
-    if (!parentClass || !childClass) continue;
-    // Guard against N×M explosion on large classes
-    if (parentClass.methodIds.length * childClass.methodIds.length > 200) continue;
-    for (const parentMethodId of parentClass.methodIds) {
-      if (!forward.has(parentMethodId)) forward.set(parentMethodId, new Set());
-      for (const childMethodId of childClass.methodIds) {
-        if (!backward.has(childMethodId)) backward.set(childMethodId, new Set());
-        forward.get(parentMethodId)!.add(childMethodId);
-        backward.get(childMethodId)!.add(parentMethodId);
-      }
-    }
   }
 
   return { nodeMap, forward, backward };

@@ -29,6 +29,7 @@ import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
 import { buildFunctionCfg, type FunctionCfg, type CfgNode } from './cfg.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
+import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
 import { logger } from '../../utils/logger.js';
 
 // ============================================================================
@@ -49,6 +50,7 @@ export type EdgeConfidence =
 /** Broad relationship kind */
 export type EdgeKind =
   | 'calls'
+  | 'overrides'      // base method → overriding method (CHA; spec: add-type-hierarchy-resolved-dispatch)
   | 'tested_by'
   | 'references'
   | 'depends_on'
@@ -457,6 +459,7 @@ let _swiftParser: Parser | undefined;
 let _phpParser: Parser | undefined;
 let _csParser: Parser | undefined;
 let _ktParser: Parser | undefined;
+let _scalaParser: Parser | undefined;
 let _exParser: Parser | undefined;
 
 // null = tried and unavailable; undefined = not yet tried
@@ -487,6 +490,7 @@ let _SwiftLanguage: object | undefined;
 let _PhpLanguage: object | undefined;
 let _CsLanguage: object | undefined;
 let _KtLanguage: object | undefined;
+let _ScalaLanguage: object | undefined;
 let _ExLanguage: object | undefined;
 
 async function getTSParser(): Promise<{ parser: Parser; lang: object } | null> {
@@ -595,6 +599,18 @@ async function getKotlinParser(): Promise<{ parser: Parser; lang: object } | nul
     _ktParser.setLanguage(_KtLanguage as unknown as Parser.Language);
   }
   return { parser: _ktParser!, lang: _KtLanguage! };
+}
+
+async function getScalaParser(): Promise<{ parser: Parser; lang: object } | null> {
+  const NP = await loadNativeParser();
+  if (!NP) return null;
+  if (!_scalaParser) {
+    const scalaModule = await import('tree-sitter-scala');
+    _ScalaLanguage = (scalaModule as { default: object }).default;
+    _scalaParser = new NP();
+    _scalaParser.setLanguage(_ScalaLanguage as unknown as Parser.Language);
+  }
+  return { parser: _scalaParser!, lang: _ScalaLanguage! };
 }
 
 async function getElixirParser(): Promise<{ parser: Parser; lang: object } | null> {
@@ -2712,6 +2728,117 @@ async function extractClassRelationships(
           if (cls && parent) merge(file.path, cls, [parent], []);
         }
 
+      } else if (file.language === 'C#') {
+        const r = await getCSharpParser();
+        if (!r) continue;
+        const { parser, lang } = r;
+        const tree = (parser as Parser).parse(file.content);
+
+        // C# `class D : B, IFoo, IBar<T>` / `interface I : IBase` — the base_list holds
+        // the base class AND interfaces with no syntactic distinction. Capture every
+        // base (plain or generic) and split by the C# `I<Upper>` interface naming
+        // convention; either way CHA treats both as subtype edges. Without this branch
+        // C# classes had empty parent/interface sets and CHA was inert for C#.
+        for (const declType of ['class_declaration', 'interface_declaration', 'record_declaration', 'struct_declaration']) {
+          const Q = `
+            (${declType}
+              name: (identifier) @cls
+              (base_list [(identifier) @base (generic_name (identifier) @base)]))`;
+          for (const m of safeQuery(lang, Q, tree.rootNode)) {
+            const cls  = m.captures.find(c => c.name === 'cls')?.node.text;
+            const base = m.captures.find(c => c.name === 'base')?.node.text;
+            if (!cls || !base) continue;
+            if (/^I[A-Z]/.test(base)) merge(file.path, cls, [], [base]);
+            else merge(file.path, cls, [base], []);
+          }
+        }
+
+      } else if (file.language === 'Kotlin') {
+        const r = await getKotlinParser();
+        if (!r) continue;
+        const { parser, lang } = r;
+        const tree = (parser as Parser).parse(file.content);
+
+        // Kotlin `class C : Base(), IFace` — every supertype is a `delegation_specifier`
+        // with no syntactic class/interface distinction (a superclass may carry a
+        // constructor_invocation). Capture the whole user_type and take its leaf name,
+        // SKIPPING qualified types (`Outer.Inner`, e.g. `Job : CoroutineContext.Element`):
+        // those resolve to a nested/stdlib type, and matching the outer segment wires the
+        // class to a phantom (an extension-function receiver such as `CoroutineContext`).
+        for (const declType of ['class_declaration', 'object_declaration', 'interface_declaration']) {
+          for (const wrap of ['(user_type) @put', '(constructor_invocation (user_type) @put)']) {
+            const Q = `(${declType} (type_identifier) @cls (delegation_specifier ${wrap}))`;
+            for (const m of safeQuery(lang, Q, tree.rootNode)) {
+              const cls = m.captures.find(c => c.name === 'cls')?.node.text;
+              const put = m.captures.find(c => c.name === 'put')?.node.text;
+              if (!cls || !put) continue;
+              const parent = put.replace(/<[\s\S]*$/, '').trim(); // strip generic args
+              if (parent.includes('.')) continue;                 // skip qualified/nested types
+              merge(file.path, cls, [parent], []);
+            }
+          }
+        }
+
+      } else if (file.language === 'PHP') {
+        const r = await getPhpParser();
+        if (!r) continue;
+        const { parser, lang } = r;
+        const tree = (parser as Parser).parse(file.content);
+
+        // PHP distinguishes `extends` (base_clause, one parent) from `implements`
+        // (class_interface_clause, many interfaces).
+        const EXTENDS_Q = `(class_declaration name: (name) @cls (base_clause (name) @parent))`;
+        const IMPLEMENTS_Q = `(class_declaration name: (name) @cls (class_interface_clause (name) @iface))`;
+        for (const m of safeQuery(lang, EXTENDS_Q, tree.rootNode)) {
+          const cls    = m.captures.find(c => c.name === 'cls')?.node.text;
+          const parent = m.captures.find(c => c.name === 'parent')?.node.text;
+          if (cls && parent) merge(file.path, cls, [parent], []);
+        }
+        for (const m of safeQuery(lang, IMPLEMENTS_Q, tree.rootNode)) {
+          const cls   = m.captures.find(c => c.name === 'cls')?.node.text;
+          const iface = m.captures.find(c => c.name === 'iface')?.node.text;
+          if (cls && iface) merge(file.path, cls, [], [iface]);
+        }
+
+      } else if (file.language === 'Swift') {
+        const r = await getSwiftParser();
+        if (!r) continue;
+        const { parser, lang } = r;
+        const tree = (parser as Parser).parse(file.content);
+
+        // Swift `class C: Base, Proto` — every supertype/protocol is an
+        // `inheritance_specifier` with no syntactic distinction. (class_declaration in
+        // this grammar also covers struct/enum/extension.) Take the user_type leaf name
+        // and skip qualified types (`Module.Type`) for the same reason as Kotlin.
+        for (const declType of ['class_declaration', 'protocol_declaration']) {
+          const Q = `(${declType} (type_identifier) @cls (inheritance_specifier (user_type) @put))`;
+          for (const m of safeQuery(lang, Q, tree.rootNode)) {
+            const cls = m.captures.find(c => c.name === 'cls')?.node.text;
+            const put = m.captures.find(c => c.name === 'put')?.node.text;
+            if (!cls || !put) continue;
+            const parent = put.replace(/<[\s\S]*$/, '').trim();
+            if (parent.includes('.')) continue;
+            merge(file.path, cls, [parent], []);
+          }
+        }
+
+      } else if (file.language === 'Scala') {
+        const r = await getScalaParser();
+        if (!r) continue;
+        const { parser, lang } = r;
+        const tree = (parser as Parser).parse(file.content);
+
+        // Scala `class C extends Base with Trait` — the superclass and every mixed-in
+        // trait sit in one `extends_clause`. Treat each as a subtype edge.
+        for (const declType of ['class_definition', 'trait_definition', 'object_definition']) {
+          const Q = `(${declType} (identifier) @cls (extends_clause (type_identifier) @parent))`;
+          for (const m of safeQuery(lang, Q, tree.rootNode)) {
+            const cls    = m.captures.find(c => c.name === 'cls')?.node.text;
+            const parent = m.captures.find(c => c.name === 'parent')?.node.text;
+            if (cls && parent) merge(file.path, cls, [parent], []);
+          }
+        }
+
       } else if (file.language === 'Ruby') {
         const r = await getRubyParser();
         if (!r) continue;
@@ -2730,31 +2857,44 @@ async function extractClassRelationships(
         }
 
       } else if (file.language === 'Go') {
-        // Go has no inheritance but has struct embedding; treat as 'embeds' edges
+        // Go has no inheritance but has struct embedding; treat as 'embeds' edges.
         const r = await getGoParser();
         if (!r) continue;
         const { parser, lang } = r;
         const tree = (parser as Parser).parse(file.content);
 
-        // Anonymous (embedded) field in a struct: type Foo struct { Bar }
+        // An EMBEDDED field is an ANONYMOUS field (a type with no field name):
+        // `type Foo struct { Bar }` or `{ *Bar }`. A NAMED field `Name Bar` is NOT an
+        // embed — capturing its type as a parent wires phantom edges (e.g. cobra's
+        // `CompletionOptions CompletionOptions` field looked like an embed) and pollutes
+        // parent_classes with field types. So capture the field_declaration and only
+        // treat it as an embed when it has no `name:` field; unwrap a leading `*`.
         const Q = `
           (type_declaration
             (type_spec
               name: (type_identifier) @cls
               type: (struct_type
                 (field_declaration_list
-                  (field_declaration
-                    type: (type_identifier) @embedded)))))`;
+                  (field_declaration) @field))))`;
         for (const m of safeQuery(lang, Q, tree.rootNode)) {
-          const cls      = m.captures.find(c => c.name === 'cls')?.node.text;
-          const embedded = m.captures.find(c => c.name === 'embedded')?.node.text;
-          if (cls && embedded) {
-            const key = `${file.path}::${cls}`;
-            const existing = out.get(key) ?? { parentClasses: [], interfaces: [] };
-            // Store Go embeds as parentClasses (will be tagged as 'embeds' when building edges)
-            if (!existing.parentClasses.includes(embedded)) existing.parentClasses.push(embedded);
-            out.set(key, existing);
-          }
+          const cls   = m.captures.find(c => c.name === 'cls')?.node.text;
+          const field = m.captures.find(c => c.name === 'field')?.node;
+          if (!cls || !field) continue;
+          if (field.childForFieldName('name')) continue; // named field — not an embed
+          const typeNode = field.childForFieldName('type');
+          // Embedded type: `Bar` (type_identifier) or `*Bar` (pointer_type → type_identifier).
+          // Skip qualified embeds (`pkg.Bar`) — they resolve to an external package type.
+          const embedded = typeNode?.type === 'type_identifier'
+            ? typeNode.text
+            : (typeNode?.type === 'pointer_type'
+                ? typeNode.namedChildren.find((c: { type: string }) => c.type === 'type_identifier')?.text
+                : undefined);
+          if (!embedded) continue;
+          const key = `${file.path}::${cls}`;
+          const existing = out.get(key) ?? { parentClasses: [], interfaces: [] };
+          // Store Go embeds as parentClasses (tagged 'embeds' when building edges).
+          if (!existing.parentClasses.includes(embedded)) existing.parentClasses.push(embedded);
+          out.set(key, existing);
         }
       }
       // Rust: trait impls are structural but less like OOP inheritance; skip for now
@@ -2778,6 +2918,7 @@ async function extractClassRelationships(
 function buildClassNodes(
   allNodes: Map<string, FunctionNode>,
   relationships: Map<string, { parentClasses: string[]; interfaces: string[] }>,
+  importMap?: ImportMap,
 ): { classes: ClassNode[]; inheritanceEdges: InheritanceEdge[] } {
   // Group FunctionNodes by (filePath, className).
   // Free functions use a synthetic "[basename]" module name keyed by filePath alone.
@@ -2825,20 +2966,55 @@ function buildClassNodes(
     classMap.set(id, cls);
   }
 
-  // Build InheritanceEdge[] — only when both parent and child are in our graph
-  // Parent lookup: match by class name across all ClassNodes (first match wins)
+  // Build InheritanceEdge[] — only when both parent and child are in our graph.
+  // Parent lookup resolves a base/interface NAME to a ClassNode, preferring a class
+  // of that name in the SAME FILE as the child before any global match. Without the
+  // same-file preference, two unrelated classes sharing a name in different files
+  // (e.g. an `observer.py::Subject` and a `proxy.py::Subject`) collapse to one under
+  // a global first-match-wins lookup, so a child resolves its base to the wrong
+  // declaration and CHA then synthesizes a false override edge between semantically
+  // unrelated classes. Same-file-first eliminates that collision for the common case
+  // (a class extending a base declared in its own file / a same-named local shadow);
+  // genuine cross-file inheritance falls back to the global first match.
   const byName = new Map<string, ClassNode>();
+  const nameCount = new Map<string, number>();
+  const byNameAndDir = new Map<string, ClassNode[]>(); // `${dir}\0${name}` → classes
+  const dirOf = (p: string): string => { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(0, i) : ''; };
   for (const cls of classMap.values()) {
+    nameCount.set(cls.name, (nameCount.get(cls.name) ?? 0) + 1);
     if (!byName.has(cls.name)) byName.set(cls.name, cls);
+    const dk = `${dirOf(cls.filePath)}\0${cls.name}`;
+    const arr = byNameAndDir.get(dk);
+    if (arr) arr.push(cls); else byNameAndDir.set(dk, [cls]);
   }
+  // Resolve a base/interface NAME to a ClassNode, most-specific evidence first:
+  //   1. same file  2. the file the child imports the name from  3. unique within the
+  //   child's directory (same package)  4. globally unique  5. otherwise SKIP.
+  // Earlier layers carry real evidence (declaration site, import, package); the global-
+  // unique fallback is safe (only one candidate). When the bare name is ambiguous across
+  // directories and no import disambiguates it (e.g. several namespaced `Builder` classes),
+  // skip rather than guess a first-match — false-negatives over false-positives.
+  const resolveParent = (parentName: string, childFile: string): ClassNode | undefined => {
+    const sameFile = classMap.get(`${childFile}::${parentName}`);
+    if (sameFile) return sameFile;
+    const importedFrom = importMap?.get(childFile)?.get(parentName);
+    if (importedFrom) {
+      const viaImport = classMap.get(`${importedFrom}::${parentName}`);
+      if (viaImport) return viaImport;
+    }
+    const sameDir = byNameAndDir.get(`${dirOf(childFile)}\0${parentName}`);
+    if (sameDir && sameDir.length === 1) return sameDir[0];
+    if ((nameCount.get(parentName) ?? 0) > 1) return undefined; // ambiguous across dirs → skip
+    return byName.get(parentName);
+  };
 
   const inheritanceEdges: InheritanceEdge[] = [];
   const seenEdges = new Set<string>();
 
   for (const cls of classMap.values()) {
     for (const parentName of cls.parentClasses) {
-      const parent = byName.get(parentName);
-      if (!parent) continue;
+      const parent = resolveParent(parentName, cls.filePath);
+      if (!parent || parent.id === cls.id) continue;
       const edgeId = `${parent.id}->${cls.id}`;
       if (seenEdges.has(edgeId)) continue;
       seenEdges.add(edgeId);
@@ -2847,8 +3023,8 @@ function buildClassNodes(
       inheritanceEdges.push({ id: edgeId, parentId: parent.id, childId: cls.id, kind });
     }
     for (const ifaceName of cls.interfaces) {
-      const parent = byName.get(ifaceName);
-      if (!parent) continue;
+      const parent = resolveParent(ifaceName, cls.filePath);
+      if (!parent || parent.id === cls.id) continue;
       const edgeId = `${parent.id}->${cls.id}`;
       if (seenEdges.has(edgeId)) continue;
       seenEdges.add(edgeId);
@@ -4616,10 +4792,50 @@ export class CallGraphBuilder {
 
     // Pass 7: Build class hierarchy (inheritance + grouping)
     const relationships = await extractClassRelationships(files);
-    const { classes, inheritanceEdges } = buildClassNodes(allNodes, relationships);
+    const { classes, inheritanceEdges } = buildClassNodes(allNodes, relationships, importMap);
     // Merge IaC module groupings (deduped by id) into the class set.
     const classIds = new Set(classes.map(c => c.id));
     for (const c of iacClasses) if (!classIds.has(c.id)) classes.push(c);
+
+    // Pass 7b: CHA — type-hierarchy-resolved polymorphic dispatch
+    // (spec: add-type-hierarchy-resolved-dispatch). Runs after the hierarchy is
+    // built so ClassNode/InheritanceEdge are available. Additive and provenance-
+    // labeled (confidence 'synthesized'); best-effort — never fails the build.
+    // Placed after fanIn/fanOut (Pass 3) and tested_by (Pass 3b) so the heuristic
+    // edges never perturb the directly-resolved structural metrics or tested_by.
+    try {
+      // Direct (non-synthesized) callee ids per caller, so CHA never duplicates a
+      // directly-resolved edge.
+      const directCalleeIdsByCaller = new Map<string, Set<string>>();
+      for (const e of edges) {
+        if (e.confidence === 'synthesized') continue;
+        if (e.kind && e.kind !== 'calls') continue;
+        let s = directCalleeIdsByCaller.get(e.callerId);
+        if (!s) { s = new Set(); directCalleeIdsByCaller.set(e.callerId, s); }
+        s.add(e.calleeId);
+      }
+      // Receiver-based method calls `recv.m()` recovered from the raw edges.
+      const rawMethodCalls: RawMethodCall[] = [];
+      for (const raw of allRawEdges) {
+        if (!raw.calleeObject) continue;
+        rawMethodCalls.push({
+          callerId: raw.callerId,
+          recv: raw.calleeObject,
+          method: raw.calleeName,
+          line: raw.line,
+        });
+      }
+      edges.push(...synthesizeTypeHierarchyEdges({
+        nodes: allNodes,
+        classes,
+        inheritanceEdges,
+        rawMethodCalls,
+        fileContents,
+        directCalleeIdsByCaller,
+      }));
+    } catch {
+      // CHA is best-effort; a failure must never abort the build.
+    }
 
     // Pass 8: Content-addressed stable ids (change: add-content-addressed-stable-symbol-ids).
     // Pure post-pass over the fully-built node set — keeps the per-language

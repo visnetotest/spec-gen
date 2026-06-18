@@ -30,6 +30,7 @@ import {
   buildAdjacency,
   bfs,
   buildWeightedAdjacency,
+  bfsFromDB,
   weightedBfs,
   computeRiskScore,
   recommendStrategy,
@@ -81,6 +82,77 @@ function makeGraph(nodes: FunctionNode[], edges: CallEdge[]): SerializedCallGrap
     stats: { totalNodes: nodes.length, totalEdges: edges.length, avgFanIn: 0, avgFanOut: 0 },
   };
 }
+
+// ============================================================================
+// CHA override / virtual-dispatch edges in the adjacency builders
+// (spec: add-type-hierarchy-resolved-dispatch)
+// ============================================================================
+
+describe('CHA edges in adjacency builders', () => {
+  const overrideEdge = (from: string, to: string): CallEdge =>
+    ({ callerId: from, calleeId: to, calleeName: to.split('::')[1] ?? to, confidence: 'synthesized', kind: 'overrides', synthesizedBy: 'override' });
+  const chaCallEdge = (from: string, to: string): CallEdge =>
+    ({ callerId: from, calleeId: to, calleeName: to.split('::')[1] ?? to, confidence: 'synthesized', kind: 'calls', callType: 'method', synthesizedBy: 'cha-declared-type' });
+
+  it('materialized override edges propagate in both directions (replacing the cross-product)', () => {
+    const base = makeNode({ id: 'a.ts::Base.m', className: 'Base' });
+    const derived = makeNode({ id: 'a.ts::Derived.m', className: 'Derived' });
+    const cg = makeGraph([base, derived], [overrideEdge(base.id, derived.id)]);
+    const { forward, backward } = buildAdjacency(cg);
+    expect(forward.get(base.id)!.has(derived.id)).toBe(true);   // base → override
+    expect(backward.get(derived.id)!.has(base.id)).toBe(true);  // override ← base
+  });
+
+  it('strict mode (directResolvedOnly) excludes override and CHA virtual-dispatch edges', () => {
+    const base = makeNode({ id: 'a.ts::Base.m', className: 'Base' });
+    const derived = makeNode({ id: 'a.ts::Derived.m', className: 'Derived' });
+    const caller = makeNode({ id: 'a.ts::caller' });
+    const impl = makeNode({ id: 'a.ts::Impl.area', className: 'Impl' });
+    const cg = makeGraph(
+      [base, derived, caller, impl],
+      [overrideEdge(base.id, derived.id), chaCallEdge(caller.id, impl.id)],
+    );
+    const { forward } = buildAdjacency(cg, { directResolvedOnly: true });
+    expect(forward.get(base.id)!.has(derived.id)).toBe(false);
+    expect(forward.get(caller.id)!.has(impl.id)).toBe(false);
+  });
+
+  it('override edges do not contribute to call distance (excluded from weighted adjacency)', () => {
+    const base = makeNode({ id: 'a.ts::Base.m', className: 'Base' });
+    const derived = makeNode({ id: 'a.ts::Derived.m', className: 'Derived' });
+    const cg = makeGraph([base, derived], [overrideEdge(base.id, derived.id)]);
+    const { forward } = buildWeightedAdjacency(cg);
+    // kind 'overrides' is not a call hop — no weighted edge.
+    expect(forward.get(base.id) ?? []).toHaveLength(0);
+  });
+
+  it('CHA virtual-dispatch (calls-kind) edges DO appear in weighted adjacency', () => {
+    const caller = makeNode({ id: 'a.ts::caller' });
+    const impl = makeNode({ id: 'a.ts::Impl.area', className: 'Impl' });
+    const cg = makeGraph([caller, impl], [chaCallEdge(caller.id, impl.id)]);
+    const { forward } = buildWeightedAdjacency(cg);
+    expect((forward.get(caller.id) ?? []).some(e => e.to === impl.id)).toBe(true);
+  });
+
+  // The DB-backed lazy path (bfsFromDB) must traverse the SAME materialized override
+  // edges as the in-memory buildAdjacency — so analyze_impact/get_subgraph agree with
+  // find_dead_code — and directResolvedOnly must exclude them in this path too.
+  // (spec: add-type-hierarchy-resolved-dispatch — ProvenanceAwareReachability)
+  it('bfsFromDB traverses override edges by default and excludes them in strict mode', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ol-bfsdb-'));
+    const store = EdgeStore.open(join(dir, 'call-graph.db'));
+    try {
+      store.insertEdges([overrideEdge('a.ts::Animal.speak', 'a.ts::Dog.speak')]);
+      const reached = bfsFromDB(['a.ts::Animal.speak'], 'forward', 3, store);
+      expect(reached.has('a.ts::Dog.speak')).toBe(true);
+      const strict = bfsFromDB(['a.ts::Animal.speak'], 'forward', 3, store, { directResolvedOnly: true });
+      expect(strict.has('a.ts::Dog.speak')).toBe(false);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 // ============================================================================
 // buildAdjacency

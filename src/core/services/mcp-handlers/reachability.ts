@@ -14,15 +14,19 @@
  * HONEST LIMITS — output is *candidates*, never deletion authority. Callback /
  * event-channel and route→handler dispatch is now PARTIALLY recovered via
  * synthesized edges (single-language, statically-paired registration+dispatch;
- * spec: add-synthesized-dynamic-dispatch-edges), and a symbol reachable only
- * through such an edge is no longer reported as high-confidence dead. What remains
- * a blind spot: reflection, computed/string-built dispatch (`obj[name]()`),
- * cross-language bridges, DI/plugin registries with no statically-visible binding,
- * and externally-consumed public exports — these can still produce false "dead"
- * positives. Roots include tests, imported symbols, and detected framework
- * entries; every candidate carries a confidence level and a reason; nothing is
- * ever auto-deleted. Pass `directResolvedOnly` to ignore synthesized edges and get
- * the strict directly-resolved reachability instead.
+ * spec: add-synthesized-dynamic-dispatch-edges), and polymorphic dispatch through
+ * inheritance/interfaces is recovered via Class Hierarchy Analysis (name+arity,
+ * declared-type-narrowed where the receiver type is statically recoverable; spec:
+ * add-type-hierarchy-resolved-dispatch). A symbol reachable only through such an
+ * edge is no longer reported as high-confidence dead. What remains a blind spot:
+ * reflection, computed/string-built dispatch (`obj[name]()`), cross-language
+ * bridges and cross-language polymorphism, DI/plugin registries with no
+ * statically-visible binding, RTA/VTA-level pruning of the CHA name+arity
+ * over-approximation, and externally-consumed public exports — these can still
+ * produce false "dead" positives. Roots include tests, imported symbols, and
+ * detected framework entries; every candidate carries a confidence level and a
+ * reason; nothing is ever auto-deleted. Pass `directResolvedOnly` to ignore
+ * synthesized edges and get the strict directly-resolved reachability instead.
  */
 
 import { readFile } from 'node:fs/promises';
