@@ -263,15 +263,50 @@ describe('CHA — ambiguous cross-file base names', () => {
     expect(b.edges.some(e => e.synthesizedBy === 'override' && e.callerId === bLog && e.calleeId === fileLog)).toBe(false);
   });
 
-  it('does not synthesize an override edge to an ambiguous cross-file base', async () => {
+  it('resolves an ambiguous base via the child\'s import, not a global guess', async () => {
+    // The child imports `Logger` from './a', so its base is unambiguous DESPITE the name
+    // also existing in b.ts: the import is decisive evidence. Resolution wires MyLogger to
+    // a.ts::Logger only — never b.ts::Logger.
     const b = await new CallGraphBuilder().build([
       { path: 'a.ts', content: `export class Logger { log() { return 1; } }`, language: 'TypeScript' },
       { path: 'b.ts', content: `export class Logger { log() { return 2; } }`, language: 'TypeScript' },
       { path: 'c.ts', content: `import { Logger } from './a'; class MyLogger extends Logger { log() { return 3; } }`, language: 'TypeScript' },
     ]);
-    // Neither same-named Logger.log is wired to MyLogger.log (ambiguous → skipped).
-    const myLog = [...b.nodes.values()].find(n => n.id === 'c.ts::MyLogger.log')?.id;
+    const myLog = 'c.ts::MyLogger.log';
+    expect(b.edges.some(e => e.synthesizedBy === 'override' && e.callerId === 'a.ts::Logger.log' && e.calleeId === myLog)).toBe(true);
+    expect(b.edges.some(e => e.synthesizedBy === 'override' && e.callerId === 'b.ts::Logger.log' && e.calleeId === myLog)).toBe(false);
+  });
+
+  it('still skips an ambiguous cross-file base when NO import disambiguates it', async () => {
+    // Same shape, but the child does NOT import the name (e.g. a global/ambient base). With
+    // no decisive evidence and the name ambiguous across directories, resolution skips
+    // rather than guess a first-match — false-negatives over false-positives.
+    const b = await new CallGraphBuilder().build([
+      { path: 'a.ts', content: `export class Logger { log() { return 1; } }`, language: 'TypeScript' },
+      { path: 'b.ts', content: `export class Logger { log() { return 2; } }`, language: 'TypeScript' },
+      { path: 'c.ts', content: `class MyLogger extends Logger { log() { return 3; } }`, language: 'TypeScript' },
+    ]);
+    const myLog = 'c.ts::MyLogger.log';
     expect(b.edges.some(e => e.synthesizedBy === 'override' && e.calleeId === myLog)).toBe(false);
+  });
+
+  it('an imported cross-directory base outranks a same-named class in the child\'s own dir', async () => {
+    // Regression for the dogfood finding: `widgets/sphere.ts` imports its base `Shape` from
+    // `../shapes/base`, but a DIFFERENT `Shape` is declared in its own `widgets/` directory.
+    // With import-based resolution dead, the same-directory layer wired Sphere to the LOCAL
+    // decoy (a false `extends` edge) and dropped the real `Shape.area -> Sphere.area`
+    // override. The import must win: Sphere resolves to shapes/base::Shape.
+    const b = await new CallGraphBuilder().build([
+      { path: 'shapes/base.ts', content: `export class Shape { area() { return 0; } }`, language: 'TypeScript' },
+      { path: 'widgets/base.ts', content: `export class Shape { volume() { return 0; } }`, language: 'TypeScript' },
+      { path: 'widgets/sphere.ts', content: `import { Shape } from '../shapes/base'; export class Sphere extends Shape { area() { return 12.56; } }`, language: 'TypeScript' },
+    ]);
+    const sphereArea = 'widgets/sphere.ts::Sphere.area';
+    // The real override edge is recovered…
+    expect(b.edges.some(e => e.synthesizedBy === 'override' && e.callerId === 'shapes/base.ts::Shape.area' && e.calleeId === sphereArea)).toBe(true);
+    // …and no false edge ties Sphere to the local decoy Shape (which only has volume()).
+    expect(b.inheritanceEdges.some(e => e.parentId === 'widgets/base.ts::Shape' && e.childId === 'widgets/sphere.ts::Sphere')).toBe(false);
+    expect(b.inheritanceEdges.some(e => e.parentId === 'shapes/base.ts::Shape' && e.childId === 'widgets/sphere.ts::Sphere')).toBe(true);
   });
 });
 
