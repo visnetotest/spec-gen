@@ -25,6 +25,7 @@ import type {
   BeforeAgentStartEventResult,
   ExtensionAPI,
   ExtensionContext,
+  SessionShutdownEvent,
   SessionStartEvent,
 } from '@earendil-works/pi-coding-agent';
 import { StringEnum } from '@earendil-works/pi-ai';
@@ -346,6 +347,16 @@ interface Daemon { baseUrl: string; token?: string }
 
 const HEALTH_TIMEOUT_MS = 8000;
 const HEALTH_POLL_MS = 150;
+// Generous per-probe timeout: a cold Node HTTP server on Windows can be slow to
+// answer the first /health. Too short a timeout misreads a live daemon as dead,
+// so we spawn a fresh one and orphan the previous — orphans pile up in RAM.
+const HEALTH_PROBE_TIMEOUT_MS = 2500;
+// Keepalive: while a session is open, ping the daemon's /health on this interval
+// so the in-use daemon never hits the serve idle-shutdown (default 15 min) mid-
+// session. Must stay well below that window — at ~1/3 of it, two pings can be
+// missed before a wrongful reap. Only daemons this extension knows are pinged —
+// orphans get no ping and still reap, so this can't resurrect the RAM pileup.
+const KEEPALIVE_MS = 5 * 60_000;
 const RESULT_MAX = 50_000;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -357,7 +368,7 @@ async function readDescriptor(cwd: string): Promise<ServeDescriptor | null> {
 
 async function healthy(desc: ServeDescriptor): Promise<boolean> {
   try {
-    const res = await fetch(`http://${desc.host}:${desc.port}/health`, { signal: AbortSignal.timeout(1000) });
+    const res = await fetch(`http://${desc.host}:${desc.port}/health`, { signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS) });
     if (!res.ok) return false;
     return ((await res.json().catch(() => null)) as { ok?: boolean } | null)?.ok === true;
   } catch { return false; }
@@ -731,6 +742,24 @@ export default function openlore(pi: ExtensionAPI): void {
     return d;
   }
 
+  // Keepalive: ping every known daemon's /health so the in-use one survives the
+  // serve idle-shutdown while this session is open. A daemon that no longer
+  // answers (reaped/crashed) is dropped from the cache so the next tool call
+  // re-spawns it. Fire-and-forget; failures are expected and ignored.
+  let keepalive: ReturnType<typeof setInterval> | undefined;
+  function startKeepalive(): void {
+    if (keepalive || daemons.size === 0) return;
+    keepalive = setInterval(() => {
+      for (const [cwd, daemon] of daemons) {
+        const headers = daemon.token ? { 'x-openlore-token': daemon.token } : undefined;
+        void fetch(`${daemon.baseUrl}/health`, { headers, signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS) })
+          .then((res) => { if (!res.ok) daemons.delete(cwd); })
+          .catch(() => daemons.delete(cwd));
+      }
+    }, KEEPALIVE_MS);
+    keepalive.unref?.(); // never keep the host process alive for the keepalive alone
+  }
+
   // ── B: navigation tools ──
   for (const tool of NAV_TOOLS) {
     pi.registerTool({
@@ -809,7 +838,15 @@ export default function openlore(pi: ExtensionAPI): void {
 
     if (ctx.mode !== 'json' && ctx.mode !== 'print') {
       await getDaemon(ctx.cwd);
+      startKeepalive();
     }
+  });
+
+  // Stop pinging when the session ends gracefully so the now-unused daemon can
+  // idle out and free its RAM. (On a hard kill the interval dies with the host
+  // process anyway — either way pings stop and the daemon reaps.)
+  pi.on('session_shutdown', (_event: SessionShutdownEvent) => {
+    if (keepalive) { clearInterval(keepalive); keepalive = undefined; }
   });
 
   // ── C: context injection on the first turn ──

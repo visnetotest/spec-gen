@@ -7,13 +7,13 @@
  * .openlore. We assert transport behaviour, not handler output.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, readFile, access, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
-import { startServe, readDescriptor, type ServeHandle } from './serve.js';
+import { startServe, readDescriptor, idleTimeoutMs, type ServeHandle } from './serve.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { openloreAnalyze } from '../../api/analyze.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
@@ -72,6 +72,87 @@ function rawGet(
     req.end();
   });
 }
+
+describe('idleTimeoutMs', () => {
+  it('defaults to 15 minutes when the option is absent or empty', () => {
+    expect(idleTimeoutMs(undefined)).toBe(15 * 60_000);
+    expect(idleTimeoutMs('')).toBe(15 * 60_000);
+  });
+
+  it('converts a positive minute value to milliseconds', () => {
+    expect(idleTimeoutMs('5')).toBe(5 * 60_000);
+    expect(idleTimeoutMs('0.5')).toBe(30_000);
+  });
+
+  it('treats 0 and negative values as disabled', () => {
+    expect(idleTimeoutMs('0')).toBe(0);
+    expect(idleTimeoutMs('-1')).toBe(0);
+  });
+
+  it('falls back to the default on non-numeric input', () => {
+    expect(idleTimeoutMs('abc')).toBe(15 * 60_000);
+  });
+});
+
+describe('idle self-shutdown', () => {
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  // The idle path ends in process.exit(0) (correct for the real detached daemon).
+  // Stub it so teardown still runs but the test runner survives, then assert the
+  // observable effects: the discovery file is removed and the port stops serving.
+  it('tears down and removes serve.json after the idle timeout with no requests', async () => {
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-idle-'));
+    try {
+      // 0.01 min = 600ms idle window.
+      const h = await startServe({ directory: dir, port: '0', watch: false, idleTimeout: '0.01' });
+      expect(h).toBeTruthy();
+      expect((await fetch(`${h!.baseUrl}/health`)).status).toBe(200);
+
+      // No further requests → timer (last reset by the /health above) fires.
+      await sleep(1000);
+      expect(exit).toHaveBeenCalled();
+      expect(await readDescriptor(dir)).toBeNull(); // teardown unlinked serve.json
+    } finally {
+      exit.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the daemon alive while requests keep arriving (timer resets)', async () => {
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-idle-'));
+    try {
+      const h = await startServe({ directory: dir, port: '0', watch: false, idleTimeout: '0.02' }); // 1200ms
+      // Ping every 400ms for ~1.6s — comfortably under the 1200ms window each
+      // time, so the timer keeps resetting. Without resets it would die at 1200ms.
+      for (let i = 0; i < 4; i++) {
+        await sleep(400);
+        expect((await fetch(`${h!.baseUrl}/health`)).status).toBe(200);
+      }
+      expect(exit).not.toHaveBeenCalled();
+      await h!.close();
+    } finally {
+      exit.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never arms the timer when disabled (--idle-timeout 0)', async () => {
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-idle-'));
+    try {
+      const h = await startServe({ directory: dir, port: '0', watch: false, idleTimeout: '0' });
+      await sleep(700);
+      expect(exit).not.toHaveBeenCalled();
+      expect(await readDescriptor(dir)).not.toBeNull(); // still serving
+      await h!.close();
+    } finally {
+      exit.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('openlore serve', () => {
   it('GET /health reports version, preset, and active tools', async () => {
