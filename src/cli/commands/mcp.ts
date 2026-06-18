@@ -517,6 +517,27 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'blast_radius',
+    description:
+      'USE THIS WHEN: before committing/editing, you want one briefing of what your diff actually ' +
+      'touches — "what is the blast radius of my changes?", "is this change safe to commit?". ' +
+      'Composes existing deterministic analyses over the staged/working diff into a single ' +
+      'conclusion-shaped briefing: affected callers and layers crossed (analyze_impact), the tests ' +
+      'to run (select_tests), the anchored memories/decisions the diff will turn drifted/orphaned and ' +
+      'the specs it will make stale (check_spec_drift). No LLM, no new analysis — pure orchestration. ' +
+      'Advisory: it informs, you act. Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        baseRef: { type: 'string', description: 'Git ref to diff the working tree against (e.g. "HEAD", "main"). Default HEAD (uncommitted changes).' },
+        depth: { type: 'number', description: 'Impact-analysis traversal depth (default 2).' },
+        maxSymbols: { type: 'number', description: 'Cap on the number of highest-fan-in changed symbols analyzed for impact (default 12). Truncation is reported.' },
+      },
+      required: ['directory'],
+    },
+  },
+  {
     name: 'find_dead_code',
     description:
       'USE THIS WHEN: "what code is unreachable / dead?", "is anything calling X?", or ' +

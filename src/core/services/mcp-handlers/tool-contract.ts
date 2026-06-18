@@ -65,6 +65,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   get_function_skeleton: 'conclusion',
   get_god_functions: 'conclusion',
   check_spec_drift: 'conclusion',
+  blast_radius: 'conclusion',
   search_code: 'conclusion',
   suggest_insertion_points: 'conclusion',
   search_specs: 'conclusion',

@@ -16,6 +16,20 @@ export interface OpenLoreConfig {
   embedding?: EmbeddingConfig;
   createdAt: string;
   lastRun: string | null;
+  /**
+   * Optional pre-flight blast-radius guard configuration
+   * (change: add-preflight-blast-radius-guard). The guard is advisory by
+   * default; `block` names the high-risk patterns the git hook should fail a
+   * commit on. Empty/absent = advisory-only (the default posture).
+   */
+  blastRadius?: BlastRadiusConfig;
+}
+
+/** Named high-risk patterns the blast-radius hook may block on (opt-in). */
+export type BlastRadiusBlockPattern = 'orphans-anchored-memory' | 'orphans-anchored-decision';
+
+export interface BlastRadiusConfig {
+  block?: BlastRadiusBlockPattern[];
 }
 
 export interface EmbeddingConfig {

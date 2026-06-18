@@ -170,8 +170,12 @@ describe('tools/list payload budget (spec-28)', () => {
   // PageRank ranking mode (`rankBy` on orient + `rankBy`/`tokenBudget` on get_minimal_context;
   // spec: add-personalized-pagerank-context-ranking) was added — a ranking MODE on existing
   // tools, no new tool, default surface count unchanged. Conscious decision, not silent drift.
+  // Full bumped 55_000 → 57_000 when the `blast_radius` pre-flight guard tool was added to the
+  // full surface (spec: add-preflight-blast-radius-guard) — a new orchestration tool that briefs a
+  // diff's structural blast radius. It stays OUT of the minimal/navigation/memory presets; only the
+  // full surface widens. Conscious decision, not silent drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({})).toBeLessThan(55_000);
+    expect(payloadBytes({})).toBeLessThan(57_000);
   });
 
   it('navigation preset stays lean (the low-overhead surface that wins the benchmark)', () => {

@@ -9,6 +9,7 @@
 | Don't know which file/function handles a concept | `search_code` |
 | Need call topology across many files | `get_subgraph` / `analyze_impact` |
 | "Which tests must I run for this change?" | `select_tests` — backward reachability to the reaching tests |
+| "What's the blast radius of my diff before I commit?" | `blast_radius` — one advisory briefing: callers/layers, tests to run, anchored memories/decisions that will drift, stale specs |
 | "What's unreachable / what dies if I delete X?" | `find_dead_code` — cross-language reachability (candidates) |
 | Reviewing a change: structural delta + stale callers | `structural_diff` |
 | "What changes together with this / what's volatile?" | `get_change_coupling` — co-change + churn from git |

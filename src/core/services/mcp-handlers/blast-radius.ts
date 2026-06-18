@@ -1,0 +1,288 @@
+/**
+ * Pre-flight blast-radius guard (change: add-preflight-blast-radius-guard).
+ *
+ * "Before I commit this diff, what does it actually touch?" The expensive
+ * mistakes — changing a hub 58 callers depend on, orphaning a decision anchored
+ * to a symbol you deleted, making a spec stale — are all knowable *before* the
+ * edit, deterministically, from analyses OpenLore already computes. They just
+ * are not surfaced at the moment they would prevent the mistake.
+ *
+ * This handler is PURE ORCHESTRATION: it composes existing deterministic
+ * analyses — `analyze_impact` (callers / layers / hubs), `select_tests` (the
+ * tests to run), and `check_spec_drift` (which already folds in anchored-memory
+ * and ADR drift) over the diff returned by `getChangedFiles`. It adds no new
+ * structural computation and runs no LLM (north star `c6d1ad07`). The result is
+ * a single conclusion-shaped briefing — counts and named risks — never a graph.
+ *
+ * It is advisory by definition: the briefing informs, the agent acts. The
+ * non-blocking git hook and opt-in blocking live in `cli/commands/blast-radius.ts`.
+ */
+
+import { validateDirectory, readCachedContext } from './utils.js';
+import { seedsFromFiles, handleSelectTests } from './test-impact.js';
+import { handleAnalyzeImpact } from './graph.js';
+import { handleCheckSpecDrift } from './analysis.js';
+import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
+import type { DriftIssue, DriftResult } from '../../../types/index.js';
+
+/** How many of the highest-fan-in changed symbols to run impact analysis on.
+ * A briefing, not an audit: the riskiest symbols dominate the blast radius, and
+ * bounding the work keeps a pre-commit hook fast. Truncation is reported, never
+ * silent (mcp-quality: no-silent-truncation). */
+const DEFAULT_MAX_SYMBOLS = 12;
+
+export interface BlastRadiusInput {
+  directory: string;
+  /** Git ref to diff the working tree against. Default `HEAD` (uncommitted changes). */
+  baseRef?: string;
+  /** Impact-analysis traversal depth (forwarded to analyze_impact). Default 2. */
+  depth?: number;
+  /** Cap on the number of changed symbols analyzed for impact. Default 12. */
+  maxSymbols?: number;
+}
+
+type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
+const RISK_RANK: Record<RiskLevel, number> = { low: 1, medium: 2, high: 3, critical: 4 };
+
+/** Per-symbol slice of the briefing (the riskiest changed symbols). */
+interface SymbolRisk {
+  symbol: string;
+  file: string;
+  riskLevel: RiskLevel;
+  affectedCallers: number;
+  fanIn: number;
+  isHub: boolean;
+}
+
+/** The shape `analyze_impact` returns for a single resolved symbol (subset we read). */
+interface ImpactResult {
+  symbol: string;
+  file: string;
+  metrics: { fanIn: number; fanOut: number; isHub: boolean };
+  blastRadius: { total: number; upstream: number; downstream: number; infrastructure?: number };
+  riskLevel: RiskLevel;
+  crossDomain?: { ecosystems: string[] };
+  governingDecisions?: Array<{ id?: string; title: string; affectedDomains?: string[] }>;
+}
+
+export interface BlastRadiusBriefing {
+  baseRef: string;
+  changed: { files: number; symbols: number; symbolNames: string[] };
+  impact: {
+    highestRiskLevel: RiskLevel | 'none';
+    maxAffectedCallers: number;
+    hubsTouched: Array<{ symbol: string; fanIn: number }>;
+    layersCrossed: string[];
+    governingDecisions: string[];
+    topSymbols: SymbolRisk[];
+    analyzedSymbolCount: number;
+    truncated?: { omitted: number; reason: string };
+  };
+  tests: {
+    count: number;
+    toRun: Array<{ test: string; file: string; confidence: string }>;
+    soundness: unknown;
+  };
+  memory: {
+    drifted: number;
+    orphaned: number;
+    willDrift: Array<{ kind: string; message: string; filePath: string }>;
+  };
+  specs: {
+    willGoStale: number;
+    items: Array<{ kind: string; message: string; domain: string | null; specPath: string | null }>;
+  };
+  decisions: {
+    affected: number;
+    items: Array<{ kind: string; message: string; domain: string | null }>;
+  };
+  federation: { evaluated: false; note: string };
+  headline: string;
+  posture: 'advisory';
+  caveats: string[];
+}
+
+/** Normalize analyze_impact's single-or-`{matches}` return to a flat array. */
+function impactResults(raw: unknown): ImpactResult[] {
+  if (raw === null || typeof raw !== 'object') return [];
+  if ('error' in (raw as Record<string, unknown>)) return [];
+  if ('matches' in (raw as Record<string, unknown>)) {
+    const m = (raw as { matches: unknown }).matches;
+    return Array.isArray(m) ? (m as ImpactResult[]) : [];
+  }
+  return [raw as ImpactResult];
+}
+
+const SPEC_KINDS = new Set<DriftIssue['kind']>(['stale', 'gap', 'uncovered', 'orphaned-spec']);
+const MEMORY_KINDS = new Set<DriftIssue['kind']>(['memory-drifted', 'memory-orphaned']);
+const DECISION_KINDS = new Set<DriftIssue['kind']>(['adr-gap', 'adr-orphaned']);
+
+/**
+ * Compute the pre-flight blast-radius briefing for a diff. Read-only,
+ * deterministic, offline. Exported for reuse by the CLI hook; the MCP dispatch
+ * entry is {@link handleBlastRadius}.
+ */
+export async function computeBlastRadius(
+  input: BlastRadiusInput,
+): Promise<BlastRadiusBriefing | { error: string }> {
+  const absDir = await validateDirectory(input.directory);
+  const ctx = await readCachedContext(absDir);
+  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
+
+  const cg = ctx.callGraph as SerializedCallGraph;
+  const baseRef = input.baseRef && input.baseRef.length > 0 ? input.baseRef : 'HEAD';
+  const depth = Math.max(1, Math.min(input.depth ?? 2, 6));
+  const maxSymbols = Math.max(1, Math.min(input.maxSymbols ?? DEFAULT_MAX_SYMBOLS, 50));
+
+  // ── 1. Resolve the diff → changed files → seed production symbols ───────────
+  let changedFiles: string[] = [];
+  try {
+    const { getChangedFiles } = await import('../../drift/git-diff.js');
+    const diff = await getChangedFiles({ rootPath: absDir, baseRef, includeUnstaged: true });
+    changedFiles = diff.files.map(f => f.path);
+  } catch (err) {
+    return { error: `git diff failed (base ${baseRef}): ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  // Rank by fan-in: the highest-fan-in changed symbols dominate the blast radius.
+  const seeds = seedsFromFiles(cg, changedFiles).sort((a, b) => (b.fanIn ?? 0) - (a.fanIn ?? 0));
+  const analyzed = seeds.slice(0, maxSymbols);
+
+  // ── 2. Impact per top symbol (reuse analyze_impact) ─────────────────────────
+  const topSymbols: SymbolRisk[] = [];
+  const hubsTouched: Array<{ symbol: string; fanIn: number }> = [];
+  const layers = new Set<string>();
+  const governing = new Set<string>();
+  let highestRank = 0;
+  let maxAffectedCallers = 0;
+
+  for (const seed of analyzed) {
+    const raw = await handleAnalyzeImpact(absDir, seed.name, depth);
+    const candidates = impactResults(raw);
+    // Prefer the resolution whose file matches the changed seed (names can collide).
+    const r = candidates.find(c => c.file === seed.filePath) ?? candidates[0];
+    if (!r) continue;
+
+    const risk = (r.riskLevel ?? 'low') as RiskLevel;
+    const callers = r.blastRadius?.upstream ?? 0;
+    const isHub = r.metrics?.isHub ?? false;
+    topSymbols.push({ symbol: r.symbol, file: r.file, riskLevel: risk, affectedCallers: callers, fanIn: r.metrics?.fanIn ?? 0, isHub });
+    if (isHub) hubsTouched.push({ symbol: r.symbol, fanIn: r.metrics?.fanIn ?? 0 });
+    for (const e of r.crossDomain?.ecosystems ?? []) layers.add(e);
+    for (const d of r.governingDecisions ?? []) {
+      governing.add(d.title);
+      for (const dom of d.affectedDomains ?? []) layers.add(dom);
+    }
+    highestRank = Math.max(highestRank, RISK_RANK[risk] ?? 0);
+    maxAffectedCallers = Math.max(maxAffectedCallers, callers);
+  }
+
+  topSymbols.sort((a, b) => RISK_RANK[b.riskLevel] - RISK_RANK[a.riskLevel] || b.affectedCallers - a.affectedCallers);
+  const highestRiskLevel: RiskLevel | 'none' =
+    highestRank === 0 ? 'none' : (['', 'low', 'medium', 'high', 'critical'][highestRank] as RiskLevel);
+
+  // ── 3. Tests to run (reuse select_tests over the same diff) ─────────────────
+  let testCount = 0;
+  let testToRun: Array<{ test: string; file: string; confidence: string }> = [];
+  let testSoundness: unknown;
+  try {
+    const sel = await handleSelectTests({ directory: absDir, diffRef: baseRef }) as {
+      selectedTests?: Array<{ test: string; file: string; confidence: string }>;
+      soundness?: unknown;
+    };
+    const tests = sel.selectedTests ?? [];
+    testCount = tests.length;
+    testToRun = tests.slice(0, 15);
+    testSoundness = sel.soundness;
+  } catch { /* tests are best-effort; absence is reported as count 0 */ }
+
+  // ── 4. Spec / memory / decision drift (reuse check_spec_drift, one pass) ─────
+  // check_spec_drift already computes anchored-memory freshness (memory-drifted /
+  // memory-orphaned) and ADR drift in addition to spec staleness. We extract the
+  // named issues by kind rather than re-implementing freshness — pure reuse.
+  const memWillDrift: Array<{ kind: string; message: string; filePath: string }> = [];
+  const specItems: Array<{ kind: string; message: string; domain: string | null; specPath: string | null }> = [];
+  const decisionItems: Array<{ kind: string; message: string; domain: string | null }> = [];
+  let driftUnavailable: string | null = null;
+  const driftRaw = await handleCheckSpecDrift(absDir, baseRef, changedFiles, [], 'warning');
+  if (driftRaw && typeof driftRaw === 'object' && 'error' in driftRaw) {
+    driftUnavailable = (driftRaw as { error: string }).error;
+  } else {
+    const drift = driftRaw as DriftResult;
+    for (const issue of drift.issues ?? []) {
+      if (MEMORY_KINDS.has(issue.kind)) memWillDrift.push({ kind: issue.kind, message: issue.message, filePath: issue.filePath });
+      else if (SPEC_KINDS.has(issue.kind)) specItems.push({ kind: issue.kind, message: issue.message, domain: issue.domain, specPath: issue.specPath });
+      else if (DECISION_KINDS.has(issue.kind)) decisionItems.push({ kind: issue.kind, message: issue.message, domain: issue.domain });
+    }
+  }
+  const memOrphaned = memWillDrift.filter(m => m.kind === 'memory-orphaned').length;
+  const memDrifted = memWillDrift.filter(m => m.kind === 'memory-drifted').length;
+
+  // ── 5. Compose the conclusion-shaped briefing ───────────────────────────────
+  const caveats: string[] = [
+    'Blast radius is an over-approximate structural prioritizer, not a behavioral test outcome.',
+    'Impact and test selection can under-select through dynamic dispatch, reflection, and DI.',
+  ];
+  if (seeds.length > analyzed.length) {
+    caveats.push(`Impact analyzed the ${analyzed.length} highest-fan-in changed symbols; ${seeds.length - analyzed.length} lower-risk symbols were not individually analyzed.`);
+  }
+  if (driftUnavailable) {
+    caveats.push(`Spec/memory drift could not be evaluated: ${driftUnavailable}`);
+  }
+
+  const briefing: BlastRadiusBriefing = {
+    baseRef,
+    changed: {
+      files: changedFiles.length,
+      symbols: seeds.length,
+      symbolNames: seeds.slice(0, 30).map(s => s.name),
+    },
+    impact: {
+      highestRiskLevel,
+      maxAffectedCallers,
+      hubsTouched: hubsTouched.sort((a, b) => b.fanIn - a.fanIn),
+      layersCrossed: [...layers].sort(),
+      governingDecisions: [...governing].sort(),
+      topSymbols: topSymbols.slice(0, 15),
+      analyzedSymbolCount: analyzed.length,
+      ...(seeds.length > analyzed.length
+        ? { truncated: { omitted: seeds.length - analyzed.length, reason: `only the ${analyzed.length} highest-fan-in symbols were analyzed` } }
+        : {}),
+    },
+    tests: { count: testCount, toRun: testToRun, soundness: testSoundness },
+    memory: { drifted: memDrifted, orphaned: memOrphaned, willDrift: memWillDrift.slice(0, 20) },
+    specs: { willGoStale: specItems.length, items: specItems.slice(0, 20) },
+    decisions: { affected: decisionItems.length, items: decisionItems.slice(0, 20) },
+    federation: {
+      evaluated: false,
+      note: 'Cross-repo consumers of changed published interfaces are not evaluated (multi-repo federation not yet shipped — add-multi-repo-federation).',
+    },
+    headline: '',
+    posture: 'advisory',
+    caveats,
+  };
+  briefing.headline = renderHeadline(briefing);
+  return briefing;
+}
+
+/** One-line conclusion summarizing the briefing. */
+function renderHeadline(b: BlastRadiusBriefing): string {
+  if (b.changed.files === 0) return 'No changes vs ' + b.baseRef + ' — nothing to brief.';
+  const parts: string[] = [
+    `${b.changed.files} file${b.changed.files === 1 ? '' : 's'} / ${b.changed.symbols} symbol${b.changed.symbols === 1 ? '' : 's'} changed`,
+  ];
+  if (b.impact.highestRiskLevel !== 'none') parts.push(`highest risk: ${b.impact.highestRiskLevel}`);
+  if (b.impact.hubsTouched.length > 0) parts.push(`${b.impact.hubsTouched.length} hub${b.impact.hubsTouched.length === 1 ? '' : 's'} affected`);
+  if (b.tests.count > 0) parts.push(`${b.tests.count} test${b.tests.count === 1 ? '' : 's'} to run`);
+  const willDrift = b.memory.drifted + b.memory.orphaned;
+  if (willDrift > 0) parts.push(`${willDrift} anchored memor${willDrift === 1 ? 'y' : 'ies'} will drift/orphan`);
+  if (b.decisions.affected > 0) parts.push(`${b.decisions.affected} decision${b.decisions.affected === 1 ? '' : 's'} affected`);
+  if (b.specs.willGoStale > 0) parts.push(`${b.specs.willGoStale} spec${b.specs.willGoStale === 1 ? '' : 's'} may go stale`);
+  return parts.join('; ') + '.';
+}
+
+/** MCP dispatch entry. Returns the briefing object directly (additive-by-cast). */
+export async function handleBlastRadius(input: BlastRadiusInput): Promise<unknown> {
+  return computeBlastRadius(input);
+}

@@ -102,6 +102,7 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
   get_test_coverage: { kind: 'read', buildArgs: dirOnly },
   find_dead_code: { kind: 'read', buildArgs: dirOnly },
   select_tests: { kind: 'read', buildArgs: dirOnly },
+  blast_radius: { kind: 'read', buildArgs: dirOnly },
 
   // ── function/symbol tools ────────────────────────────────────────────────
   get_subgraph: {
