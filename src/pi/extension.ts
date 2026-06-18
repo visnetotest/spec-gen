@@ -28,6 +28,8 @@ import type {
   SessionStartEvent,
 } from '@earendil-works/pi-coding-agent';
 import { StringEnum } from '@earendil-works/pi-ai';
+import { getMarkdownTheme } from '@earendil-works/pi-coding-agent';
+import { Markdown, Text } from '@earendil-works/pi-tui';
 import { Type, type TObject, type TSchema } from 'typebox';
 
 import { spawn } from 'node:child_process';
@@ -414,74 +416,292 @@ async function readSpecIndex(cwd: string): Promise<string> {
 
 interface NavToolSpec { name: string; label: string; description: string; guideline: string; parameters: TObject }
 
+// Descriptions and guidelines are written trigger-first and jargon-light: weak
+// local tool-callers (e.g. codestral) pattern-match on "when the user asks X,
+// call this" far better than on a capability statement full of graph jargon.
 const NAV_TOOLS: NavToolSpec[] = [
   {
     name: 'orient',
     label: 'openlore orient',
-    description: 'START HERE on any new task. Returns relevant functions, files, spec domains, call neighbours, and insertion points in one call.',
-    guideline: 'Use openlore_orient FIRST on any new task before reading files.',
+    description: 'START HERE on any new task. One call returns the functions, files, and specs relevant to the task, plus where to add code.',
+    guideline: 'On any new task, call openlore_orient FIRST — before reading or grepping files.',
     parameters: Type.Object({ task: Type.String({ description: 'Natural-language task description' }), limit: Type.Optional(Type.Number()) }),
   },
   {
     name: 'search_code',
     label: 'openlore search_code',
-    description: 'Semantic + keyword search for functions by meaning or name.',
-    guideline: 'Use openlore_search_code to find where a concept lives instead of grepping.',
-    parameters: Type.Object({ query: Type.String(), limit: Type.Optional(Type.Number()), language: Type.Optional(Type.String()) }),
+    description: 'Find functions by what they do or by name (meaning + keyword search).',
+    guideline: 'When you need to find where something lives in the code, call openlore_search_code with what you are looking for as `query`, instead of grepping.',
+    parameters: Type.Object({
+      query: Type.String({ description: 'REQUIRED. What to look for — a concept or a function/type name, e.g. "rate limiting" or "handleRequest".' }),
+      limit: Type.Optional(Type.Number()),
+      language: Type.Optional(Type.String()),
+    }),
   },
   {
     name: 'get_subgraph',
     label: 'openlore get_subgraph',
-    description: 'Call topology around a function (callers/callees) to a given depth.',
-    guideline: 'Use openlore_get_subgraph to see blast radius before changing a function.',
-    parameters: Type.Object({ functionName: Type.String(), direction: Type.Optional(StringEnum(['downstream', 'upstream', 'both'] as const)), maxDepth: Type.Optional(Type.Number()) }),
+    description: 'See what calls a function and what that function calls.',
+    guideline: 'Before you change a function, call openlore_get_subgraph with that function\'s name (`functionName`) to see what might break. Always pass the function name.',
+    parameters: Type.Object({
+      functionName: Type.String({ description: 'REQUIRED. The exact name of the function to inspect, e.g. "handleRequest".' }),
+      direction: Type.Optional(StringEnum(['downstream', 'upstream', 'both'] as const)),
+      maxDepth: Type.Optional(Type.Number()),
+    }),
   },
   {
     name: 'trace_execution_path',
     label: 'openlore trace_execution_path',
-    description: 'Find call paths from an entry function to a target function.',
-    guideline: 'Use openlore_trace_execution_path to answer "how does X reach Y".',
-    parameters: Type.Object({ entryFunction: Type.String(), targetFunction: Type.String(), maxDepth: Type.Optional(Type.Number()) }),
+    description: 'Show how one function reaches another — the call path between them.',
+    guideline: 'When the question is "how does X reach Y" or you need to trace a flow, call openlore_trace_execution_path with both function names (`entryFunction` = X, `targetFunction` = Y).',
+    parameters: Type.Object({
+      entryFunction: Type.String({ description: 'REQUIRED. The function the path starts FROM, e.g. "main".' }),
+      targetFunction: Type.String({ description: 'REQUIRED. The function the path should reach, e.g. "handleOrient".' }),
+      maxDepth: Type.Optional(Type.Number()),
+    }),
   },
   {
     name: 'analyze_impact',
     label: 'openlore analyze_impact',
-    description: 'Blast radius of changing a symbol (transitive dependents).',
-    guideline: 'Use openlore_analyze_impact before editing a shared/hub symbol.',
-    parameters: Type.Object({ symbol: Type.String(), depth: Type.Optional(Type.Number()) }),
+    description: 'List everything that depends on a function or type (its blast radius).',
+    guideline: 'Before editing a widely-used function or type, call openlore_analyze_impact with its name (`symbol`) to see what depends on it. Always pass the function/type name.',
+    parameters: Type.Object({
+      symbol: Type.String({ description: 'REQUIRED. The exact function or type name to analyze, e.g. "handleRequest".' }),
+      depth: Type.Optional(Type.Number()),
+    }),
+  },
+  {
+    name: 'select_tests',
+    label: 'openlore select_tests',
+    description: 'Find the tests that exercise given functions or a set of changes, so you know exactly what to run. With no arguments, uses your current uncommitted changes.',
+    guideline: 'When asked to test a function, or to verify/validate a change, call openlore_select_tests FIRST to find the tests that cover it — do not guess which tests to run. Pass changedSymbols for specific functions; with no arguments it defaults to your current working-tree changes.',
+    parameters: Type.Object({
+      changedSymbols: Type.Optional(Type.Array(Type.String(), { description: 'Function/type names you changed or want tested. Optional — omit to use your current uncommitted changes (diff vs HEAD).' })),
+      diffRef: Type.Optional(Type.String({ description: 'Git ref to diff the working tree against (e.g. "HEAD", "main"). Optional — defaults to HEAD when no changedSymbols given.' })),
+      maxDepth: Type.Optional(Type.Number()),
+    }),
+  },
+  {
+    name: 'get_test_coverage',
+    label: 'openlore get_test_coverage',
+    description: 'Show which parts of the code have tests and which do not.',
+    guideline: 'To check whether code is tested before changing it or before a PR, call openlore_get_test_coverage.',
+    parameters: Type.Object({
+      domains: Type.Optional(Type.Array(Type.String(), { description: 'Limit to these spec domains' })),
+      minCoverage: Type.Optional(Type.Number()),
+    }),
   },
   {
     name: 'suggest_insertion_points',
     label: 'openlore suggest_insertion_points',
-    description: 'Where to add a feature — ranked file/function insertion candidates.',
-    guideline: 'Use openlore_suggest_insertion_points when planning where new code goes.',
-    parameters: Type.Object({ description: Type.String(), limit: Type.Optional(Type.Number()) }),
+    description: 'Suggest where to add new code — ranked files and functions.',
+    guideline: 'When planning where a new feature or function should go, call openlore_suggest_insertion_points with a short description of the new code.',
+    parameters: Type.Object({
+      description: Type.String({ description: 'REQUIRED. What the new code should do, e.g. "add rate limiting to the API".' }),
+      limit: Type.Optional(Type.Number()),
+    }),
   },
   {
     name: 'get_function_skeleton',
     label: 'openlore get_function_skeleton',
-    description: 'Compact skeleton of a file: signatures + control flow, noise stripped.',
-    guideline: 'Use openlore_get_function_skeleton to read a file cheaply before opening it.',
-    parameters: Type.Object({ filePath: Type.String() }),
+    description: "Show a file's structure — signatures and control flow — without the full bodies.",
+    guideline: 'To understand a file cheaply before opening it, call openlore_get_function_skeleton with its path (`filePath`).',
+    parameters: Type.Object({
+      filePath: Type.String({ description: 'REQUIRED. Path to the file, relative to the repo root, e.g. "src/server.ts".' }),
+    }),
   },
   {
     name: 'get_health_map',
     label: 'openlore get_health_map',
-    description: 'Structural health dashboard: hubs, god functions, bridge nodes, untested hotspots, layer violations — ranked by severity. Start here before a refactor.',
-    guideline: 'Use openlore_get_health_map before any refactor to identify riskiest areas.',
+    description: 'Show the riskiest areas of the codebase, ranked: overloaded, tangled, and untested hotspots.',
+    guideline: 'Before a refactor, call openlore_get_health_map to find the riskiest areas to focus on.',
     parameters: Type.Object({ limit: Type.Optional(Type.Number()) }),
   },
   {
     name: 'get_surprising_connections',
     label: 'openlore get_surprising_connections',
-    description: 'Find unexpected coupling: cross-community edges, peripheral-to-hub calls, cross-test-boundary dependencies — scored by surprise.',
-    guideline: 'Use openlore_get_surprising_connections to spot accidental dependencies before a PR.',
+    description: "Find unexpected dependencies between parts of the code that usually don't interact.",
+    guideline: 'Before a PR, call openlore_get_surprising_connections to spot accidental coupling.',
     parameters: Type.Object({ limit: Type.Optional(Type.Number()) }),
   },
 ];
 
 function toolResult(text: string, details: unknown = null): AgentToolResult<unknown> {
   return { content: [{ type: 'text', text }], details };
+}
+
+// ── Tool-result rendering ──────────────────────────────────────────────────
+// Daemon handlers return structured JSON. Dumping it raw into the console is
+// noise the user has to parse by eye. Render a compact, human-readable summary
+// for display while the full object still rides along in `details` (the model
+// reads that, so no structural fidelity is lost).
+
+const MAX_LIST_ITEMS = 6;
+const MAX_STR = 400;       // cap on a top-level string field
+const MAX_EXTRA_STR = 60;  // cap on a string shown inline as a list-item extra
+const MAX_EXTRAS = 2;      // notable fields appended after an item's title
+
+// Keys that name an item, tried in order when summarising an object in a list.
+const TITLE_KEYS = ['name', 'title', 'label', 'function', 'symbol', 'id', 'file', 'filePath', 'domain', 'path', 'to', 'from'];
+
+// Top-level keys dropped from the console glance — all display-only; the full
+// value always stays in content/`details` for the model.
+//
+// BASE_SKIP applies to every tool: input echoes (Pi already shows the call args)
+// and verbose prose/meta.
+const BASE_SKIP = new Set([
+  // input echoes
+  'task', 'query', 'description', 'symbol', 'functionName', 'direction',
+  'maxDepth', 'depth', 'entryFunction', 'targetFunction', 'filePath', 'limit',
+  // prose / meta
+  'guidance', 'note', 'graphIndexNote', 'searchMode', 'count',
+]);
+
+// Per-tool extra skips. orient is auto-injected at the start of every task, so
+// its glance must stay tight: drop the model-facing enrichment (deep graph/git/
+// spec context, redundant call paths, 100+ rows). Deliberate analysis tools like
+// analyze_impact keep their full structure — there the detail IS the deliverable.
+const SKIP_BY_TOOL: Record<string, Set<string>> = {
+  orient: new Set([
+    'callPaths', 'suggestedTools', 'specLinkedFunctions', 'inlineSpecs',
+    'matchingSpecs', 'provenance', 'changeCoupling', 'landmarks',
+    'governingDecisions', 'staleDecisions', 'relevantFunctionsOmitted',
+  ]),
+  // analyze_impact stays rich (the detail is the deliverable), minus two low-value
+  // bits: `language` (redundant scalar) and `criticalPathLeaves` (a long list of
+  // leaf names, far less actionable than the up/downstream chains above it).
+  analyze_impact: new Set(['language', 'criticalPathLeaves']),
+};
+
+/** Skip set for a tool: base skips plus any tool-specific extras. */
+function skipKeysFor(toolName?: string): Set<string> {
+  const extra = toolName ? SKIP_BY_TOOL[toolName] : undefined;
+  return extra ? new Set([...BASE_SKIP, ...extra]) : BASE_SKIP;
+}
+// Per-item fields that are verbose handles/paths, not glance info.
+const NOISE_EXTRA = new Set(['expand', 'signature', 'language', 'callerFile', 'calleeFile', 'toFile', 'fromFile']);
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function fmtNum(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+/** Render a primitive (or a short summary of a container) on one line. */
+function renderScalar(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'number') return fmtNum(v);
+  if (typeof v === 'boolean') return String(v);
+  if (typeof v === 'string') return v.length > MAX_STR ? v.slice(0, MAX_STR) + '…' : v;
+  if (Array.isArray(v)) return v.length === 0 ? '' : `[${v.length} items]`;
+  if (isPlainObject(v)) return summarizeItem(v);
+  return String(v);
+}
+
+/** One-line summary of an object: title (or `a → b` for edges) plus a couple of fields. */
+function summarizeItem(obj: Record<string, unknown>): string {
+  // Edge-like rows (call graph, surprising connections) read best as a → b.
+  const caller = obj.caller ?? obj.from;
+  const callee = obj.callee ?? obj.to;
+  if (typeof caller === 'string' && typeof callee === 'string') return `${caller} → ${callee}`;
+
+  const titleKey = TITLE_KEYS.find((k) => typeof obj[k] === 'string' || typeof obj[k] === 'number');
+  const title = titleKey ? String(obj[titleKey]) : '';
+  const extras: string[] = [];
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === titleKey || NOISE_EXTRA.has(k)) continue;
+    if (typeof v === 'number') extras.push(`${k}=${fmtNum(v)}`);
+    else if (typeof v === 'string' && v.length > 0 && v.length <= MAX_EXTRA_STR) extras.push(`${k}=${v}`);
+    if (extras.length >= MAX_EXTRAS) break;
+  }
+  const head = title || '(item)';
+  return extras.length ? `${head} — ${extras.join(', ')}` : head;
+}
+
+/** Render a single list element: scalar verbatim, object as a summary line. */
+function renderItem(item: unknown): string {
+  if (isPlainObject(item)) return summarizeItem(item);
+  return renderScalar(item);
+}
+
+/** Fallback for renderResult when `details` is absent (e.g. session reload): the
+ *  joined content text, parsed back to an object if it is JSON. */
+function resultText(result: AgentToolResult<unknown>): unknown {
+  const text = result.content.map((c) => ('text' in c ? c.text : '')).join('\n');
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+// The descriptive argument that names a tool call, tried in order.
+const CALL_ARG_KEYS = ['task', 'query', 'symbol', 'functionName', 'description', 'filePath'];
+const MAX_CALL_ARG = 80;
+
+/**
+ * One-line summary of a tool call's arguments for renderCall — the descriptive
+ * arg, quoted (e.g. orient "add rate limiting"). Pathfinding reads as `a → b`.
+ * Returns '' when there's no descriptive arg (e.g. get_health_map) so the caller
+ * shows the bare tool title.
+ */
+export function formatCallArgs(args: Record<string, unknown>): string {
+  if (typeof args.entryFunction === 'string' && typeof args.targetFunction === 'string') {
+    return `${args.entryFunction} → ${args.targetFunction}`;
+  }
+  // select_tests: a list of changed symbols, or a diff ref.
+  if (Array.isArray(args.changedSymbols)) {
+    const names = args.changedSymbols.filter((s): s is string => typeof s === 'string' && s.length > 0);
+    if (names.length > 0) {
+      const shown = names.slice(0, 3).join(', ');
+      return names.length > 3 ? `${shown}, +${names.length - 3}` : shown;
+    }
+  }
+  if (typeof args.diffRef === 'string' && args.diffRef.length > 0) return `diff ${args.diffRef}`;
+  const key = CALL_ARG_KEYS.find((k) => typeof args[k] === 'string' && (args[k] as string).length > 0);
+  if (!key) return '';
+  const v = String(args[key]);
+  return v.length > MAX_CALL_ARG ? `"${v.slice(0, MAX_CALL_ARG)}…"` : `"${v}"`;
+}
+
+/**
+ * Turn a structured tool result into readable text. Strings pass through;
+ * `{ error }` becomes a warning line; objects render as labelled sections with
+ * arrays shown as bounded bullet lists. `toolName` selects per-tool skips so an
+ * ambient tool (orient) can hide enrichment a deliberate one (analyze_impact)
+ * keeps. Resilient to schema drift — unknown shapes degrade to key/value lines.
+ */
+export function formatToolResult(result: unknown, toolName?: string): string {
+  if (typeof result === 'string') return result;
+  if (result === null || result === undefined) return '(no result)';
+  if (!isPlainObject(result) && !Array.isArray(result)) return String(result);
+  if (isPlainObject(result) && typeof result.error === 'string') return `⚠ ${result.error}`;
+
+  const skip = skipKeysFor(toolName);
+  const entries: Array<[string, unknown]> = Array.isArray(result)
+    ? [['result', result]]
+    : Object.entries(result);
+
+  const lines: string[] = [];
+  for (const [key, value] of entries) {
+    if (value === undefined || value === null) continue;
+    if (skip.has(key)) continue;
+    if (Array.isArray(value)) {
+      if (value.length === 0) continue;
+      lines.push(`**${key}** (${value.length})`);
+      for (const item of value.slice(0, MAX_LIST_ITEMS)) lines.push(`  • ${renderItem(item)}`);
+      if (value.length > MAX_LIST_ITEMS) lines.push(`  … ${value.length - MAX_LIST_ITEMS} more`);
+    } else if (isPlainObject(value)) {
+      lines.push(`**${key}**`);
+      for (const [k, v] of Object.entries(value)) {
+        const s = renderScalar(v);
+        if (s) lines.push(`  ${k}: ${s}`);
+      }
+    } else {
+      const s = renderScalar(value);
+      if (s) lines.push(`**${key}**: ${s}`);
+    }
+  }
+
+  return lines.length ? lines.join('\n') : '(empty result)';
 }
 
 // ── Extension entry point ─────────────────────────────────────────────────────
@@ -524,8 +744,27 @@ export default function openlore(pi: ExtensionAPI): void {
         const daemon = await getDaemon(ctx.cwd);
         if (!daemon) return toolResult('openlore daemon unavailable — run `openlore analyze` then retry.');
         const result = await callTool(daemon, tool.name, params as Record<string, unknown>, ctx.cwd, signal ?? undefined);
+        // content[].text is sent to the LLM verbatim — keep the FULL structured
+        // result so the model loses no detail. The compact human view is produced
+        // separately in renderResult (display only). `details` carries the parsed
+        // object so renderResult need not re-parse the JSON text.
         const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
         return toolResult(truncate(text, RESULT_MAX), result);
+      },
+      // Display-only: a clean invocation header — `openlore orient "<task>"` —
+      // instead of the default raw-args dump. Reuses the row's last component.
+      renderCall(args, theme, context) {
+        const text = (context.lastComponent as Text | undefined) ?? new Text('', 0, 0);
+        const title = theme.fg('toolTitle', tool.label);
+        const argStr = formatCallArgs(args as Record<string, unknown>);
+        text.setText(argStr ? `${title} ${theme.fg('dim', argStr)}` : title);
+        return text;
+      },
+      // Display-only: render a tight, glanceable summary in the TUI. The LLM still
+      // reads the full content above; this never touches what the model sees.
+      renderResult(result) {
+        const summary = formatToolResult(result.details ?? resultText(result), tool.name);
+        return new Markdown(summary, 1, 0, getMarkdownTheme());
       },
     });
   }
