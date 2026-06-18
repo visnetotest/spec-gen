@@ -90,6 +90,23 @@ function collect(value: string, previous: string[]): string[] {
 // ============================================================================
 
 /**
+ * Capture the short HEAD commit so the confidence-boundary staleness marker can
+ * name the index's build commit. Best-effort: null for a non-git directory or any
+ * git failure — staleness then degrades to a commit-less "working tree changed".
+ */
+async function captureBuildCommit(rootPath: string): Promise<string | null> {
+  try {
+    const { promisify } = await import('node:util');
+    const { execFile } = await import('node:child_process');
+    const { stdout } = await promisify(execFile)('git', ['rev-parse', '--short', 'HEAD'], { cwd: rootPath });
+    const commit = stdout.trim();
+    return commit.length > 0 ? commit : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Run the complete analysis pipeline
  */
 export async function runAnalysis(
@@ -182,11 +199,14 @@ export async function runAnalysis(
   );
 
   // Write content-hash fingerprint so future runs can skip re-analysis when
-  // source files are unchanged (replaces the 1-hour TTL on a warm cache).
+  // source files are unchanged (replaces the 1-hour TTL on a warm cache). The
+  // build commit (when this is a git repo) lets the confidence-boundary staleness
+  // marker name "computed against the index at commit X" — best-effort, null otherwise.
   const fingerprintHash = await computeProjectFingerprint(rootPath);
+  const buildCommit = await captureBuildCommit(rootPath);
   await writeFile(
     join(outputPath, ARTIFACT_FINGERPRINT),
-    JSON.stringify({ hash: fingerprintHash, computedAt: new Date().toISOString(), fileCount: repoMap.allFiles.length })
+    JSON.stringify({ hash: fingerprintHash, commit: buildCommit, computedAt: new Date().toISOString(), fileCount: repoMap.allFiles.length })
   );
 
   const duration = Date.now() - startTime;

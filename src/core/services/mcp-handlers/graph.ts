@@ -42,6 +42,14 @@ import type { DecisionNode } from '../../decisions/project.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
 import { getFileGodFunctions, extractSubgraph } from '../../analyzer/subgraph-extractor.js';
 import { readOpenLoreConfig } from '../config-manager.js';
+import {
+  assembleBoundary,
+  buildPairEdgeIndex,
+  computeStaleness,
+  edgeBasis,
+  edgeBasisForChains,
+  type BoundaryEdge,
+} from './confidence-boundary.js';
 
 // ============================================================================
 // SHARED GRAPH HELPERS (also exported for chat-tools.ts)
@@ -497,6 +505,15 @@ export async function handleGetSubgraph(
       `_${subNodes.length} nodes · ${deduped.length} edges${decisionNote} · seeds: ${seeds.map(s => s.name).join(', ')}_`;
   }
 
+  // Confidence boundary: the subgraph's own edges are the traversal basis — the
+  // `synthesized` flag set above distinguishes heuristic dispatch from direct
+  // resolution. (spec: add-confidence-boundary-disclosure)
+  const subBasis = edgeBasis(subEdges.map((e): BoundaryEdge => ({
+    confidence: e.synthesized ? 'synthesized' : undefined,
+    synthesizedBy: e.synthesizedBy,
+  })));
+  const confidenceBoundary = assembleBoundary({ basis: subBasis, staleness: await computeStaleness(absDir) });
+
   return {
     query: { functionName, direction, maxDepth },
     seeds: seeds.map(n => ({ name: n.name, file: n.filePath })),
@@ -504,6 +521,7 @@ export async function handleGetSubgraph(
     nodes: subNodes,
     edges: subEdges,
     ...(governingDecisions.length > 0 ? { governingDecisions } : {}),
+    confidenceBoundary,
   };
 }
 
@@ -672,6 +690,18 @@ export async function handleAnalyzeImpact(
   for (const n of infraNeighbors) if (n.file) involvedFiles.add(n.file);
   const governingDecisions = ctx.edgeStore.getDecisionsForFiles([...involvedFiles]).map(decisionToNeighbor);
 
+  // Confidence boundary: the blast radius rests on the edges traversed within the
+  // involved set (seeds + up/downstream). Synthesized edges among them mean the
+  // impact estimate leaned on heuristic dispatch. (spec: add-confidence-boundary-disclosure)
+  const involvedIds = new Set<string>([...seedIds, ...upstreamMap.keys(), ...downstreamMap.keys()]);
+  const impactEdges: BoundaryEdge[] = [];
+  for (const id of involvedIds) {
+    for (const e of ctx.edgeStore.getCallees(id)) {
+      if (e.calleeId && involvedIds.has(e.calleeId)) impactEdges.push({ confidence: e.confidence, synthesizedBy: e.synthesizedBy });
+    }
+  }
+  const confidenceBoundary = assembleBoundary({ basis: edgeBasis(impactEdges), staleness: await computeStaleness(absDir) });
+
   const results = seeds.map(seed => {
     const isHub     = hubIds.has(seed.id);
     const riskScore = computeRiskScore(seed, blastRadius, isHub);
@@ -702,7 +732,9 @@ export async function handleAnalyzeImpact(
     };
   });
 
-  return seeds.length === 1 ? results[0] : { matches: results };
+  return seeds.length === 1
+    ? { ...results[0], confidenceBoundary }
+    : { matches: results, confidenceBoundary };
 }
 
 /**
@@ -1092,6 +1124,12 @@ export async function handleTraceExecutionPath(
     dfs(entry.id, [entry.id], new Set([entry.id]));
   }
 
+  // Confidence boundary: the returned paths ARE the answer; their edges are the
+  // basis. A path that crosses a synthesized edge leaned on heuristic dispatch.
+  // (spec: add-confidence-boundary-disclosure)
+  const pairIndex = buildPairEdgeIndex(cg.edges);
+  const traceStaleness = await computeStaleness(absDir);
+
   if (allPaths.length === 0) {
     return {
       entryFunction,
@@ -1100,6 +1138,7 @@ export async function handleTraceExecutionPath(
       message: `No execution path found from "${entryFunction}" to "${targetFunction}" within depth ${maxDepth}.`,
       hint: 'Try increasing maxDepth, or check whether both functions are in the same connected component of the call graph.',
       ...(valueLevelInfo ? { valueLevel: valueLevelInfo } : {}),
+      confidenceBoundary: assembleBoundary({ basis: edgeBasisForChains([], pairIndex), staleness: traceStaleness }),
     };
   }
 
@@ -1127,5 +1166,6 @@ export async function handleTraceExecutionPath(
     shortestPath: paths[0].chain,
     paths,
     ...(valueLevelInfo ? { valueLevel: valueLevelInfo } : {}),
+    confidenceBoundary: assembleBoundary({ basis: edgeBasisForChains(allPaths, pairIndex), staleness: traceStaleness }),
   };
 }

@@ -20,6 +20,7 @@ import { loadMemoryStore, updateMemoryStore, makeMemoryId } from '../../decision
 import { AnchorContext } from '../../decisions/anchor-adapter.js';
 import { memoryFreshness, decisionAnchors, type GraphFreshnessView } from '../../decisions/anchor.js';
 import { queryTerms, scoreMemory, type RankFields } from './memory-ranking.js';
+import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
 import type {
   AnchoredMemory,
   StructuralAnchor,
@@ -243,6 +244,10 @@ export async function handleRecall(
         needsReanchoring: needsReanchoring.map(stripScore),
         budget,
         note: [budgetNote, reanchorNote].filter(Boolean).join(' ') || undefined,
+        // Recall does no graph traversal — its boundary is the freshness of the
+        // index the anchors were checked against (per-memory verdicts cover the
+        // rest). (spec: add-confidence-boundary-disclosure)
+        confidenceBoundary: assembleBoundary({ staleness: await computeStaleness(rootPath) }),
       };
     } finally {
       ctx?.close();

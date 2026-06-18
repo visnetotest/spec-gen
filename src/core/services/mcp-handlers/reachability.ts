@@ -33,6 +33,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { buildAdjacency } from './graph.js';
+import { assembleBoundary, computeStaleness, edgeBasisWithinSet } from './confidence-boundary.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -222,6 +223,14 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   const exportSignal: 'dependency-graph' | 'none' = importedNames !== null ? 'dependency-graph' : 'none';
   const languages = [...new Set(codeNodes.map(n => n.language))].sort();
 
+  // Confidence boundary: the liveness partition (and so every dead verdict) rests
+  // on the edges traversed within the reachable set. Synthesized edges among them
+  // mean a candidate's deadness leaned on a heuristic; disclose it. (spec:
+  // add-confidence-boundary-disclosure)
+  const liveBasis = edgeBasisWithinSet(cg.edges, live);
+  const staleness = await computeStaleness(absDir);
+  const confidenceBoundary = assembleBoundary({ basis: liveBasis, staleness });
+
   // ── Delete-impact mode: "what becomes dead if I delete X?" ──────────────────
   if (input.ifDeleted !== undefined) {
     const target = codeNodes.find(n => n.name === input.ifDeleted)
@@ -245,6 +254,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
         ? 'Nothing else becomes unreachable — every other node has an independent path to a root (or is itself a root).'
         : 'These nodes are reachable only through the target. Deleting it orphans them — verify before removing (dynamic callers are invisible here).',
       soundness: deadCodeSoundness(exportSignal, languages),
+      confidenceBoundary,
     };
   }
 
@@ -315,6 +325,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
     truncated: ranked.length > limit ? ranked.length - limit : 0,
     coverage: { languages, exportSignal },
     soundness: deadCodeSoundness(exportSignal, languages),
+    confidenceBoundary,
   };
 }
 

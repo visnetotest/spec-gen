@@ -226,6 +226,50 @@ The system SHALL rank recalled memories using a deterministic field-weighted sco
 > Decision recorded: 08005eb9
 > Date: 2026-06-18
 
+### Requirement: ConfidenceBoundaryOnConclusions
+
+Every conclusion-shaped answer (`analyze_impact`, `find_path`, `find_dead_code`, `get_subgraph`,
+`select_tests`, `recall`, `trace_execution_path`) SHALL carry a deterministic `confidenceBoundary`
+describing its epistemic basis: the portion resting on directly-resolved edges, the portion resting on
+synthesized edges (named by their `synthesizedBy` rule), and any **known-unknowable** crossings — a
+traversal that passed a reflection or computed-dispatch boundary, or, under federation, an unindexed
+repository. The boundary SHALL be categorical labels and counts, never a blended confidence score, and
+SHALL be additive metadata that callers may ignore. It SHALL be computed without an LLM, from the
+edge `confidence`/`synthesizedBy` provenance already present (decision `08e71184`).
+
+#### Scenario: A clean answer reports a clean boundary
+
+- **GIVEN** a query answered entirely via directly-resolved edges against a current index
+- **WHEN** the response is produced
+- **THEN** its `confidenceBoundary` reports only directly-resolved basis, no known-unknowable crossing,
+  and `complete: true`
+
+#### Scenario: A boundary-crossing answer is flagged, not hidden
+
+- **GIVEN** a `find_dead_code` query whose liveness partition is reached only across a synthesized
+  (heuristically-recovered dispatch) edge
+- **WHEN** the response is produced
+- **THEN** the `confidenceBoundary` names the synthesized crossing as known-unknowable, breaks down the
+  synthesized edges by rule, and reports `complete: false`
+
+### Requirement: StalenessBoundary
+
+When the index fingerprint lags the working tree, every conclusion SHALL carry a staleness marker
+naming the index's build commit and the count of files changed since, reusing the project fingerprint
+and git-diff machinery. A current index SHALL produce no staleness marker. The build commit is
+captured best-effort at analyze time; when it is absent (non-git directory) the marker SHALL degrade
+to a commit-less "the working tree has changed since the index was built" with a null change count.
+
+#### Scenario: A stale index is disclosed
+
+- **GIVEN** an index built at commit X and a working tree with N files changed since X
+- **WHEN** any conclusion is produced
+- **THEN** the response discloses "computed against the index at commit X; N file(s) changed since" and
+  reports `complete: false`
+
+> Decision recorded: 08e71184
+> Date: 2026-06-18
+
 ## Decisions
 
 ### Build the MCP live-data test harness as an integration-only, behavior-neutral verification layer
@@ -377,3 +421,13 @@ The epistemic-lease feature injected escalating imperative language into every M
 recall previously ranked memories by binary substring token-overlap, which silently dropped relevant memories on a phrasing mismatch (e.g. a camelCase identifier vs a plain word). Replaced it with a deterministic field-weighted, graded ranker: identifier-aware normalization (camelCase/PascalCase/snake_case/kebab-case split before lower-casing, fixed stopword set), fixed field weights (anchorSymbol 4 > tag 3 > anchorFile 2 > content 1), occurrence-capped grading, and an exact-anchor boost (8) when the query names every subtoken of an anchored symbol. This keeps the memory path LLM-free and embedding-free per the north star (decision c6d1ad07) while fixing the worst retrieval failure mode. A substring fallback (weight 0.1, applied only when the token score is zero) guarantees the candidate set is a superset of the old behavior.
 
 **Consequences:** Weights and the stopword set are fixed, documented, exported constants — changing them is a code+test change, not a runtime knob. recall items gain an optional match {fields, anchorBoost} field for transparent ranking reasons. Embedding-backed recall is deliberately deferred to a future proposal with its own decision. The authoritative/orphaned freshness split is unchanged and still runs after ranking.
+
+### confidenceBoundary response shape: categorical edge-basis + known-unknowable crossings + staleness, never a blended score
+
+**Status:** Approved
+**Date:** 2026-06-18
+**ID:** 08e71184
+
+Every conclusion tool (analyze_impact, find_path, find_dead_code, get_subgraph, select_tests, trace_execution_path, recall) carries a deterministic `confidenceBoundary` computed from data already present: edge `confidence`/`synthesizedBy` provenance for the basis, synthesized-edge reliance for known-unknowable crossings, and the project fingerprint + git diff for staleness. The shape is categorical labels and counts (directEdges, synthesizedEdges, synthesizedByRule, knownUnknowable[], staleness, complete) — never a blended confidence number and never an LLM call, preserving the north-star (c6d1ad07). It is additive metadata: a caller that ignores it sees today's answer unchanged.
+
+**Consequences:** A new shared module src/core/services/mcp-handlers/confidence-boundary.ts owns the type and computation; seven conclusion handlers each spread a `confidenceBoundary` field into their response. analyze.ts's fingerprint.json gains an optional `commit` field (captured via git rev-parse at analyze time) so the staleness marker can name the build commit; staleness degrades gracefully (no commit / non-git repo → fingerprint-mismatch boolean without a commit name). `complete` is false whenever the computation leaned on a synthesized edge, crossed a known-unknowable boundary, or ran against a stale index — the answer-level NoFalseCompleteness contract.

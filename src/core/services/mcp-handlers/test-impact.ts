@@ -17,6 +17,7 @@ import { validateDirectory, readCachedContext } from './utils.js';
 import { buildAdjacency } from './graph.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 import { SUBGRAPH_MAX_DEPTH_LIMIT } from '../../../constants.js';
+import { assembleBoundary, computeStaleness, edgeBasisWithinSet } from './confidence-boundary.js';
 
 export interface SelectTestsInput {
   directory: string;
@@ -130,6 +131,7 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
       ...(defaultedToHead ? { note: 'Called without changedSymbols/diffRef — diffed the working tree against HEAD. Pass changedSymbols or diffRef to target a specific change.' } : {}),
       soundness: { posture: 'over-approximate', caveats: ['No seeds resolved — nothing to select.'] },
       coverage: { languages: [], testDetection: 'none' as const },
+      confidenceBoundary: assembleBoundary({ staleness: await computeStaleness(absDir) }),
     };
   }
 
@@ -244,6 +246,12 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
     caveats.push('No test transitively reaches the change. It may be genuinely untested, or reached only via dynamic dispatch this static analysis cannot see.');
   }
 
+  // Confidence boundary: the selection rests on the backward call-walk over the
+  // impacted set; synthesized edges among those nodes mean a test reached the
+  // change through heuristic dispatch. (spec: add-confidence-boundary-disclosure)
+  const impactedIds = new Set(depthOf.keys());
+  const selectBasis = edgeBasisWithinSet(cg.edges, impactedIds);
+
   return {
     changed: hasSymbols ? seeds.map(s => s.name) : changedFiles,
     seeds: seeds.map(s => ({ name: s.name, file: s.filePath })),
@@ -251,5 +259,6 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
     ...(defaultedToHead ? { note: 'No changedSymbols/diffRef given — selected tests for your current working-tree changes vs HEAD.' } : {}),
     soundness: { posture: 'over-approximate' as const, caveats },
     coverage: { languages: seedLangs, testDetection },
+    confidenceBoundary: assembleBoundary({ basis: selectBasis, staleness: await computeStaleness(absDir) }),
   };
 }

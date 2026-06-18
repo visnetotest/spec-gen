@@ -15,6 +15,7 @@ import { relative } from 'node:path';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { buildAdjacency, buildWeightedAdjacency, weightedBfs } from './graph.js';
 import type { WeightedReach } from './graph.js';
+import { assembleBoundary, buildPairEdgeIndex, computeStaleness, edgeBasisForChains } from './confidence-boundary.js';
 import { SUBGRAPH_MAX_DEPTH_LIMIT } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 
@@ -141,6 +142,10 @@ export async function handleFindPath(
     ? { ...rawCg, edges: rawCg.edges.filter(e => e.confidence !== 'synthesized') }
     : rawCg;
   const { nodeMap, forward } = buildAdjacency(cg);
+  // Confidence boundary: the returned path's edges are the basis; the staleness
+  // marker is shared by every exit. (spec: add-confidence-boundary-disclosure)
+  const staleness = await computeStaleness(absDir);
+  const pairIndex = buildPairEdgeIndex(cg.edges);
 
   const fromRes = resolveEndpoint(from, cg, forward);
   const toRes = resolveEndpoint(to, cg, forward);
@@ -162,6 +167,7 @@ export async function handleFindPath(
     return {
       from, to, resolvedFrom, resolvedTo, path: null,
       note: 'from and to resolve to the same function(s) — no path to compute.',
+      confidenceBoundary: assembleBoundary({ basis: edgeBasisForChains([], pairIndex), staleness }),
     };
   }
 
@@ -181,10 +187,12 @@ export async function handleFindPath(
         reachedNodes: result.reached,
         hint: 'The endpoints may be in different connected components, or only linked by a longer path — try the other endpoint kinds.',
       },
+      confidenceBoundary: assembleBoundary({ basis: edgeBasisForChains([], pairIndex), staleness }),
     };
   }
 
   const best = result.best!;
+  const chainIds = [best.ids, ...result.alternates.map(a => a.ids)];
   return {
     from, to, resolvedFrom, resolvedTo,
     path: toChain(best),
@@ -192,5 +200,6 @@ export async function handleFindPath(
     reason: useCallDistance
       ? `Cheapest by call-distance (cost ${best.distance}, ${best.hops} hops); ${result.alternates.length} alternate(s).`
       : `Fewest hops (${best.hops}); ${result.alternates.length} alternate(s).`,
+    confidenceBoundary: assembleBoundary({ basis: edgeBasisForChains(chainIds, pairIndex), staleness }),
   };
 }
