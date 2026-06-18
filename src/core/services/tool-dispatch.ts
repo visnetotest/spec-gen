@@ -307,8 +307,9 @@ export async function dispatchTool(
       args as { directory: string; content: string; anchors?: AnchorHint[]; tags?: string[] };
     return handleRemember(directory, content, anchors, tags);
   } else if (name === 'recall') {
-    const { directory, task, limit = 10 } = args as { directory: string; task?: string; limit?: number };
-    return handleRecall(directory, task, limit);
+    const { directory, task, limit = 10, tokenBudget } =
+      args as { directory: string; task?: string; limit?: number; tokenBudget?: number };
+    return handleRecall(directory, task, limit, tokenBudget);
   }
   throw new UnknownToolError(name);
 }

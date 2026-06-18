@@ -21,7 +21,7 @@ import {
 } from '../../constants.js';
 import { EdgeStore } from '../services/edge-store.js';
 import type { FunctionNode } from '../analyzer/call-graph.js';
-import type { StructuralAnchor } from '../../types/index.js';
+import type { StructuralAnchor, GroundingCertificate } from '../../types/index.js';
 import {
   hashSpan,
   resolveSymbolAnchors,
@@ -148,6 +148,49 @@ export class AnchorContext {
   /** A {@link GraphFreshnessView} backed by this adapter's edge store + disk. */
   freshnessView(): GraphFreshnessView {
     return makeFreshnessView(this.store, this.rootPath);
+  }
+
+  /**
+   * Build a grounding certificate for an anchor — the evidence behind a `fresh`
+   * verdict (add-trust-calibrated-context-economy). For a symbol anchor it is the
+   * node's symbol/file/line-span and the *current* span hash (the same hash the
+   * freshness check compared); for a relocated symbol it follows the stable id;
+   * for a file anchor it is the file path and whole-file hash. Returns undefined
+   * when the anchored ground can no longer be located (caller only builds these
+   * for `fresh` facts, where it resolves). No new extraction beyond the span hash
+   * the freshness check already computes.
+   */
+  certificateForAnchor(anchor: StructuralAnchor): GroundingCertificate | undefined {
+    if (anchor.nodeId) {
+      const node = this.store.getNode(anchor.nodeId)
+        ?? (anchor.stableId ? this.store.getNodeByStableId(anchor.stableId) : null);
+      if (!node) return undefined;
+      const info = this.nodeSpanInfo(node);
+      if (!info) return undefined;
+      return { symbol: node.name, filePath: node.filePath, lineSpan: info.lineSpan, contentHash: info.contentHash };
+    }
+    // File-level anchor: whole-file evidence.
+    const contentHash = this.fileContentHash(anchor.filePath);
+    if (contentHash === undefined) return undefined;
+    return { filePath: anchor.filePath, contentHash };
+  }
+
+  /**
+   * The current span hash AND 1-based inclusive line range of a node, computed
+   * from its byte offsets against the live file (the edge store keeps offsets, not
+   * lines). Reuses the same span the freshness hash covers, so `contentHash` here
+   * equals the hash the freshness check compared.
+   */
+  private nodeSpanInfo(node: FunctionNode): { contentHash: string; lineSpan: { start: number; end: number } } | undefined {
+    const content = readFileCached(this.rootPath, node.filePath, this.fileCache);
+    if (content === null) return undefined;
+    const buf = Buffer.from(content, 'utf-8');
+    const spanText = buf.subarray(node.startIndex, node.endIndex).toString('utf-8');
+    const start = buf.subarray(0, node.startIndex).toString('utf-8').split('\n').length;
+    const newlines = (spanText.match(/\n/g) ?? []).length;
+    // A span ending in a newline shouldn't count the empty trailing line.
+    const end = start + newlines - (spanText.endsWith('\n') ? 1 : 0);
+    return { contentHash: hashSpan(spanText), lineSpan: { start, end: Math.max(start, end) } };
   }
 
   /**

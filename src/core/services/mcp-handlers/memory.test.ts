@@ -13,7 +13,9 @@ import { join } from 'node:path';
 import { EdgeStore } from '../edge-store.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../../constants.js';
 import { handleRemember, handleRecall } from './memory.js';
+import { hashSpan } from '../../decisions/anchor.js';
 import type { FunctionNode } from '../../analyzer/call-graph.js';
+import type { GroundingCertificate } from '../../../types/index.js';
 
 let root: string;
 
@@ -28,6 +30,8 @@ function fooNode(filePath: string, src: string): FunctionNode {
     language: 'typescript',
     startIndex: 0,
     endIndex: Buffer.byteLength(src, 'utf-8'),
+    startLine: 1,
+    endLine: src.split('\n').length,
     fanIn: 0,
     fanOut: 0,
   };
@@ -289,5 +293,66 @@ describe('handleRecall — deterministic ranking', () => {
     await handleRemember(root, 'foo must stay pure', [{ symbol: 'foo', file: 'src/foo.ts' }]);
     const r = (await handleRecall(root)) as { authoritative: Array<{ match?: unknown }> };
     expect(r.authoritative[0].match).toBeUndefined();
+  });
+});
+
+// ── trust-calibrated context economy (add-trust-calibrated-context-economy) ───
+
+describe('handleRecall — grounding certificate + verified-current', () => {
+  it('attaches a verifiable certificate to a fresh fact', async () => {
+    await handleRemember(root, 'foo must stay pure', [{ symbol: 'foo', file: 'src/foo.ts' }]);
+    const r = (await handleRecall(root, 'foo')) as {
+      authoritative: Array<{ verifiedCurrent?: boolean; certificates?: GroundingCertificate[] }>;
+    };
+    const fact = r.authoritative[0];
+    expect(fact.verifiedCurrent).toBe(true);
+    expect(fact.certificates).toHaveLength(1);
+    const cert = fact.certificates![0];
+    expect(cert).toMatchObject({ symbol: 'foo', filePath: 'src/foo.ts', lineSpan: { start: 1, end: 3 } });
+    // The certificate's hash equals an independent hash of the cited span (whole file here).
+    expect(cert.contentHash).toBe(hashSpan(FOO_SRC));
+  });
+
+  it('attaches no certificate and no verified-current to a drifted fact', async () => {
+    await handleRemember(root, 'foo must stay pure', [{ symbol: 'foo', file: 'src/foo.ts' }]);
+    await writeFile(join(root, 'src', 'foo.ts'), 'export function foo() {\n  return 999;\n}\n', 'utf-8');
+    const r = (await handleRecall(root, 'foo')) as {
+      authoritative: Array<{ freshness: string; verifiedCurrent?: boolean; certificates?: unknown }>;
+    };
+    expect(r.authoritative[0].freshness).toBe('drifted');
+    expect(r.authoritative[0].verifiedCurrent).toBeUndefined();
+    expect(r.authoritative[0].certificates).toBeUndefined();
+  });
+
+  it('attaches no certificate when the graph is unavailable (fact withheld entirely)', async () => {
+    await handleRemember(root, 'anchored note', [{ symbol: 'foo', file: 'src/foo.ts' }]);
+    await rm(join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), { recursive: true, force: true });
+    const r = (await handleRecall(root, 'note')) as { authoritative: unknown[]; needsReanchoring: unknown[] };
+    expect(r.authoritative).toHaveLength(0);
+    expect(r.needsReanchoring).toHaveLength(1);
+  });
+});
+
+describe('handleRecall — budget-aware tiering', () => {
+  it('truncates the tail under a tight tokenBudget and reports the remainder (no silent cap)', async () => {
+    await handleRemember(root, 'first fact about foo', [{ symbol: 'foo', file: 'src/foo.ts' }]);
+    await handleRemember(root, 'second fact about foo', [{ symbol: 'foo', file: 'src/foo.ts' }]);
+    await handleRemember(root, 'third fact about foo', [{ symbol: 'foo', file: 'src/foo.ts' }]);
+    const r = (await handleRecall(root, 'foo', 10, 1)) as {
+      authoritative: unknown[]; budget?: { tokenBudget: number; returned: number; withheld: number }; note?: string;
+    };
+    expect(r.budget).toBeDefined();
+    expect(r.budget!.returned).toBe(1); // core always returned
+    expect(r.budget!.withheld).toBe(2);
+    expect(r.authoritative).toHaveLength(1);
+    expect(r.note).toMatch(/withheld/i);
+  });
+
+  it('returns the full set with no budget field when tokenBudget is omitted', async () => {
+    await handleRemember(root, 'first fact about foo', [{ symbol: 'foo', file: 'src/foo.ts' }]);
+    await handleRemember(root, 'second fact about foo', [{ symbol: 'foo', file: 'src/foo.ts' }]);
+    const r = (await handleRecall(root, 'foo')) as { authoritative: unknown[]; budget?: unknown };
+    expect(r.authoritative).toHaveLength(2);
+    expect(r.budget).toBeUndefined();
   });
 });

@@ -523,6 +523,23 @@ export interface AnchorVerdict {
 }
 
 /**
+ * Evidence behind a `fresh` verdict (add-trust-calibrated-context-economy). The
+ * exact span and hash OpenLore already compared to produce `fresh` — surfaced so
+ * an agent can cite it and skip re-reading the source. Never attached to a
+ * `drifted` or `orphaned` fact.
+ */
+export interface GroundingCertificate {
+  /** Resolved symbol name; absent for a file-level certificate. */
+  symbol?: string;
+  /** Repo-relative path of the verified file. */
+  filePath: string;
+  /** 1-based inclusive line range of the verified span, when known. */
+  lineSpan?: { start: number; end: number };
+  /** Hash of the verified span — the same hash the freshness check compared. */
+  contentHash: string;
+}
+
+/**
  * A general, code-anchored agent memory (kind `note`) — the substrate behind the
  * `remember`/`recall` tools. Stored separately from the decision gate in
  * .openlore/memory/notes.json so it never touches the commit pipeline.

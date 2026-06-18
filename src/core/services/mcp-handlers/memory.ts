@@ -25,6 +25,7 @@ import type {
   StructuralAnchor,
   PendingDecision,
   AnchorVerdict,
+  GroundingCertificate,
 } from '../../../types/index.js';
 
 // ── remember ────────────────────────────────────────────────────────────────
@@ -105,6 +106,13 @@ interface RecalledMemory {
   recordedAt?: string;
   /** Why this memory ranked where it did (set only when a task was given). */
   match?: { fields: string[]; anchorBoost: boolean };
+  /**
+   * Set only on `fresh` facts: the span is provably unchanged since analysis, so
+   * re-reading it is unnecessary. The token lever (add-trust-calibrated-context-economy).
+   */
+  verifiedCurrent?: boolean;
+  /** Evidence behind a `fresh` verdict; absent on drifted/orphaned facts. */
+  certificates?: GroundingCertificate[];
   score: number;
 }
 
@@ -112,6 +120,7 @@ export async function handleRecall(
   directory: string,
   task?: string,
   limit = 10,
+  tokenBudget?: number,
 ): Promise<unknown> {
   try {
     const rootPath = await validateDirectory(directory);
@@ -131,6 +140,18 @@ export async function handleRecall(
       const hasQuery = terms.length > 0;
       const items: RecalledMemory[] = [];
 
+      // A `fresh`, anchored fact carries a grounding certificate per anchor — the
+      // evidence behind the verdict — and is marked verified-current. Computed only
+      // when the graph is available (ctx) and the verdict is `fresh`; drifted/
+      // orphaned facts never carry either. (add-trust-calibrated-context-economy)
+      const certify = (freshness: string, anchors: StructuralAnchor[]): Pick<RecalledMemory, 'verifiedCurrent' | 'certificates'> => {
+        if (freshness !== 'fresh' || !ctx) return {};
+        const certificates = anchors
+          .map((a) => ctx.certificateForAnchor(a))
+          .filter((c): c is GroundingCertificate => !!c);
+        return certificates.length ? { verifiedCurrent: true, certificates } : {};
+      };
+
       for (const m of memStore.memories) {
         const f = memoryFreshness(m.anchors, view);
         const r = scoreMemory(terms, {
@@ -149,6 +170,7 @@ export async function handleRecall(
           anchors: f.verdicts.map(summarizeVerdict),
           recordedAt: m.recordedAt,
           match: hasQuery ? { fields: r.matched, anchorBoost: r.anchorBoost } : undefined,
+          ...certify(f.freshness, m.anchors),
           score: r.score,
         });
       }
@@ -167,6 +189,7 @@ export async function handleRecall(
           anchors: f.verdicts.map(summarizeVerdict),
           recordedAt: d.recordedAt,
           match: hasQuery ? { fields: r.matched, anchorBoost: r.anchorBoost } : undefined,
+          ...certify(f.freshness, anchors),
           score: r.score,
         });
       }
@@ -179,6 +202,34 @@ export async function handleRecall(
       const authoritative = filtered.filter((i) => i.freshness !== 'orphaned');
       const needsReanchoring = filtered.filter((i) => i.freshness === 'orphaned');
 
+      // Budget-aware tiering: with a tokenBudget, return the highest grounding-
+      // density facts first (verified-current core), then the tail as budget
+      // allows; report what was withheld — never a silent cap. No budget = full set.
+      let authoritativeOut = authoritative;
+      let budget: { tokenBudget: number; returned: number; withheld: number } | undefined;
+      if (typeof tokenBudget === 'number' && tokenBudget > 0 && authoritative.length) {
+        const ordered = [...authoritative].sort(
+          (a, b) => Number(!!b.verifiedCurrent) - Number(!!a.verifiedCurrent),
+        ); // stable sort preserves the score order within each tier
+        const kept: RecalledMemory[] = [];
+        let used = 0;
+        for (const item of ordered) {
+          const cost = estimateItemTokens(item);
+          if (kept.length > 0 && used + cost > tokenBudget) break;
+          kept.push(item);
+          used += cost;
+        }
+        authoritativeOut = kept;
+        budget = { tokenBudget, returned: kept.length, withheld: authoritative.length - kept.length };
+      }
+
+      const budgetNote = budget && budget.withheld > 0
+        ? `tokenBudget truncated the tail: ${budget.withheld} additional authoritative fact(s) withheld — raise tokenBudget or omit it to see them.`
+        : undefined;
+      const reanchorNote = needsReanchoring.length
+        ? 'needsReanchoring entries reference code that no longer exists — do not treat them as authoritative; re-record them against current code.'
+        : undefined;
+
       return {
         task: task ?? null,
         graphAvailable: ctx !== null,
@@ -188,11 +239,10 @@ export async function handleRecall(
           drifted: filtered.filter((i) => i.freshness === 'drifted').length,
           orphaned: needsReanchoring.length,
         },
-        authoritative: authoritative.map(stripScore),
+        authoritative: authoritativeOut.map(stripScore),
         needsReanchoring: needsReanchoring.map(stripScore),
-        note: needsReanchoring.length
-          ? 'needsReanchoring entries reference code that no longer exists — do not treat them as authoritative; re-record them against current code.'
-          : undefined,
+        budget,
+        note: [budgetNote, reanchorNote].filter(Boolean).join(' ') || undefined,
       };
     } finally {
       ctx?.close();
@@ -236,4 +286,13 @@ function stripScore(i: RecalledMemory): Omit<RecalledMemory, 'score'> {
   const { score: _score, ...rest } = i;
   void _score;
   return rest;
+}
+
+/**
+ * Deterministic token estimate for one recalled fact, used only to apportion a
+ * caller-supplied tokenBudget. Char-count/4 over the serialized payload — a fixed
+ * heuristic, not a tuning constant that changes ranking.
+ */
+function estimateItemTokens(i: RecalledMemory): number {
+  return Math.ceil(JSON.stringify(stripScore(i)).length / 4);
 }

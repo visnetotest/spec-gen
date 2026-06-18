@@ -1547,6 +1547,7 @@ export const TOOL_DEFINITIONS = [
         directory: { type: 'string', description: DIR_DESC },
         task: { type: 'string', description: 'What you are about to work on (optional).' },
         limit: { type: 'number', description: 'Max memories to return (default: 10).' },
+        tokenBudget: { type: 'number', description: 'Optional token cap; reports withheld count.' },
       },
       required: ['directory'],
     },
