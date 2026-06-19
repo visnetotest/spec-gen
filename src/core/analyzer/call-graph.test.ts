@@ -312,6 +312,83 @@ describe('CallGraphBuilder — member-assigned & var-bound functions', () => {
 });
 
 // ---------------------------------------------------------------------------
+// JavaScript/TypeScript — class-field arrow/function members
+// (change: widen-js-function-node-extraction — public_field_definition arm)
+// ---------------------------------------------------------------------------
+
+describe('CallGraphBuilder — class-field arrow/function members', () => {
+  it('indexes `class C { handler = () => {} }` as C.handler with the enclosing className', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/widget.ts',
+      language: 'TypeScript',
+      content: `
+        class Widget {
+          handler = () => {};
+        }
+      `,
+    }]);
+
+    expect(nodeNames(result)).toContain('handler');
+    expect(result.nodes.get('src/widget.ts::Widget.handler')?.className).toBe('Widget');
+  });
+
+  it('resolves calls out of a class-field arrow', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/comp.ts',
+      language: 'TypeScript',
+      content: `
+        function recompute(msg) {}
+        class Comp {
+          onClick = () => { recompute('clicked'); };
+        }
+      `,
+    }]);
+
+    expect(edgePairs(result)).toContain('onClick→recompute');
+    expect(fanIn(result, 'recompute')).toBe(1);
+  });
+
+  it('indexes a class-field function expression and a type-annotated field arrow', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/svc.ts',
+      language: 'TypeScript',
+      content: `
+        class Svc {
+          legacy = function legacy() {};
+          typed: () => void = () => {};
+        }
+      `,
+    }]);
+
+    expect(nodeNames(result)).toEqual(expect.arrayContaining(['legacy', 'typed']));
+    expect(result.nodes.get('src/svc.ts::Svc.legacy')?.className).toBe('Svc');
+    expect(result.nodes.get('src/svc.ts::Svc.typed')?.className).toBe('Svc');
+  });
+
+  it('does NOT index non-function class fields', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/state.ts',
+      language: 'TypeScript',
+      content: `
+        class State {
+          count = 0;
+          data = {};
+          label = 'x';
+          real = () => {};
+        }
+      `,
+    }]);
+
+    // Only the arrow field is a node; the number, object and string fields extract nothing.
+    expect(nodeNames(result)).toEqual(['real']);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Python
 // ---------------------------------------------------------------------------
 

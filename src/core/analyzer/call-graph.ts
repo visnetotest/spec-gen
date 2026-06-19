@@ -1022,6 +1022,10 @@ const TS_FN_QUERY = `
   (assignment_expression
     left: [(identifier) (member_expression)] @fn.name
     right: [(arrow_function) (function_expression)] @fn.value) @fn.node
+
+  (public_field_definition
+    name: (property_identifier) @fn.name
+    value: [(arrow_function) (function_expression)] @fn.value) @fn.node
 `;
 
 const TS_CALL_QUERY = `

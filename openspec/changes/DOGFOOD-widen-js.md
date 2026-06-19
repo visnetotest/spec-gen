@@ -55,6 +55,42 @@ init
 The plugin handler the proposal called out (the one that made `formset:added` resolve only 1 of 2
 handlers) is now a first-class node available to the event-synthesis rules.
 
+## 2b. Class-field arrow handlers (`public_field_definition` arm, decision `efcd981c`)
+
+The dominant modern handler idiom — `class C { handler = () => {} }` — was the one common shape the
+first cut of this change did not reach (it is a `public_field_definition`, not a `method_definition`
+or any binding/assignment). Added as a follow-up arm and dogfooded two ways with the built CLI:
+
+**Real third-party corpus — mobx 6.16.1 `src/` (57 real `.ts` files, npm tarball):** **398** internal
+nodes, of which **144** are class members (`method_definition` + the new field arm) — `Atom.onBO`,
+`ComputedValue.computeValue_`, `ComputedValue.get`, … — **zero** with a malformed (paren/space-bearing)
+name. No node explosion, no regression. (One pre-existing artifact noted below, unrelated to this arm.)
+
+**Faithful React class-component reproduction (`src/Counter.tsx`, analyzed on disk):**
+
+```
+class Counter extends Component {
+  increment = () => { …; track('increment'); this.persist(); };  // field arrow
+  decrement = (): void => { …; track('decrement'); };            // typed field arrow
+  persist   = () => { track('persist'); };                       // field arrow
+  reset     = function reset() { track('reset'); };              // field function expression
+  render() { … }                                                 // method (pre-existing arm)
+}
+```
+
+All four field handlers are now indexed as `Counter.increment` / `.decrement` / `.persist` / `.reset`
+with className `Counter`, and **every handler's outward edge resolves** (`Counter.increment → track`,
+`… decrement/persist/reset → track`). Before this arm, none of the four were nodes, so none of those
+edges existed. (`this.persist()` stays unresolved — intra-class `this.method()` resolution is a
+separate, pre-existing limitation, not introduced here.)
+
+**Pre-existing artifact observed (NOT this arm, not a regression):** mobx's `src/api/action.ts`
+contains TypeScript that tree-sitter-typescript cannot fully parse (`hasError: true`); under
+error-recovery the *existing* `assignment_expression` arm emitted one garbage-named node spanning two
+no-semicolon statements (`createDecoratorAnnotation(actionBoundAnnotation)autoAction.bound`). It comes
+from the member-assignment arm shipped in the first cut, only fires on a parse error, and is out of
+scope for this follow-up. Worth a future guard (skip nodes whose subtree `hasError`).
+
 ## 3. Adversarial fixture
 
 | source | indexed? |

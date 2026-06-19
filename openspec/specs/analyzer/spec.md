@@ -2042,11 +2042,15 @@ shapes, in addition to `function_declaration`, exported `function_declaration`, 
 expression; a `var` binding (`variable_declaration`) to an arrow or function expression; and an
 `assignment_expression` whose left-hand side is an identifier or a member expression and whose
 right-hand side is an arrow or function expression (`app.use = function(){}`,
-`exports.handler = function(){}`, `Foo.prototype.bar = function(){}`, `f = function(){}`). A
-member-assigned node SHALL be named by the full dotted member path (`app.use`, `Foo.prototype.bar`),
-with incidental whitespace collapsed so the derived name, node id, and `stableId` are stable. The
-extractor SHALL NOT index an assignment whose right-hand side is not a function/arrow (a `require(...)`
-call, a member access, an identifier, a number, or an object literal), a computed-member assignment
+`exports.handler = function(){}`, `Foo.prototype.bar = function(){}`, `f = function(){}`); and a
+class-field definition (`public_field_definition`) whose value is an arrow or function expression
+(`class C { handler = () => {} }`). A member-assigned node SHALL be named by the full dotted member
+path (`app.use`, `Foo.prototype.bar`), with incidental whitespace collapsed so the derived name, node
+id, and `stableId` are stable. A class-field function node SHALL be named by its bare property
+identifier (`handler`) and associated with its enclosing class (id `File::Class.handler`), exactly as
+a `method_definition` is. The extractor SHALL NOT index an assignment whose right-hand side is not a
+function/arrow (a `require(...)` call, a member access, an identifier, a number, or an object literal),
+a non-function class-field value (a number, object, or string), a computed-member assignment
 (`obj[key] = function(){}`), or an augmented assignment (`obj.x ||= function(){}`). When the same
 member is assigned more than once in a file, the analyzer SHALL collapse it to a single node (the
 existing id-keyed last-wins de-duplication), never emitting duplicate nodes.
@@ -2058,6 +2062,13 @@ existing id-keyed last-wins de-duplication), never emitting duplicate nodes.
 - **WHEN** the call graph is built
 - **THEN** both `app.use` and `app.lazyrouter` are function nodes and the edge `app.use → app.lazyrouter`
   is resolved internally
+
+#### Scenario: Class-field arrow/function members are indexed
+
+- **GIVEN** a TypeScript/JavaScript file containing `class Comp { onClick = () => { recompute(); } }`
+- **WHEN** the call graph is built
+- **THEN** `onClick` is a function node with className `Comp` (id `…::Comp.onClick`) and the edge
+  `onClick → recompute` is resolved
 
 #### Scenario: Non-function assignment is not indexed
 
@@ -5635,6 +5646,12 @@ The system SHALL extract member-assigned functions (obj.prop = function, exports
 
 > Decision recorded: d8b81a9b
 > Date: 2026-06-18
+### Requirement: IndexClassfieldArrowfunctionMembersViaAPublicfielddefinitionQueryArm
+
+The system SHALL index class fields bound to arrow or function expressions as named functions in the call graph, using the same naming convention as method definitions.
+
+> Decision recorded: efcd981c
+> Date: 2026-06-19
 
 ## Technical Notes
 
@@ -6182,3 +6199,13 @@ Implements add-trust-calibrated-context-economy on the recall path (the only mem
 The TS/JS extractor's TS_FN_QUERY matched only function_declaration, exported function_declaration, ES6 method_definition, and lexical_declaration (const/let). It missed dominant pre-class/CommonJS/ES5 idioms — obj.prop = function(){}, exports.x = function(){}, X.prototype.y = function(){}, and var f = function(){}. Two tree-sitter clauses are added: an assignment_expression with identifier|member_expression LHS and arrow|function_expression RHS, and a variable_declaration arm mirroring the existing lexical_declaration one. RHS is constrained to function/arrow so exports.x = require('y') and obj.prop = 42 never match. Member nodes are named by full LHS text (app.use, Foo.prototype.bar); de-dup is the existing last-wins allNodes.set(id).
 
 **Consequences:** Node set widens for JS/TS: fanIn/fanOut, hub/god/entry-point classification, dead-code candidates, and duplicate detection all see the new nodes. Known limitations: arity/signatureShape may be empty for function-expression assignments whose inner name differs from the assigned member; async detection follows existing fnNode.text heuristic; this.x = fn inside a class body associates with the enclosing class name.
+
+### Index class-field arrow/function members via a public_field_definition query arm
+
+**Status:** Approved
+**Date:** 2026-06-19
+**ID:** efcd981c
+
+Class fields bound to an arrow or function expression (`class C { handler = () => {} }`) are the dominant modern handler idiom, but the widen-js-function-node-extraction change (decision d8b81a9b) covered only assignment_expression and var/const/let bindings — leaving this common shape invisible to the call graph. Adding a public_field_definition arm to TS_FN_QUERY closes the one common idiom the original widening did not reach.
+
+**Consequences:** One additional TS_FN_QUERY arm. The field is named by its bare property identifier (`handler`) and associated with the enclosing class via the existing className walk, exactly mirroring method_definition (id `File::Class.handler`). Private (`#`) fields stay unindexed, consistent with method_definition which also matches only property_identifier. Non-function field values are excluded because the value is constrained to arrow/function. Extends d8b81a9b; does not supersede it.

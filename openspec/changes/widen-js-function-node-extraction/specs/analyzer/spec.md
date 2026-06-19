@@ -10,11 +10,15 @@ shapes, in addition to `function_declaration`, exported `function_declaration`, 
 expression; a `var` binding (`variable_declaration`) to an arrow or function expression; and an
 `assignment_expression` whose left-hand side is an identifier or a member expression and whose
 right-hand side is an arrow or function expression (`app.use = function(){}`,
-`exports.handler = function(){}`, `Foo.prototype.bar = function(){}`, `f = function(){}`). A
-member-assigned node SHALL be named by the full dotted member path (`app.use`, `Foo.prototype.bar`),
-with incidental whitespace collapsed so the derived name, node id, and `stableId` are stable. The
-extractor SHALL NOT index an assignment whose right-hand side is not a function/arrow (a `require(...)`
-call, a member access, an identifier, a number, or an object literal), a computed-member assignment
+`exports.handler = function(){}`, `Foo.prototype.bar = function(){}`, `f = function(){}`); and a
+class-field definition (`public_field_definition`) whose value is an arrow or function expression
+(`class C { handler = () => {} }`). A member-assigned node SHALL be named by the full dotted member
+path (`app.use`, `Foo.prototype.bar`), with incidental whitespace collapsed so the derived name, node
+id, and `stableId` are stable. A class-field function node SHALL be named by its bare property
+identifier (`handler`) and associated with its enclosing class (id `File::Class.handler`), exactly as
+a `method_definition` is. The extractor SHALL NOT index an assignment whose right-hand side is not a
+function/arrow (a `require(...)` call, a member access, an identifier, a number, or an object literal),
+a non-function class-field value (a number, object, or string), a computed-member assignment
 (`obj[key] = function(){}`), or an augmented assignment (`obj.x ||= function(){}`). When the same
 member is assigned more than once in a file, the analyzer SHALL collapse it to a single node (the
 existing id-keyed last-wins de-duplication), never emitting duplicate nodes.
@@ -33,6 +37,19 @@ existing id-keyed last-wins de-duplication), never emitting duplicate nodes.
   `var parse = function parse(){}`
 - **WHEN** the call graph is built
 - **THEN** `View.prototype.render` and `parse` are function nodes
+
+#### Scenario: Class-field arrow/function members are indexed
+
+- **GIVEN** a TypeScript/JavaScript file containing `class Comp { onClick = () => { recompute(); } }`
+- **WHEN** the call graph is built
+- **THEN** `onClick` is a function node with className `Comp` (id `…::Comp.onClick`) and the edge
+  `onClick → recompute` is resolved
+
+#### Scenario: Non-function class field is not indexed
+
+- **GIVEN** a class with fields `count = 0`, `data = {}`, `label = 'x'`, and `real = () => {}`
+- **WHEN** the call graph is built
+- **THEN** only `real` produces a function node
 
 #### Scenario: Non-function assignment is not indexed
 

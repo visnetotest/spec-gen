@@ -10,10 +10,17 @@
       `right: [(arrow_function) (function_expression)]` so `obj.prop = fn`, `exports.x = fn`,
       `X.prototype.y = fn`, and `f = fn` are captured. RHS constrained to function/arrow so
       `exports.x = require(...)`, `obj.prop = 42`, and object literals never match.
+- [x] Add a `public_field_definition` arm with `name: (property_identifier)` and
+      `value: [(arrow_function) (function_expression)]` so class-field arrows/functions
+      (`class C { handler = () => {} }`, the dominant modern handler idiom) are captured. Decision
+      `efcd981c` (extends `d8b81a9b`).
 
 ## 2. Naming & identity
 - [x] Name member-assigned nodes by the full dotted LHS text (`app.use`, `Foo.prototype.bar`),
       collapsing incidental whitespace (LHS split across lines) so name/id/stableId stay stable.
+- [x] Name class-field functions by their bare property identifier (`handler`) and associate them with
+      the enclosing class via the existing className walk (id `File::Class.handler`) — identical to
+      `method_definition`. Private (`#`) fields stay unindexed, mirroring `method_definition`.
 - [x] Verify dotted names are backtick-escaped by `stableSymbolId` (the `.` is outside the SCIP
       simple-identifier set) and that re-assignment collapses via the existing id-keyed last-wins
       `allNodes.set(id, …)` (no duplicate explosion).
@@ -25,6 +32,9 @@
       `app.use → app.lazyrouter`).
 - [x] Negatives: `require(...)`, number, object-literal RHS extract nothing; re-assignment → 1 node;
       member node carries an escaped `stableId`.
+- [x] Class-field arms: `class C { handler = () => {} }` → `C.handler` with the enclosing className;
+      edge resolves out of a class-field arrow; class-field function expression + type-annotated field
+      arrow both indexed; non-function fields (number/object/string) extract nothing.
 
 ## 4. Regression & adversarial review
 - [x] Full `vitest run src` green (185 files, 3872 passed / 2 skipped), `typecheck` + `eslint` clean.
@@ -53,11 +63,8 @@
 - `async` on assignment nodes follows the existing `fnNode.text` heuristic (the same under-detection
   already present for arrow `const`s); not changed here.
 - `this.x = fn` inside a class body associates with the enclosing class name.
-- Object-literal `pair` values (`{ prop: function(){} }`) remain out of scope; only assignment and
-  `var`/`const`/`let` bindings are added.
-- Class-field arrows (`class C { handler = () => {} }`, a `public_field_definition`) remain out of
-  scope; only `method_definition` members are indexed inside a class body. This is the one common
-  modern idiom the widening does not reach — a follow-up can add a `public_field_definition` arm.
+- Object-literal `pair` values (`{ prop: function(){} }`) remain out of scope; only assignment,
+  `var`/`const`/`let` bindings, and class-field arrow/function members are added.
 - Distinct functions in one file that derive the same `filePath::name` id (e.g. a reassigned bare
   `f = function(){}` in two scopes) collapse to one node under the existing id-keyed last-wins de-dup,
   and their out-edges merge onto the survivor. This is a pre-existing property of the id scheme (two
