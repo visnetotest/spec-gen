@@ -20,6 +20,7 @@ import type { DecisionScope } from '../../types/index.js';
 
 import { handleOrient } from './mcp-handlers/orient.js';
 import { handleSelectTests } from './mcp-handlers/test-impact.js';
+import { handleBlastRadius } from './mcp-handlers/blast-radius.js';
 import { handleFindDeadCode } from './mcp-handlers/reachability.js';
 import { handleStructuralDiff } from './mcp-handlers/structural-diff.js';
 import { handleGetChangeCoupling } from './mcp-handlers/change-coupling.js';
@@ -144,6 +145,10 @@ export async function dispatchTool(
     const { directory, changedSymbols, diffRef, maxDepth, directResolvedOnly } =
       args as { directory: string; changedSymbols?: string[]; diffRef?: string; maxDepth?: number; directResolvedOnly?: boolean };
     return handleSelectTests({ directory, changedSymbols, diffRef, maxDepth, directResolvedOnly });
+  } else if (name === 'blast_radius') {
+    const { directory, baseRef, depth, maxSymbols } =
+      args as { directory: string; baseRef?: string; depth?: number; maxSymbols?: number };
+    return handleBlastRadius({ directory, baseRef, depth, maxSymbols });
   } else if (name === 'find_dead_code') {
     const { directory, ifDeleted, maxResults, filePattern, directResolvedOnly } =
       args as { directory: string; ifDeleted?: string; maxResults?: number; filePattern?: string; directResolvedOnly?: boolean };

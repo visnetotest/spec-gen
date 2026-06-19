@@ -325,6 +325,43 @@ merge distinct memories or judge relative importance.
 - **GIVEN** a memory recorded with content X and anchor A
 - **WHEN** `remember` is called again with the same content X and anchor A
 - **THEN** the store contains one memory for (X, A); the same content on a different anchor B is distinct
+### Requirement: PreflightStructuralBriefing
+
+The system SHALL provide a pre-flight capability that, given a staged or working diff, returns a
+deterministic conclusion-shaped briefing of the change's structural blast radius: affected callers and
+layers crossed, the tests to run, the anchored memories and decisions the diff will turn `drifted` or
+`orphaned`, the specs it will make stale, and (under federation) the cross-repo consumers of any
+changed published interface. The briefing SHALL compose existing deterministic analyses only, with no
+LLM and no new structural computation, and SHALL be a briefing (counts and named risks), never a graph.
+
+> Decision recorded: 987286eb
+> Date: 2026-06-18
+
+#### Scenario: A hub change is briefed before commit
+
+- **GIVEN** a working diff that modifies a function with many callers and an anchored decision
+- **WHEN** the pre-flight briefing is requested
+- **THEN** it reports the caller count and layers, the tests to run, and that the anchored decision
+  will drift — as a single conclusion-shaped briefing
+
+### Requirement: AdvisoryByDefault
+
+The pre-flight guard SHALL be non-blocking by default: surfaced on demand or via an advisory git hook
+that does not fail a commit. A repository MAY opt into blocking for specific high-risk patterns (for
+example, orphaning an anchored decision) via configuration, but blocking SHALL never be the default
+posture.
+
+#### Scenario: Default hook is advisory
+
+- **GIVEN** the pre-flight git hook installed with default configuration
+- **WHEN** a commit is made for a high-blast-radius diff
+- **THEN** the briefing is emitted and the commit is not blocked
+
+#### Scenario: Opt-in blocking fires only on its pattern
+
+- **GIVEN** a repository configured to block when a commit orphans an anchored decision
+- **WHEN** a commit would orphan an anchored decision
+- **THEN** the hook blocks; and for any other high-blast-radius diff it remains advisory
 
 ## Decisions
 
@@ -477,3 +514,13 @@ The epistemic-lease feature injected escalating imperative language into every M
 recall previously ranked memories by binary substring token-overlap, which silently dropped relevant memories on a phrasing mismatch (e.g. a camelCase identifier vs a plain word). Replaced it with a deterministic field-weighted, graded ranker: identifier-aware normalization (camelCase/PascalCase/snake_case/kebab-case split before lower-casing, fixed stopword set), fixed field weights (anchorSymbol 4 > tag 3 > anchorFile 2 > content 1), occurrence-capped grading, and an exact-anchor boost (8) when the query names every subtoken of an anchored symbol. This keeps the memory path LLM-free and embedding-free per the north star (decision c6d1ad07) while fixing the worst retrieval failure mode. A substring fallback (weight 0.1, applied only when the token score is zero) guarantees the candidate set is a superset of the old behavior.
 
 **Consequences:** Weights and the stopword set are fixed, documented, exported constants — changing them is a code+test change, not a runtime knob. recall items gain an optional match {fields, anchorBoost} field for transparent ranking reasons. Embedding-backed recall is deliberately deferred to a future proposal with its own decision. The authoritative/orphaned freshness split is unchanged and still runs after ranking.
+
+### Name the pre-flight blast-radius guard `blast_radius` (MCP) / `blast-radius` (CLI), distinct from the existing `preflight` staleness gate
+
+**Status:** Approved
+**Date:** 2026-06-18
+**ID:** 987286eb
+
+The add-preflight-blast-radius-guard proposal is titled "pre-flight blast-radius guard," but `openlore preflight` already exists as an unrelated CI graph-staleness gate (src/cli/preflight/). Reusing the word "preflight" across both surfaces would conflate two different concerns. The new capability is named `blast_radius` everywhere to be collision-free and self-describing ("compute my diff's structural blast radius"). It is implemented as pure orchestration of existing deterministic analyses (analyze_impact, select_tests, check_spec_drift which already folds in anchored-memory + ADR drift, and getChangedFiles) composed into a single conclusion-shaped briefing — no new structural computation, no LLM. The MCP tool is classified `conclusion` and kept out of the `minimal` preset. The git hook is advisory-by-default (exit 0); opt-in blocking for named high-risk patterns reads `.openlore/config.json` `blastRadius.block`. The multi-repo-federation cross-repo-consumers input is scoped out (federation not yet shipped) and documented as a no-op with a note.
+
+**Consequences:** A new MCP tool `blast_radius` and CLI `openlore blast-radius` (with --install-hook, --hook, --json) ship; OpenLoreConfig gains an optional `blastRadius?: { block?: string[] }` field; a new advisory pre-commit hook block (marker `# openlore-blast-radius-hook`) installs alongside the decisions hook. Federation cross-repo consumers remain a documented gap until add-multi-repo-federation lands.

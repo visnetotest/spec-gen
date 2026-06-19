@@ -175,6 +175,10 @@ describe('tools/list payload budget (spec-28)', () => {
   // remember and `asOf`/`changedSince`/`type` on recall — riding existing tools (no new tool,
   // default/minimal surfaces unchanged). Descriptions were trimmed first; the residual ~650 B is
   // the genuine cost of the new capability. Conscious decision, not silent drift.
+  // Full bumped 55_000 → 57_000 when the `blast_radius` pre-flight guard tool was added to the
+  // full surface (spec: add-preflight-blast-radius-guard) — a new orchestration tool that briefs a
+  // diff's structural blast radius. It stays OUT of the minimal/navigation/memory presets; only the
+  // full surface widens. Conscious decision, not silent drift.
   it('full surface stays within its prefix budget', () => {
     expect(payloadBytes({})).toBeLessThan(57_000);
   });
