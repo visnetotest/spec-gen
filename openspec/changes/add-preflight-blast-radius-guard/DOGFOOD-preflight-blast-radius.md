@@ -93,3 +93,34 @@ A review pass (impl / tests / docs) tightened the advisory-never-block guarantee
   `--install-hook` command, never auto-installed by `openlore setup`); `blast_radius` rows added to the
   README cheat-sheet and `docs/mcp-tools.md`; the stale "50 tools" surface figure corrected to the
   measured 58.
+
+## 6. Second hardening round (2026-06-19) — block-correctness & config safety
+
+A second review pass (correctness / openspec-lifecycle / security) found two real defects in the
+block path that the first pass missed; both are now fixed and regression-tested:
+
+- **Block gate could silently fail to fire (correctness bug).** `triggeredBlockPatterns` decided
+  `orphans-anchored-decision` by scanning `decisions.items`, which is display-capped at 20. On a large
+  diff where `adr-orphaned` issues landed past index 20 (behind many `adr-gap` entries), a commit the
+  operator explicitly configured to block would have passed advisory. Fixed by adding an **uncapped**
+  `decisions.orphaned` count (mirroring `memory.orphaned`) and blocking on the count, never the sliced
+  array. Regression test asserts the block fires when the orphaned issue is past the cap. Verified on
+  the real diff: `decisions: { affected: 11, orphaned: 0, items_len: 11 }`.
+- **Malformed config could block a commit (never-block violation).** A syntactically valid
+  `.openlore/config.json` with a wrong-typed `blastRadius.block` (e.g. `{}` or a bare string) threw on
+  iteration *outside* the advisory safety net → non-zero exit → blocked commit. Fixed by coercing
+  `block` with `Array.isArray` and wrapping the config read in its own try/catch. Verified end-to-end:
+  a `block: {}` and a `block: "…"` config both exit 0 in `--hook` mode.
+- **No-silent-truncation completed.** Every display-capped detail list (`tests.toRun`, `memory.willDrift`,
+  `specs.items`, `decisions.items`, `impact.topSymbols`) now emits a caveat when it drops items —
+  closing the gap against the module's own "truncation is reported, never silent" contract.
+- **Conclusion-shape locked on all return paths.** Added `assertConclusionShape` assertions for the
+  empty-diff briefing and the `{error}` path (previously only the populated briefing was asserted).
+
+Tests for the feature: **24 → 27**. Full suite re-confirmed green (`vitest run src examples`).
+
+> **Known follow-up (not a functional gap, out of this feature's scope):** the two auto-extracted
+> hardening decisions (`51c2603d`, `215092bc`) synced into `openspec/specs/analyzer/spec.md` because
+> `blast-radius.ts` is mapped to the `analyzer` domain; they semantically belong to `mcp-handlers`/`cli`.
+> The advisory/opt-in *requirements* are already correctly captured in the mcp-handlers/cli specs via the
+> change's hand-written deltas, so no requirement is missing — only the decision filing is off-domain.

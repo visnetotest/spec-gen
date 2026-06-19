@@ -94,6 +94,9 @@ export interface BlastRadiusBriefing {
   };
   decisions: {
     affected: number;
+    /** Uncapped count of `adr-orphaned` issues. The hook's block gate reads this,
+     * never `items` — `items` is display-capped and could omit a triggering issue. */
+    orphaned: number;
     items: Array<{ kind: string; message: string; domain: string | null }>;
   };
   federation: { evaluated: false; note: string };
@@ -230,6 +233,7 @@ export async function computeBlastRadius(
   }
   const memOrphaned = memWillDrift.filter(m => m.kind === 'memory-orphaned').length;
   const memDrifted = memWillDrift.filter(m => m.kind === 'memory-drifted').length;
+  const decisionsOrphaned = decisionItems.filter(d => d.kind === 'adr-orphaned').length;
 
   // ── 5. Compose the conclusion-shaped briefing ───────────────────────────────
   const caveats: string[] = [
@@ -244,6 +248,19 @@ export async function computeBlastRadius(
   }
   if (driftUnavailable) {
     caveats.push(`Spec/memory drift could not be evaluated: ${driftUnavailable}`);
+  }
+  // Detail lists are display-capped; report any that drop items so a reader never
+  // mistakes a short list for a complete one (mcp-quality: no-silent-truncation).
+  // The counts (tests.count / memory.* / specs.willGoStale / decisions.affected+orphaned /
+  // impact.analyzedSymbolCount) remain authoritative and uncapped.
+  const capped: string[] = [];
+  if (testToRun.length < testCount) capped.push(`tests.toRun (${testToRun.length}/${testCount})`);
+  if (memWillDrift.length > 20) capped.push(`memory.willDrift (20/${memWillDrift.length})`);
+  if (specItems.length > 20) capped.push(`specs.items (20/${specItems.length})`);
+  if (decisionItems.length > 20) capped.push(`decisions.items (20/${decisionItems.length})`);
+  if (topSymbols.length > 15) capped.push(`impact.topSymbols (15/${topSymbols.length})`);
+  if (capped.length > 0) {
+    caveats.push(`Detail lists truncated for brevity: ${capped.join(', ')} — see the counts for totals.`);
   }
 
   const briefing: BlastRadiusBriefing = {
@@ -268,7 +285,7 @@ export async function computeBlastRadius(
     tests: { count: testCount, toRun: testToRun, soundness: testSoundness },
     memory: { drifted: memDrifted, orphaned: memOrphaned, willDrift: memWillDrift.slice(0, 20) },
     specs: { willGoStale: specItems.length, items: specItems.slice(0, 20) },
-    decisions: { affected: decisionItems.length, items: decisionItems.slice(0, 20) },
+    decisions: { affected: decisionItems.length, orphaned: decisionsOrphaned, items: decisionItems.slice(0, 20) },
     federation: {
       evaluated: false,
       note: 'Cross-repo consumers of changed published interfaces are not evaluated (multi-repo federation not yet shipped — add-multi-repo-federation).',

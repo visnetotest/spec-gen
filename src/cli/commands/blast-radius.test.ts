@@ -114,7 +114,7 @@ describe('runBlastRadiusCli (advisory posture & exit codes)', () => {
     tests: { count: 0, toRun: [] },
     memory: { orphaned: 1, drifted: 0, willDrift: [{ kind: 'memory-orphaned', message: 'gone', filePath: 'x.ts' }] },
     specs: { items: [], willGoStale: 0 },
-    decisions: { affected: 0, items: [] },
+    decisions: { affected: 0, orphaned: 0, items: [] },
   } as unknown as BlastRadiusBriefing;
 
   it('returns 0 (advisory) and never throws when compute returns an error', async () => {
@@ -150,5 +150,18 @@ describe('runBlastRadiusCli (advisory posture & exit codes)', () => {
     const code = await runBlastRadiusCli({ cwd: '/p' });
     expect(code).toBe(0);
     expect(outSpy.mock.calls.length).toBeGreaterThan(0); // human briefing went to stdout, not stderr
+  });
+
+  it('never blocks on a malformed blastRadius.block (valid JSON, wrong type)', async () => {
+    vi.mocked(computeBlastRadius).mockResolvedValue(orphanBriefing);
+    // A wrong-typed `block` (object) would throw on iteration if not coerced — must not block.
+    vi.mocked(readOpenLoreConfig).mockResolvedValue({ blastRadius: { block: {} } } as never);
+    expect(await runBlastRadiusCli({ cwd: '/p', hook: true })).toBe(0);
+  });
+
+  it('never blocks when the config read itself throws', async () => {
+    vi.mocked(computeBlastRadius).mockResolvedValue(orphanBriefing);
+    vi.mocked(readOpenLoreConfig).mockRejectedValue(new Error('disk gone'));
+    expect(await runBlastRadiusCli({ cwd: '/p', hook: true })).toBe(0);
   });
 });

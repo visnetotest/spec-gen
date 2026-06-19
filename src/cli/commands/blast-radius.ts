@@ -33,7 +33,7 @@ elif [ -f "./dist/cli/index.js" ] && node ./dist/cli/index.js blast-radius --hel
   BLAST_EXIT=$?
 else
   OPENLORE=$(command -v openlore 2>/dev/null)
-  if [ -n "$OPENLORE" ] && "$OPENLORE" blast-radius --help 2>&1 | grep -q -- '--hook'; then
+  if [ -n "$OPENLORE" ] && "$OPENLORE" blast-radius --help 2>/dev/null | grep -q -- '--hook'; then
     "$OPENLORE" blast-radius --hook 2>&1
     BLAST_EXIT=$?
   else
@@ -96,7 +96,10 @@ export async function uninstallBlastRadiusHook(rootPath: string): Promise<void> 
   logger.success('Removed the advisory blast-radius pre-commit hook block.');
 }
 
-/** Which configured block patterns the briefing actually triggers. */
+/** Which configured block patterns the briefing actually triggers.
+ * Reads the uncapped `*.orphaned` counts, never the display-capped `items` arrays —
+ * a triggering issue could otherwise be sliced off and the block silently fail to fire.
+ * `block` is defensively coerced to an array by the caller before this runs. */
 export function triggeredBlockPatterns(
   briefing: BlastRadiusBriefing,
   block: readonly BlastRadiusBlockPattern[],
@@ -104,7 +107,7 @@ export function triggeredBlockPatterns(
   const fired: BlastRadiusBlockPattern[] = [];
   for (const pattern of block) {
     if (pattern === 'orphans-anchored-memory' && briefing.memory.orphaned > 0) fired.push(pattern);
-    if (pattern === 'orphans-anchored-decision' && briefing.decisions.items.some(i => i.kind === 'adr-orphaned')) fired.push(pattern);
+    if (pattern === 'orphans-anchored-decision' && briefing.decisions.orphaned > 0) fired.push(pattern);
   }
   return fired;
 }
@@ -179,8 +182,16 @@ export async function runBlastRadiusCli(opts: BlastRadiusCliOptions): Promise<nu
   }
 
   if (opts.hook) {
-    const config = await readOpenLoreConfig(cwd);
-    const block = config?.blastRadius?.block ?? [];
+    // Config read is also advisory-safe: a throw here (or a malformed `block`) must
+    // never block a commit. `readOpenLoreConfig` already tolerates unparseable JSON
+    // (returns null); we additionally coerce `block` to an array so a valid-JSON but
+    // wrong-typed value (e.g. `"block": {}` or a bare string) cannot throw on iteration.
+    let block: BlastRadiusBlockPattern[] = [];
+    try {
+      const config = await readOpenLoreConfig(cwd);
+      const raw = config?.blastRadius?.block;
+      block = Array.isArray(raw) ? raw : [];
+    } catch { block = []; }
     const fired = triggeredBlockPatterns(result, block);
     if (fired.length > 0) {
       process.stderr.write(

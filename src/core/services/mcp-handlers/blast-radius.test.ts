@@ -108,6 +108,7 @@ describe('computeBlastRadius', () => {
     expect(b.memory.willDrift[0].kind).toBe('memory-orphaned');
     expect(b.specs.willGoStale).toBe(1);
     expect(b.decisions.affected).toBe(1);
+    expect(b.decisions.orphaned).toBe(1); // uncapped count the block gate reads
 
     // Federation is honestly out of scope
     expect(b.federation.evaluated).toBe(false);
@@ -125,6 +126,7 @@ describe('computeBlastRadius', () => {
     expect(b.changed.files).toBe(0);
     expect(b.impact.highestRiskLevel).toBe('none');
     expect(b.headline).toMatch(/nothing to brief/i);
+    expect(() => assertConclusionShape('blast_radius', b)).not.toThrow(); // empty-diff path is conclusion-shaped
   });
 
   it('degrades gracefully when spec/memory drift is unavailable', async () => {
@@ -139,6 +141,7 @@ describe('computeBlastRadius', () => {
     vi.mocked(readCachedContext).mockResolvedValueOnce(null as never);
     const r = await computeBlastRadius({ directory: '/p' });
     expect(r).toEqual({ error: expect.stringMatching(/analyze_codebase/i) });
+    expect(() => assertConclusionShape('blast_radius', r)).not.toThrow(); // {error} path is conclusion-shaped
   });
 
   it('resolves the analyze_impact match whose file matches the changed seed (name collision)', async () => {
@@ -197,12 +200,12 @@ describe('computeBlastRadius', () => {
 describe('triggeredBlockPatterns (opt-in blocking fires only on its pattern)', () => {
   const orphanBriefing = {
     memory: { orphaned: 1, drifted: 0, willDrift: [] },
-    decisions: { affected: 1, items: [{ kind: 'adr-orphaned', message: 'x', domain: null }] },
+    decisions: { affected: 1, orphaned: 1, items: [{ kind: 'adr-orphaned', message: 'x', domain: null }] },
   } as unknown as BlastRadiusBriefing;
 
   const cleanBriefing = {
     memory: { orphaned: 0, drifted: 2, willDrift: [] },
-    decisions: { affected: 1, items: [{ kind: 'adr-gap', message: 'x', domain: null }] },
+    decisions: { affected: 1, orphaned: 0, items: [{ kind: 'adr-gap', message: 'x', domain: null }] },
   } as unknown as BlastRadiusBriefing;
 
   it('fires when a configured pattern is triggered', () => {
@@ -217,5 +220,16 @@ describe('triggeredBlockPatterns (opt-in blocking fires only on its pattern)', (
 
   it('is advisory by default (no configured patterns → never blocks)', () => {
     expect(triggeredBlockPatterns(orphanBriefing, [])).toEqual([]);
+  });
+
+  it('blocks on the uncapped orphaned count even when the orphaned issue is past the items display cap', () => {
+    // Regression: items is capped at 20 and may omit the adr-orphaned issue; the block
+    // gate must read decisions.orphaned (uncapped), not scan the truncated items array.
+    const cappedBriefing = {
+      memory: { orphaned: 0, drifted: 0, willDrift: [] },
+      decisions: { affected: 21, orphaned: 1, items: Array.from({ length: 20 }, () => ({ kind: 'adr-gap', message: 'g', domain: null })) },
+    } as unknown as BlastRadiusBriefing;
+    expect(cappedBriefing.decisions.items.some(i => i.kind === 'adr-orphaned')).toBe(false); // the old (buggy) check would miss it
+    expect(triggeredBlockPatterns(cappedBriefing, ['orphans-anchored-decision'])).toEqual(['orphans-anchored-decision']);
   });
 });
