@@ -194,6 +194,58 @@ export function memoryFreshness(
   };
 }
 
+// ── contradiction surfacing (add-bitemporal-typed-memory-operations) ──────────
+
+/** A memory reduced to what deterministic contradiction detection needs. */
+export interface AnchoredItem {
+  id: string;
+  anchors: readonly StructuralAnchor[];
+  /** Aggregate freshness — only `fresh` items participate. */
+  freshness: MemoryFreshness;
+  /** When true (superseded/invalidated) the item is excluded. */
+  invalidated?: boolean;
+}
+
+/** Two or more authoritative memories that all anchor to the same symbol. */
+export interface UnreconciledGroup {
+  /** The shared resolved symbol key (`stableId` ?? `nodeId`). */
+  symbol: string;
+  /** The symbol's name, when known (for display). */
+  symbolName?: string;
+  /** The symbol's file, when known (for display). */
+  filePath?: string;
+  /** Ids of the authoritative memories sharing this symbol (sorted, ≥ 2). */
+  memberIds: string[];
+}
+
+/**
+ * Detect `unreconciled` pairs: when two or more authoritative (`fresh`,
+ * non-invalidated) memories resolve to the SAME symbol anchor, they may contradict
+ * and the agent should reconcile or supersede one. This is a pure set intersection
+ * over symbol-level anchors — no LLM decides which wins, and "same file" is too coarse
+ * to count (file-level anchors are ignored). Deterministic and order-independent.
+ */
+export function findUnreconciled(items: readonly AnchoredItem[]): UnreconciledGroup[] {
+  const byKey = new Map<string, { symbolName?: string; filePath?: string; ids: Set<string> }>();
+  for (const it of items) {
+    if (it.invalidated || it.freshness !== 'fresh') continue;
+    for (const a of it.anchors) {
+      if (!a.nodeId) continue; // symbol-level only
+      const key = a.stableId ?? a.nodeId;
+      const entry = byKey.get(key) ?? { symbolName: a.symbolName, filePath: a.filePath, ids: new Set<string>() };
+      entry.ids.add(it.id);
+      byKey.set(key, entry);
+    }
+  }
+  const out: UnreconciledGroup[] = [];
+  for (const [symbol, entry] of byKey) {
+    if (entry.ids.size >= 2) {
+      out.push({ symbol, symbolName: entry.symbolName, filePath: entry.filePath, memberIds: [...entry.ids].sort() });
+    }
+  }
+  return out.sort((a, b) => a.symbol.localeCompare(b.symbol));
+}
+
 /**
  * The anchors to check freshness against for a decision: its explicit structural
  * anchors when present, otherwise existence-only file-level anchors derived from

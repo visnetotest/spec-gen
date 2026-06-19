@@ -18,7 +18,7 @@ import {
   MEMORY_NOTES_FILE,
 } from '../../constants.js';
 import { atomicWriteFile, casUpdate, quarantineCorrupt } from './atomic-store.js';
-import type { MemoryStore } from '../../types/index.js';
+import type { MemoryStore, StructuralAnchor } from '../../types/index.js';
 
 export function memoryDir(rootPath: string): string {
   return join(rootPath, OPENLORE_DIR, OPENLORE_MEMORY_SUBDIR);
@@ -93,7 +93,28 @@ export async function updateMemoryStore(
   });
 }
 
-/** Stable 8-char id derived from recordedAt + content. */
-export function makeMemoryId(content: string, recordedAt: string): string {
-  return createHash('sha256').update(`${recordedAt}:${content}`).digest('hex').slice(0, 8);
+/**
+ * Canonical, order-independent key for a memory's resolved anchors. A symbol anchor
+ * keys on its stable/content-addressed id (falling back to nodeId); a file anchor on
+ * its path. Sorted so anchor input order never changes the identity.
+ */
+function anchorIdentity(anchors: readonly StructuralAnchor[]): string {
+  return [...anchors]
+    .map((a) => (a.nodeId ? `sym:${a.stableId ?? a.nodeId}` : `file:${a.filePath}`))
+    .sort()
+    .join('|');
+}
+
+/**
+ * Stable 8-char id derived from content + resolved anchors
+ * (add-bitemporal-typed-memory-operations). Re-recording the same fact about the same
+ * code yields the same id (updates in place); the same content on a different anchor is
+ * a distinct record. Keying on anchors, not the record timestamp, is what makes dedup
+ * exact and deterministic.
+ */
+export function makeMemoryId(content: string, anchors: readonly StructuralAnchor[]): string {
+  return createHash('sha256')
+    .update(`${content}\x00${anchorIdentity(anchors)}`)
+    .digest('hex')
+    .slice(0, 8);
 }

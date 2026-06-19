@@ -540,12 +540,31 @@ export interface GroundingCertificate {
 }
 
 /**
+ * Closed set of caller-supplied memory classifications (add-bitemporal-typed-memory-operations).
+ * Caller-supplied label only — never inferred or classified by an LLM. An absent or
+ * unrecognized value resolves to `note`, so legacy memories and unlabeled writes behave as today.
+ */
+export type MemoryType =
+  | 'invariant'
+  | 'gotcha'
+  | 'rationale'
+  | 'convention'
+  | 'preference'
+  | 'todo'
+  | 'note';
+
+/** The seven valid memory types, for runtime validation/normalization. */
+export const MEMORY_TYPES: readonly MemoryType[] = [
+  'invariant', 'gotcha', 'rationale', 'convention', 'preference', 'todo', 'note',
+];
+
+/**
  * A general, code-anchored agent memory (kind `note`) — the substrate behind the
  * `remember`/`recall` tools. Stored separately from the decision gate in
  * .openlore/memory/notes.json so it never touches the commit pipeline.
  */
 export interface AnchoredMemory {
-  /** Stable 8-char content-derived id. */
+  /** Stable 8-char id derived from content + resolved anchors (content-anchor dedup). */
   id: string;
   kind: 'note';
   content: string;
@@ -553,6 +572,23 @@ export interface AnchoredMemory {
   recordedAt: string;
   /** Free-form retrieval tags (optional). */
   tags?: string[];
+  /**
+   * Caller-supplied classification from the closed {@link MemoryType} set; absent ⇒ `note`.
+   * (add-bitemporal-typed-memory-operations) Never inferred.
+   */
+  type?: MemoryType;
+  /**
+   * Bitemporal valid-time marker: the `HEAD` commit SHA at record time, read from git
+   * (deterministic, no LLM). Absent for legacy memories ⇒ treated as always-valid.
+   * (add-bitemporal-typed-memory-operations)
+   */
+  validFromCommit?: string;
+  /** Transaction-time of invalidation (ISO); set when this memory is superseded. */
+  invalidatedAt?: string;
+  /** The `HEAD` commit SHA at the time this memory was invalidated. */
+  invalidatedByCommit?: string;
+  /** Id of the prior memory this one supersedes (provenance for the lifecycle op). */
+  supersedes?: string;
 }
 
 /** Persistent store written to .openlore/memory/notes.json */

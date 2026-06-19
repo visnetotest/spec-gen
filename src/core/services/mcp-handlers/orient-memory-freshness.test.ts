@@ -30,6 +30,7 @@ import { join } from 'node:path';
 import { EdgeStore } from '../edge-store.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
 import { handleOrient } from './orient.js';
+import { handleRemember } from './memory.js';
 import type { FunctionNode } from '../../analyzer/call-graph.js';
 
 let root: string;
@@ -129,5 +130,20 @@ describe('orient — decision freshness & no-silent-stale guarantee', () => {
     expect(drift).toBeDefined();
     expect(drift!.freshness).toBe('drifted');
     expect(drift!.verify).toBe(true);
+  });
+
+  // add-bitemporal-typed-memory-operations: contradiction surfacing at the entry tool.
+  it('surfaces two authoritative notes on the same symbol as unreconciledMemories', async () => {
+    // An approved decision on src/foo.ts brings the file into orient's scope (search is
+    // mocked empty here); the two contradicting notes anchor to fooHandler in that file.
+    await writeDecisions([{ id: 'd1', title: 'fooHandler is owned here', affectedFiles: ['src/foo.ts'] }]);
+    await handleRemember(root, 'fooHandler returns the count', [{ symbol: 'fooHandler', file: 'src/foo.ts' }]);
+    await handleRemember(root, 'fooHandler returns the index', [{ symbol: 'fooHandler', file: 'src/foo.ts' }]);
+    const r = (await handleOrient(root, 'work on fooHandler')) as {
+      unreconciledMemories?: Array<{ symbol: string; memberIds: string[] }>;
+    };
+    expect(r.unreconciledMemories).toBeDefined();
+    expect(r.unreconciledMemories!.length).toBeGreaterThanOrEqual(1);
+    expect(r.unreconciledMemories![0].memberIds.length).toBeGreaterThanOrEqual(2);
   });
 });

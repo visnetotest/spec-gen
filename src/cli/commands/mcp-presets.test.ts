@@ -170,8 +170,13 @@ describe('tools/list payload budget (spec-28)', () => {
   // PageRank ranking mode (`rankBy` on orient + `rankBy`/`tokenBudget` on get_minimal_context;
   // spec: add-personalized-pagerank-context-ranking) was added — a ranking MODE on existing
   // tools, no new tool, default surface count unchanged. Conscious decision, not silent drift.
+  // Full bumped 55_000 → 57_000 when bitemporal/typed/lifecycle memory ops (spec:
+  // add-bitemporal-typed-memory-operations) added four opt-in params — `type`/`supersedes` on
+  // remember and `asOf`/`changedSince`/`type` on recall — riding existing tools (no new tool,
+  // default/minimal surfaces unchanged). Descriptions were trimmed first; the residual ~650 B is
+  // the genuine cost of the new capability. Conscious decision, not silent drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({})).toBeLessThan(55_000);
+    expect(payloadBytes({})).toBeLessThan(57_000);
   });
 
   it('navigation preset stays lean (the low-overhead surface that wins the benchmark)', () => {

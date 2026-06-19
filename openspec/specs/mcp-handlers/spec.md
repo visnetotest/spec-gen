@@ -226,6 +226,106 @@ The system SHALL rank recalled memories using a deterministic field-weighted sco
 > Decision recorded: 08005eb9
 > Date: 2026-06-18
 
+### Requirement: BitemporalMemoryValidity
+
+Every memory SHALL carry, in addition to its transaction time (`recordedAt`), a deterministic
+**valid-from** marker: `validFromCommit`, the `HEAD` commit SHA at the time the memory was recorded,
+read from git with no LLM. When a memory is superseded it SHALL gain `invalidatedAt` and
+`invalidatedByCommit`. The `recall` tool SHALL accept an optional `asOf` (commit-ish) and return the
+memories authoritative as of that commit — recorded at or before `asOf` and not invalidated at or
+before it — comparing valid-time via git ancestry (`merge-base --is-ancestor`), not wall-clock,
+reusing the existing relevance selection unchanged. A memory whose valid-time markers cannot be
+placed on the commit axis is handled fail-closed: an absent `validFromCommit` reads as recorded
+before any commit (legacy memories stay always-valid), but an invalidated memory with no
+`invalidatedByCommit` is treated as already-retired and excluded from every `asOf` window rather than
+revived into a result we cannot prove it belonged to.
+
+#### Scenario: A memory records its valid-from commit
+- **GIVEN** a `remember` call made while `HEAD` is at commit C
+- **WHEN** the memory is persisted
+- **THEN** the stored memory's `validFromCommit` equals C
+
+#### Scenario: As-of recall reflects history
+- **GIVEN** a memory superseded at commit C
+- **WHEN** `recall` is invoked with `asOf` earlier than C
+- **THEN** the memory is returned as authoritative; and with `asOf` at or after C it is absent
+
+> Decision recorded: 48771c59
+> Date: 2026-06-18
+
+### Requirement: ExplicitMemorySupersession
+
+The `remember` tool SHALL accept `supersedes: <memoryId>`, marking the referenced prior memory as
+invalidated. Supersession SHALL be an explicit caller act, not an inferred merge. An invalidated
+memory SHALL NOT appear in any authoritative recall path (per the `AuthoritativeRecallInvariant`),
+but SHALL remain retrievable via `asOf` for history.
+
+#### Scenario: Superseding retires the prior memory
+- **GIVEN** memory M1 and a later `remember` call declaring `supersedes: M1`
+- **WHEN** `recall` runs without `asOf`
+- **THEN** M1 does not appear in the authoritative set and the new memory does
+
+### Requirement: DeterministicContradictionSurfacing
+
+When two authoritative (`fresh`, non-invalidated) memories resolve to the same anchor symbol,
+`recall` and `orient` SHALL surface the pair as `unreconciled` — a conclusion-shaped signal that two
+grounded memories describe the same symbol and should be reconciled or one superseded. The system
+SHALL NOT silently present both as independent fact, and SHALL NOT use an LLM to choose between them.
+The signal SHALL be a pure set intersection over symbol-level anchors (file-level anchors are too
+coarse to count).
+
+The detection SHALL reflect the recall's active scope: it is computed over the set the query already
+selected, so a `task` (score) or `type` filter narrows the memories considered (e.g. a cross-type
+contradiction is not flagged under a `type` filter). An unfiltered `recall` (no task, no type) is the
+store-wide guarantee. `orient` surfaces the signal scoped to the task's relevant and decision-governed
+files and only when the call-graph view is available — without an edge store it cannot verify
+freshness, so it surfaces nothing rather than guess; `recall` is the unscoped path.
+
+#### Scenario: Two fresh memories on one symbol are flagged
+- **GIVEN** two authoritative memories whose anchors resolve to the same symbol
+- **WHEN** an unfiltered `recall`, or `orient` with a graph view, produces its response
+- **THEN** the pair is reported as `unreconciled`, not served as two independent authoritative facts
+
+### Requirement: TypedMemoryClassification
+
+The `remember` tool SHALL accept an optional `type` from a fixed, closed set — `invariant`, `gotcha`,
+`rationale`, `convention`, `preference`, `todo`, `note` — defaulting to `note` when absent or
+unrecognized. The type SHALL be a caller-supplied label; the system SHALL NOT infer, classify, or
+override it. The `recall` tool SHALL accept an optional `type` filter that restricts results to
+memories of that type. Legacy memories with no stored type SHALL behave as `note`.
+
+#### Scenario: Type is stored as given and filters recall
+- **GIVEN** a `remember` call with `type: "invariant"` and another with `type: "todo"`
+- **WHEN** `recall` is invoked with a `type: "invariant"` filter
+- **THEN** only the `invariant` memory is returned, and an absent/unknown type reads as `note`
+
+### Requirement: ChangedSinceRecall
+
+The `recall` tool SHALL accept an optional `changedSince` (commit-ish) that returns the memories
+recorded or invalidated after that commit, reusing the bitemporal fields with no new relevance model.
+With no `task` the result is ordered most-recent first (record-time descending); when a `task` is
+given its relevance score ranks first and record-time is the tiebreak. The boundary is exclusive: a
+memory recorded *at* `changedSince` is not returned. A memory whose record or invalidation commit
+cannot be placed on the commit axis (no `validFromCommit` / `invalidatedByCommit`) is fail-closed out
+of the differential rather than guessed in. This is the differential companion to `asOf`.
+
+#### Scenario: Differential recall returns only later changes
+- **GIVEN** memory M1 recorded at commit C1 and memory M2 recorded at commit C2 (C2 after C1)
+- **WHEN** `recall` is invoked with `changedSince` set to C1
+- **THEN** M2 is returned and M1 is not
+
+### Requirement: ContentAnchorDedup
+
+The `remember` tool SHALL key a memory's identity on a hash of its content together with its resolved
+anchors, so that re-recording the same content about the same code updates the existing memory in
+place rather than creating a second record. Dedup SHALL be exact hash equality; the system SHALL NOT
+merge distinct memories or judge relative importance.
+
+#### Scenario: Re-recording identical content does not duplicate
+- **GIVEN** a memory recorded with content X and anchor A
+- **WHEN** `remember` is called again with the same content X and anchor A
+- **THEN** the store contains one memory for (X, A); the same content on a different anchor B is distinct
+
 ## Decisions
 
 ### Build the MCP live-data test harness as an integration-only, behavior-neutral verification layer

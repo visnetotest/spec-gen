@@ -20,8 +20,8 @@
 | Finding spec requirements by meaning | `search_specs` |
 | Checking spec coverage before starting a feature | `audit_spec_coverage` |
 | Recording an architectural decision before writing code | `record_decision` |
-| Persisting a durable, code-anchored fact for later sessions | `remember` (opt-in `memory` preset) — anchors a note to a symbol/file so it self-invalidates |
-| Recalling what's known about code you're touching | `recall` (opt-in `memory` preset) — returns memories with a freshness verdict; never serves orphaned ones as authoritative |
+| Persisting a durable, code-anchored fact for later sessions | `remember` (opt-in `memory` preset) — anchors a note to a symbol/file so it self-invalidates; optional `type` (invariant/gotcha/rationale/…, default note) and `supersedes=<id>` to retire a prior memory (kept queryable via `asOf`); re-recording the same content+anchor updates in place |
+| Recalling what's known about code you're touching | `recall` (opt-in `memory` preset) — returns memories with a freshness verdict (never serves orphaned ones as authoritative); two authoritative memories on one symbol surface in `unreconciled`; optional `asOf`/`changedSince` (commit-ish) for history and a `type` filter |
 
 For all other cases (reading a file, grepping, listing files) use native tools directly.
 

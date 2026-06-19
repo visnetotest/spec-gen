@@ -31,8 +31,9 @@ import {
   compositeScore,
   buildReason,
 } from './semantic.js';
-import { memoryFreshness, decisionAnchors } from '../../decisions/anchor.js';
+import { memoryFreshness, decisionAnchors, findUnreconciled, type AnchoredItem, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
+import { loadMemoryStore } from '../../decisions/memory-store.js';
 import type { MemoryFreshness } from '../../../types/index.js';
 
 // ============================================================================
@@ -416,6 +417,10 @@ export async function handleOrient(
   // authoritative context (the bullet-proof guarantee). The agent must re-anchor
   // or sync them rather than act on them.
   let staleDecisions: DecisionSummary[] | undefined;
+  // Two authoritative memories on the same symbol — flagged, never double-served
+  // (add-bitemporal-typed-memory-operations). Computed across the decisions surfaced
+  // here plus the task-relevant `remember` notes.
+  let unreconciledMemories: UnreconciledGroup[] | undefined;
   if (!lean) try {
     const { loadDecisionStore, INACTIVE_STATUSES } = await import('../../decisions/store.js');
     const store = await loadDecisionStore(absDir);
@@ -430,12 +435,13 @@ export async function handleOrient(
       if (d.status === 'approved') return true;
       return false;
     });
+    // Compute a freshness verdict per decision when the graph is available.
+    // Without an edge store we cannot verify, so we surface decisions unannotated
+    // rather than falsely flagging them stale.
+    const es = llmCtx?.edgeStore;
+    const view = es ? makeFreshnessView(es, absDir) : null;
+    const contradictionItems: AnchoredItem[] = [];
     if (active.length > 0) {
-      // Compute a freshness verdict per decision when the graph is available.
-      // Without an edge store we cannot verify, so we surface decisions unannotated
-      // rather than falsely flagging them stale.
-      const es = llmCtx?.edgeStore;
-      const view = es ? makeFreshnessView(es, absDir) : null;
       const authoritative: DecisionSummary[] = [];
       const stale: DecisionSummary[] = [];
       for (const d of active) {
@@ -445,17 +451,35 @@ export async function handleOrient(
           status: d.status,
           affectedDomains: d.affectedDomains,
         };
+        const anchors = decisionAnchors(d);
         if (view) {
-          const f = memoryFreshness(decisionAnchors(d), view);
+          const f = memoryFreshness(anchors, view);
           base.freshness = f.freshness;
           if (f.freshness === 'drifted') base.verify = true;
           if (f.freshness === 'orphaned') { stale.push(base); continue; }
+          contradictionItems.push({ id: d.id, anchors, freshness: f.freshness });
         }
         authoritative.push(base);
       }
       if (authoritative.length > 0) pendingDecisions = authoritative;
       if (stale.length > 0) staleDecisions = stale;
     }
+    // Fold in `remember` notes anchored to the files this task touches — or that a
+    // surfaced decision governs — so a note↔note or note↔decision contradiction on a
+    // relevant symbol is surfaced at the default entry tool. Gated on the graph view.
+    const scopeFiles = new Set<string>(relevantFileSet);
+    for (const d of active) for (const f of d.affectedFiles) scopeFiles.add(f);
+    if (view && scopeFiles.size > 0) {
+      const memStore = await loadMemoryStore(absDir);
+      for (const m of memStore.memories) {
+        if (m.invalidatedAt) continue;
+        if (!m.anchors.some((a) => scopeFiles.has(a.filePath))) continue;
+        const f = memoryFreshness(m.anchors, view);
+        contradictionItems.push({ id: m.id, anchors: m.anchors, freshness: f.freshness, invalidated: false });
+      }
+    }
+    const groups = findUnreconciled(contradictionItems);
+    if (groups.length > 0) unreconciledMemories = groups;
   } catch {
     // non-fatal — decisions feature may not be initialised
   }
@@ -720,6 +744,7 @@ export async function handleOrient(
     ...(matchingSpecs !== undefined ? { matchingSpecs } : {}),
     ...(pendingDecisions !== undefined ? { pendingDecisions } : {}),
     ...(staleDecisions !== undefined ? { staleDecisions } : {}),
+    ...(unreconciledMemories !== undefined ? { unreconciledMemories } : {}),
     ...(governingDecisions !== undefined ? { governingDecisions } : {}),
     ...(provenance !== undefined ? { provenance } : {}),
     ...(changeCoupling !== undefined ? { changeCoupling } : {}),
