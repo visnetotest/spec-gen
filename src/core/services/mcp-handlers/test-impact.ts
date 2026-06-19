@@ -129,6 +129,9 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   }
 
   if (seeds.length === 0) {
+    // Honesty: if federation was opted into, say why no cross-repo selection ran
+    // rather than silently omitting the federation block an active scope implies.
+    const federationRequested = input.federation === true || (input.federationRepos?.length ?? 0) > 0;
     return {
       changed: changedFiles,
       selectedTests: [],
@@ -136,6 +139,7 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
         ? 'No matching production functions found for the given symbols.'
         : `No changed production functions vs ${baseRef}${defaultedToHead ? ' (defaulted — no changedSymbols or diffRef was given)' : ''}. Nothing has changed, the diff touches only non-code files, or analyze_codebase is stale.`,
       ...(defaultedToHead ? { note: 'Called without changedSymbols/diffRef — diffed the working tree against HEAD. Pass changedSymbols or diffRef to target a specific change.' } : {}),
+      ...(federationRequested ? { federationNote: 'Federation scope was requested, but no changed production symbol resolved in the home repo — cross-repo test selection keys off the home repo\'s changed published symbols, so nothing was propagated. Pass changedSymbols (or a diffRef with code changes) to select across the fleet.' } : {}),
       soundness: { posture: 'over-approximate', caveats: ['No seeds resolved — nothing to select.'] },
       coverage: { languages: [], testDetection: 'none' as const },
     };
@@ -258,7 +262,7 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   let federationBlock: Record<string, unknown> | undefined;
   const fedScope = resolveFederationScope(absDir, { federation: input.federation, federationRepos: input.federationRepos });
   if (fedScope.active) {
-    const { tests: crossRepoTests, coverage } = await findCrossRepoTests(fedScope, seeds.map(s => s.name), { maxDepth });
+    const { tests: crossRepoTests, coverage } = await findCrossRepoTests(fedScope, seeds.map(s => s.name), { maxDepth, directResolvedOnly: input.directResolvedOnly });
     federationBlock = {
       crossRepoTests: crossRepoTests.map(t => ({ repo: t.repo, test: t.test.name, file: t.test.file, viaSymbol: t.viaSymbol, confidence: t.depth <= 1 ? 'high' : t.depth <= 3 ? 'medium' : 'low' })),
       crossRepoTestCount: crossRepoTests.length,

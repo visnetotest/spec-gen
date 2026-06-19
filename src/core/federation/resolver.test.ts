@@ -167,6 +167,61 @@ describe('findCrossRepoTests', () => {
     expect(res.tests).toHaveLength(0);
   });
 
+  // Regression: with several changed symbols, each selected test must be attributed
+  // to the SPECIFIC symbol whose consumer reached it — not a blanket join of every
+  // symbol the repo touches. The seed→symbol grouping carries the attribution.
+  it('attributes each cross-repo test to the exact symbol that reached it (multi-symbol)', async () => {
+    // Consumer where sayHi → greet (external, tested by testHi) and sayLo →
+    // farewell (external, tested by testLo) — two independent symbol→test chains.
+    const sayHi = node('src/h.ts::sayHi', 'sayHi', 'src/h.ts');
+    const sayLo = node('src/l.ts::sayLo', 'sayLo', 'src/l.ts');
+    const greetExt = node('external::greet', 'greet', 'external', { isExternal: true });
+    const farewellExt = node('external::farewell', 'farewell', 'external', { isExternal: true });
+    const testHi = node('src/h.test.ts::testHi', 'testHi', 'src/h.test.ts', { isTest: true });
+    const testLo = node('src/l.test.ts::testLo', 'testLo', 'src/l.test.ts', { isTest: true });
+    const prodEdges = [
+      edge('src/h.ts::sayHi', 'external::greet', 'greet', 'external'),
+      edge('src/l.ts::sayLo', 'external::farewell', 'farewell', 'external'),
+    ];
+    const multi = makeRepoIndex('multi', [sayHi, sayLo], prodEdges, {
+      nodes: [sayHi, sayLo, greetExt, farewellExt, testHi, testLo],
+      edges: [
+        ...prodEdges,
+        edge('src/h.test.ts::testHi', 'src/h.ts::sayHi', 'sayHi', 'name_only'),
+        edge('src/l.test.ts::testLo', 'src/l.ts::sayLo', 'sayLo', 'name_only'),
+      ],
+    });
+    addRepo(producer, multi, { name: 'consumer-multi' });
+    const scope = resolveFederationScope(producer, { federation: true });
+    const res = await findCrossRepoTests(scope, ['greet', 'farewell']);
+    const byTest = Object.fromEntries(res.tests.map(t => [t.test.name, t.viaSymbol]));
+    expect(byTest['testHi']).toBe('greet');
+    expect(byTest['testLo']).toBe('farewell');
+  });
+
+  // directResolvedOnly must reach the cross-repo walk: a test that reaches the
+  // consumer call site ONLY through a synthesized dynamic-dispatch edge is selected
+  // by default but dropped under strict (directly-resolved-only) selection.
+  it('honors directResolvedOnly across the repo boundary (drops synthesized-only reach)', async () => {
+    const useGreet = node('src/u.ts::useGreet', 'useGreet', 'src/u.ts');
+    const greetExt = node('external::greet', 'greet', 'external', { isExternal: true });
+    const testSynth = node('src/u.test.ts::testSynth', 'testSynth', 'src/u.test.ts', { isTest: true });
+    const synthEdge: CallEdge = {
+      callerId: 'src/u.test.ts::testSynth', calleeId: 'src/u.ts::useGreet',
+      calleeName: 'useGreet', confidence: 'synthesized',
+    };
+    const synthRepo = makeRepoIndex('synth', [useGreet], [edge('src/u.ts::useGreet', 'external::greet', 'greet', 'external')], {
+      nodes: [useGreet, greetExt, testSynth],
+      edges: [edge('src/u.ts::useGreet', 'external::greet', 'greet', 'external'), synthEdge],
+    });
+    addRepo(producer, synthRepo, { name: 'consumer-synth' });
+    const scope = resolveFederationScope(producer, { federation: true });
+    const loose = await findCrossRepoTests(scope, ['greet']);
+    expect(loose.tests.map(t => t.test.name)).toContain('testSynth');
+    const strict = await findCrossRepoTests(scope, ['greet'], { directResolvedOnly: true });
+    expect(strict.tests.map(t => t.test.name)).not.toContain('testSynth');
+  });
+
   // Regression: the real analyzer associates a test file with the production it
   // covers via an import-based `tested_by` edge — NOT a test *function* node that
   // calls the production (an inline `it(...)` block produces no callable symbol).

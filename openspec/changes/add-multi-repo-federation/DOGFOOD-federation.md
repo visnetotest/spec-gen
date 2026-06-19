@@ -125,3 +125,58 @@ self-consults the home repo; `find_dead_code --federation` keeps `greet` live-vi
 `farewell` stays high-confidence dead; `select_tests greet --federation` selects the consumer test
 across the boundary; `find_path runApp→greet --federation` returns the cross-repo producer + bridge.
 Full suite green after the fixes.
+
+## Adversarial re-dogfood (2026-06-19, session 3)
+
+Four independent adversarial passes (registry/CLI, cross-repo resolution, test-selection/pathfinding,
+docs/spec) over freshly `openlore analyze`-built repos driven through the real `dispatchTool` path.
+The four headline scenarios and all session-2 fixes re-verified green; six further gaps surfaced and
+were fixed with regression tests. Full suite green afterward: **3921 passed, 2 skipped**.
+
+1. **`federation list` / `remove` crashed on a corrupt manifest** (`federation.ts`). Unlike `add`, the
+   `list` and `remove` actions had no try/catch, so a malformed `.openlore/federation.json` made
+   `loadRegistry` throw an *uncaught* exception — a raw Node stack trace with no clean exit code. Both
+   now print `✗ <message>` and set `process.exitCode = 1` (verified end-to-end via the real CLI binary;
+   regression test in `federation.test.ts`).
+
+2. **`select_tests --federation` mis-attributed `viaSymbol` on multi-symbol changes** (`resolver.ts`
+   `findCrossRepoTests`). With more than one changed symbol, every selected test in a repo was labeled
+   with a blanket join of *all* symbols that repo consumed (e.g. `"farewell,greet"`) instead of the
+   specific symbol whose consumer reached it. Seeds are now grouped per published symbol and walked
+   separately, so each cross-repo test is attributed to the exact symbol that selected it
+   (`testHi → greet`, `testLo → farewell`). Regression test in `resolver.test.ts`.
+
+3. **`find_dead_code --federation` silently truncated the consumer list** (`reachability.ts`).
+   `analyze_impact` discloses `federation.truncated` when the 200-consumer cap drops consumers, but
+   `find_dead_code` omitted it — a silent under-report violating the coverage-honesty invariant. It now
+   threads `batch.truncated` (verified on a real 210-caller consumer: `consumers: 200, truncated: 11`).
+
+4. **`select_tests --federation` ignored `directResolvedOnly` across the boundary** (`test-impact.ts` →
+   `resolver.ts`). Local selection honors the strict flag; the cross-repo walk traversed synthesized
+   dynamic-dispatch edges unconditionally. `findReachingTests` now accepts `directResolvedOnly` and the
+   handler threads it, so a test reaching a consumer call site only through a synthesized edge is dropped
+   under strict selection — matching the single-repo semantics. Regression test in `resolver.test.ts`.
+
+5. **`select_tests --federation` silently dropped the federation surface when no local seed resolved**
+   (`test-impact.ts`). Opting into federation but resolving zero changed symbols returned no federation
+   block at all. It now returns a `federationNote` explaining that cross-repo selection keys off the home
+   repo's changed published symbols, so nothing was propagated. Regression test in `test-impact.test.ts`.
+
+6. **`find_path` `name:` selector was a half-wired dead path** (`pathfind.ts`). The federation
+   selector-prefix regex listed `name:`, but `resolveEndpoint` has no `name:` branch, so `to:"name:greet"`
+   produced a strictly *worse* answer than the bare `to:"greet"` (empty federation block + bare error).
+   `name:` is now treated as an explicit symbol name (stripped, like a bare name), so `name:greet`
+   resolves to the same cross-repo producer + bridge as `greet` (verified end-to-end).
+
+**Docs.** Fixed four stale "50 tools" figures the count guard could not see — its regex matched only a
+bare `\d+ tools`, so `50 MCP tools` / `50 graph-native tools` (README) and `all 50` (mcp-tools.md) drifted
+while the surface grew to 58. Corrected to 58 and broadened the guard regex to allow one adjective between
+the count and "tools" so the phrasing is guarded going forward. Added an **Honest limits** section to
+`docs/federation.md`: staleness is only as fresh as each peer's last real `analyze` (the analyze TTL can
+mask in-window drift — use `--force`), and a consumer that locally shadows an imported name resolves the
+call to its local node, so it won't appear as a cross-repo consumer (a disclosed false-negative).
+
+**Out of scope (pre-existing, flagged not fixed):** `find_path`'s non-federation path-chain emits a
+broken relative file path (`relative(absDir, repoRelativePath)`, present since the original `find_path`
+feature, commit 4e42e5e); the `--minimal` help says "5 tools" while `MINIMAL_TOOLS` holds 6; the
+`analyze` recency TTL can mask peer drift fleet-wide (now documented as a federation limit).

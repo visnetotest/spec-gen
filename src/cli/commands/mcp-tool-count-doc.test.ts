@@ -28,8 +28,11 @@ describe('documented MCP tool count', () => {
 
   it.each(GUARDED_DOCS)('the "N tools" full-surface count in %s matches TOOL_DEFINITIONS.length', (rel) => {
     const text = readFileSync(join(repoRoot, rel), 'utf8');
-    // "50 tools" but not "7-tool" (hyphenated, preset sizes) — word-boundary plural.
-    const counts = [...text.matchAll(/(\d+)\s+tools\b/g)].map(m => Number(m[1]));
+    // "58 tools", and also "58 MCP tools" / "58 graph-native tools" — one optional
+    // adjective word is allowed between the count and "tools" (those phrasings drifted
+    // to a stale "50" once precisely because a bare `\d+\s+tools` regex skipped them).
+    // Still excludes "7-tool" (hyphenated preset sizes) and "tool-calls" (no plural).
+    const counts = [...text.matchAll(/(\d+)\s+(?:[A-Za-z][\w-]*\s+)?tools\b/g)].map(m => Number(m[1]));
     expect(counts.length, `expected at least one "N tools" mention in ${rel}`).toBeGreaterThan(0);
     for (const n of counts) {
       expect(n, `${rel} cites "${n} tools" but the live surface is ${expected}; update the doc (and the byte/token figures) when the tool count changes`).toBe(expected);

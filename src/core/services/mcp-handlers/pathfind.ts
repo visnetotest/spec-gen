@@ -163,8 +163,11 @@ export async function handleFindPath(
   let federationBlock: Record<string, unknown> | undefined;
   const fedScope = resolveFederationScope(absDir, { federation: opts.federation, federationRepos: opts.federationRepos });
   if (fedScope.active) {
-    const hasSelectorPrefix = /^(role:|landmark:|file:|name:)/.test(to);
-    const toName = hasSelectorPrefix ? (toRes.kind === 'name' ? toRes.nodes[0]?.name : undefined) : to.replace(/^name:/, '');
+    // A kind-selector (role:/landmark:/file:) has no single symbol name unless it
+    // happened to resolve to one node; an explicit `name:foo` (or a bare name) is a
+    // symbol name we strip and use directly for the cross-repo producer lookup.
+    const hasKindSelector = /^(role:|landmark:|file:)/.test(to);
+    const toName = hasKindSelector ? (toRes.kind === 'name' ? toRes.nodes[0]?.name : undefined) : to.replace(/^name:/, '');
     const bridgeCallers = toName && ctx.edgeStore
       ? [...new Set(ctx.edgeStore.getExternalConsumers(toName).map(e => e.callerId))]
           .map(id => ctx.edgeStore!.getNode(id)?.name ?? id)

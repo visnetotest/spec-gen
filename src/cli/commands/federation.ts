@@ -48,10 +48,17 @@ export const federationCommand = new Command('federation')
       .description('Remove a repository from the federation by name or path')
       .argument('<nameOrPath>', 'Repo name or path to remove')
       .action((nameOrPath: string) => {
-        const removed = removeRepo(process.cwd(), nameOrPath);
-        if (removed) console.log(`✓ Removed "${nameOrPath}" from the federation.`);
-        else {
-          console.error(`✗ No registered repo matched "${nameOrPath}".`);
+        try {
+          const removed = removeRepo(process.cwd(), nameOrPath);
+          if (removed) console.log(`✓ Removed "${nameOrPath}" from the federation.`);
+          else {
+            console.error(`✗ No registered repo matched "${nameOrPath}".`);
+            process.exitCode = 1;
+          }
+        } catch (err) {
+          // A corrupt manifest makes loadRegistry throw; surface it cleanly
+          // instead of a raw stack trace (matches `add`'s error handling).
+          console.error(`✗ ${(err as Error).message}`);
           process.exitCode = 1;
         }
       }),
@@ -61,16 +68,23 @@ export const federationCommand = new Command('federation')
       .alias('ls')
       .description('List federated repositories and their index state')
       .action(() => {
-        const repos = listRepos(process.cwd());
-        if (repos.length === 0) {
-          console.log('No federated repos. Add one with: openlore federation add <path>');
-          return;
-        }
-        console.log(`Federation registry (${repos.length} repo${repos.length === 1 ? '' : 's'}) — home: ${resolve(process.cwd())}\n`);
-        for (const r of repos) {
-          const state = evaluateRepoState(r);
-          console.log(`  ${r.name.padEnd(20)} ${STATE_LABEL[state] ?? state}`);
-          console.log(`  ${''.padEnd(20)} ${r.path}`);
+        try {
+          const repos = listRepos(process.cwd());
+          if (repos.length === 0) {
+            console.log('No federated repos. Add one with: openlore federation add <path>');
+            return;
+          }
+          console.log(`Federation registry (${repos.length} repo${repos.length === 1 ? '' : 's'}) — home: ${resolve(process.cwd())}\n`);
+          for (const r of repos) {
+            const state = evaluateRepoState(r);
+            console.log(`  ${r.name.padEnd(20)} ${STATE_LABEL[state] ?? state}`);
+            console.log(`  ${''.padEnd(20)} ${r.path}`);
+          }
+        } catch (err) {
+          // A corrupt manifest makes loadRegistry throw; surface it cleanly
+          // instead of a raw stack trace (matches `add`'s error handling).
+          console.error(`✗ ${(err as Error).message}`);
+          process.exitCode = 1;
         }
       }),
   );

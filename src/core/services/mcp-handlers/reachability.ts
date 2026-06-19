@@ -331,6 +331,8 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       keptAliveCount: liveViaFederation.length,
       reposConsulted: batch.coverage.reposConsulted.map(r => r.name),
       reposSkipped: batch.coverage.reposSkipped.map(r => ({ name: r.name, state: r.state, reason: r.reason })),
+      // Disclose the consumer cap, matching analyze_impact — never silently drop.
+      ...(batch.truncated > 0 ? { truncated: batch.truncated } : {}),
       caveats: batch.coverage.caveats,
     };
   } else if (fedScope.active) {

@@ -99,6 +99,11 @@ Cross-repo resolution is deterministic: a consumer's external call site is match
 
 The capability is **opt-in**: the registry-status tool `federation_status` and the federation scope are exposed only under `openlore mcp --preset federation`. The default and `minimal` surfaces register no federation capability. See [docs/cli-reference.md](cli-reference.md#federation-multi-repo) for the full CLI and index-state semantics.
 
+### Honest limits
+
+- **Staleness is only as fresh as each peer's last real `analyze`.** A peer is flagged `stale` by comparing its registered fingerprint against the one written to `.openlore/analysis/fingerprint.json` — which only changes when `openlore analyze` actually rebuilds. If you edit a peer and re-run `analyze` inside its recency window (the analyze TTL short-circuits the rebuild), the fingerprint does not move and the peer still reads as `indexed`. Run `openlore analyze --force` in a peer to be certain its index — and therefore its federation freshness — is current.
+- **Cross-repo resolution matches on `external`-confidence call edges.** If a consumer repo *both* imports a peer's symbol *and* defines its own local symbol of the same name, the analyzer resolves the call to the local node, so that consumer will not appear as a cross-repo consumer (a quiet false-negative, the inverse of the disclosed cross-package name-collision risk).
+
 ## What's next (forward-looking)
 
 A future version of OpenLore will ship a **hosted, manifest-merging federation index** that reads many of the manifests described above and answers cross-repo `orient()` questions across an organization without each consumer needing every peer's full `.openlore` index on local disk — cross-repo call chains, event producer/consumer maps, and service-to-service data flow. Because each repo self-describes in this stable shape, that index stays a thin merger. It complements the local registry above (which already covers the local-first case); the manifest emitter and validator on this page are its inputs.

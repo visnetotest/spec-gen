@@ -241,6 +241,7 @@ export function findReachingTests(
   cg: SerializedCallGraph,
   seedIds: string[],
   maxDepth = 12,
+  opts: { directResolvedOnly?: boolean } = {},
 ): Array<{ id: string; name: string; file: string; depth: number }> {
   const nodeById = new Map<string, FunctionNode>(cg.nodes.map(n => [n.id, n]));
   const nameToIds = new Map<string, string[]>();
@@ -261,6 +262,10 @@ export function findReachingTests(
       testedByOf.get(e.callerId)!.push({ name: e.calleeName, file });
       continue;
     }
+    // Strict mode: ignore synthesized dynamic-dispatch edges so the cross-repo
+    // walk rests only on directly-resolved calls, matching the single-repo
+    // handler's `directResolvedOnly` (tested_by associations are still honored).
+    if (opts.directResolvedOnly && e.confidence === 'synthesized') continue;
     let calleeId: string | undefined = e.calleeId && nodeById.has(e.calleeId) ? e.calleeId : undefined;
     if (!calleeId) {
       const byName = nameToIds.get(e.calleeName);
@@ -324,7 +329,7 @@ export interface CrossRepoTest {
 export async function findCrossRepoTests(
   scope: FederationScope,
   symbols: string[],
-  opts: { maxDepth?: number } = {},
+  opts: { maxDepth?: number; directResolvedOnly?: boolean } = {},
 ): Promise<{ tests: CrossRepoTest[]; coverage: FederationCoverage }> {
   const wanted = [...new Set(symbols.filter(Boolean))];
   const maxDepth = Math.max(1, opts.maxDepth ?? 12);
@@ -343,23 +348,23 @@ export async function findCrossRepoTests(
       continue;
     }
     reposConsulted.push(status);
-    // Consumer seeds: call sites in this repo that reference a wanted symbol as an
-    // external reference. Map each consumer caller id → the symbol it consumes, so
-    // a reached test can be attributed back to the published symbol that selected it.
-    const symbolByCaller = new Map<string, string>();
+    // Consumer seeds, grouped by the published symbol they consume: each external
+    // call site in this repo to a wanted symbol. Walking each symbol's seeds
+    // separately attributes every reached test to the *specific* symbol whose
+    // consumer reached it — not a blanket join of all symbols this repo touches.
+    const seedsBySymbol = new Map<string, string[]>();
     for (const edge of cg.edges) {
-      if (edge.confidence === 'external' && wantedSet.has(edge.calleeName) && !symbolByCaller.has(edge.callerId)) {
-        symbolByCaller.set(edge.callerId, edge.calleeName);
-      }
+      if (edge.confidence !== 'external' || !wantedSet.has(edge.calleeName)) continue;
+      const seeds = seedsBySymbol.get(edge.calleeName) ?? [];
+      if (!seeds.includes(edge.callerId)) seeds.push(edge.callerId);
+      seedsBySymbol.set(edge.calleeName, seeds);
     }
-    if (symbolByCaller.size === 0) continue;
-    const seedIds = [...symbolByCaller.keys()];
-    const reached = findReachingTests(cg, seedIds, maxDepth);
-    // Attribute each test to the nearest seed's symbol (seeds may consume several;
-    // we record the symbol of the consumer set that reached it — best-effort).
-    const viaSymbol = wanted.length === 1 ? wanted[0] : [...new Set(symbolByCaller.values())].sort().join(',');
-    for (const t of reached) {
-      tests.push({ repo: entry.name, repoPath: entry.path, test: { name: t.name, file: t.file }, viaSymbol, depth: t.depth });
+    if (seedsBySymbol.size === 0) continue;
+    for (const [viaSymbol, seedIds] of seedsBySymbol) {
+      const reached = findReachingTests(cg, seedIds, maxDepth, { directResolvedOnly: opts.directResolvedOnly });
+      for (const t of reached) {
+        tests.push({ repo: entry.name, repoPath: entry.path, test: { name: t.name, file: t.file }, viaSymbol, depth: t.depth });
+      }
     }
   }
 
