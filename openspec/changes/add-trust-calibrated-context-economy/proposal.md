@@ -1,8 +1,9 @@
 # Trust-calibrated context economy: cut mistakes and tokens together
 
-> Status: IMPLEMENTED (recall path) — shipped on branch `feat/recall-deterministic-ranking` (PR #161). Ships in **v2.1.0**.
-> Grounding certificates + verified-current + budget-aware recall are live and tested. Two scoped
-> deviations from the original draft are recorded under "Implementation status" below.
+> Status: FULLY IMPLEMENTED. Recall path (certificates + verified-current + budget-aware recall) shipped
+> on `feat/recall-deterministic-ranking` (PR #161, v2.1.0); the honest-scorecard measurement (item 4)
+> shipped in PR #168 (ADR-0018). Two scoped deviations from the original draft are recorded under
+> "Implementation status" below.
 > Change 3 of the memory-integrity set (`harden-memory-integrity-invariant`,
 > `add-bitemporal-typed-memory-operations`). Builds directly on the authoritative-recall invariant.
 
@@ -137,6 +138,9 @@ Two scoped deviations from the original draft (decision `61c2ea7d`):
    `add-agent-onboarding-connect` work). Certificates/budget apply to `recall`; they extend to `orient`
    if/when it surfaces memory (e.g. via `add-cross-agent-intent-handoff`).
 
-Deferred as designed: the `bench:agent` re-read-avoidance measurement (proposal item 4) — the
-certificate/verified-current lever is shipped and tested; quantifying the token delta in the benchmark
-harness is a separate follow-up.
+Item 4 (honest scorecard) — DONE in PR #168 (ADR-0018). `bench:agent` now captures the live tool
+transcript (`--output-format stream-json`) and reports, per repo tier, the re-reads avoided, the
+read-token delta the certificate lever removes, and the verified-current certificates delivered — so the
+small/familiar +43% rent case is tracked, not hidden. The re-read extractor is the pure, CI-tested
+`src/bench/transcript-metrics.ts`; live numbers require a paid run, the `--dry-run` exercises the
+pipeline with synthetic per-tier values.
