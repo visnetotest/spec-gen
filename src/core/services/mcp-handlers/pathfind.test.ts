@@ -117,6 +117,19 @@ describe('handleFindPath', () => {
     assertConclusionShape('find_path', r); // conclusion-shaped: chain + bounded alternates, no edge dump
   });
 
+  // Regression: call-graph node paths are already repo-relative. The chain must show
+  // them verbatim, NOT run them through relative(absDir, …) — which mis-resolved a
+  // repo-relative path against process.cwd() and emitted "../../…/cwd/db/writer.ts"
+  // garbage whenever the server's cwd differed from the analyzed directory.
+  it('shows repo-relative chain file paths even when the analyzed dir is not cwd', async () => {
+    mockCtx.mockResolvedValue({ callGraph: cg } as never);
+    const r = await handleFindPath('/some/other/abs/project', 'role:entrypoint', 'file:db/writer.ts') as {
+      path: { chain: Array<{ name: string; file: string }> };
+    };
+    expect(r.path.chain.map(s => s.file)).toEqual(['a.ts', 'db/writer.ts']);
+    for (const step of r.path.chain) expect(step.file).not.toMatch(/\.\.\//); // never an escaping relative path
+  });
+
   it('returns a structured no-path answer (not an empty array)', async () => {
     mockCtx.mockResolvedValue({ callGraph: graph([entry, writer], [], { entryPoints: [entry] }) } as never); // disconnected
     const r = await handleFindPath('/p', 'role:entrypoint', 'file:db/writer.ts') as {
@@ -134,9 +147,38 @@ describe('handleFindPath', () => {
 
   it('returns a clear note when from and to are the same endpoint (no traversal needed)', async () => {
     mockCtx.mockResolvedValue({ callGraph: cg } as never);
-    const r = await handleFindPath('/p', 'main', 'main') as { path: null; note: string };
+    const r = await handleFindPath('/p', 'main', 'main') as { path: null; note: string; confidenceBoundary: { complete: boolean } };
     expect(r.path).toBeNull();
     expect(r.note).toMatch(/same function/);
+    expect(r.confidenceBoundary.complete).toBe(true); // same-endpoint return attaches a boundary too
+  });
+
+  // confidenceBoundary wiring (spec: add-confidence-boundary-disclosure). The fixture
+  // dir has no fingerprint artifact, so staleness is silent and `complete` tracks the
+  // edge basis alone.
+  it('attaches a complete confidenceBoundary for an all-direct path', async () => {
+    mockCtx.mockResolvedValue({ callGraph: cg } as never);
+    const r = await handleFindPath('/p', 'role:entrypoint', 'file:db/writer.ts') as { confidenceBoundary: { complete: boolean; basis: { directEdges: number; synthesizedEdges: number } } };
+    expect(r.confidenceBoundary.complete).toBe(true);
+    expect(r.confidenceBoundary.basis.directEdges).toBeGreaterThanOrEqual(1);
+    expect(r.confidenceBoundary.basis.synthesizedEdges).toBe(0);
+  });
+
+  it('reports incomplete and discloses the rule when the path crosses a synthesized edge', async () => {
+    const synthCg = graph([entry, writer], [edgeC(entry.id, writer.id, 'synthesized')], { entryPoints: [entry] });
+    synthCg.edges[0].synthesizedBy = 'callback-registration';
+    mockCtx.mockResolvedValue({ callGraph: synthCg } as never);
+    const r = await handleFindPath('/p', 'role:entrypoint', 'file:db/writer.ts') as { path: unknown; confidenceBoundary: { complete: boolean; knownUnknowable: Array<{ rule?: string }> } };
+    expect(r.path).not.toBeNull();
+    expect(r.confidenceBoundary.complete).toBe(false);
+    expect(r.confidenceBoundary.knownUnknowable.some(c => c.rule === 'callback-registration')).toBe(true);
+  });
+
+  it('attaches a confidenceBoundary on the no-path answer', async () => {
+    mockCtx.mockResolvedValue({ callGraph: graph([entry, writer], [], { entryPoints: [entry] }) } as never);
+    const r = await handleFindPath('/p', 'role:entrypoint', 'file:db/writer.ts') as { path: null; confidenceBoundary: { complete: boolean } };
+    expect(r.path).toBeNull();
+    expect(typeof r.confidenceBoundary.complete).toBe('boolean');
   });
 });
 

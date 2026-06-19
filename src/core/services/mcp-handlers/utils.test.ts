@@ -17,6 +17,7 @@ import {
   safeJoin,
   readCachedContext,
   isCacheFresh,
+  computeProjectFingerprint,
   loadMappingIndex,
   clearMappingCache,
   specsForFile,
@@ -28,6 +29,7 @@ import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
   ARTIFACT_LLM_CONTEXT,
+  ARTIFACT_FINGERPRINT,
   ANALYSIS_STALE_THRESHOLD_MS,
 } from '../../../constants.js';
 
@@ -330,6 +332,34 @@ describe('isCacheFresh', () => {
 
     const result = await isCacheFresh(tmpDir);
     expect(result).toBe(false);
+  });
+
+  it('stays fresh when only OpenLore-managed dirs (.openlore-live-cache) churn', async () => {
+    // Regression: the fingerprint must exclude OpenLore's own scratch/fixture
+    // caches. Refreshing a cloned fixture must not flap the content hash, or
+    // isCacheFresh forces a needless re-analysis every time the live-data tools run.
+    const userSrc = join(tmpDir, 'src');
+    await mkdir(userSrc, { recursive: true });
+    await writeFile(join(userSrc, 'app.ts'), 'export const x = 1;\n', 'utf-8');
+    const analysisDir = join(tmpDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(analysisDir, { recursive: true });
+    await writeFile(join(analysisDir, ARTIFACT_LLM_CONTEXT), '{}', 'utf-8');
+
+    // Pin the fingerprint as analyze would, then refresh a live-cache fixture.
+    const before = await computeProjectFingerprint(tmpDir);
+    await writeFile(join(analysisDir, ARTIFACT_FINGERPRINT), JSON.stringify({ hash: before }), 'utf-8');
+    const liveCache = join(tmpDir, '.openlore-live-cache', 'go-pkg-errors@abc');
+    await mkdir(liveCache, { recursive: true });
+    await writeFile(join(liveCache, 'errors.go'), 'package errors\nfunc New() {}\n', 'utf-8');
+
+    expect(await computeProjectFingerprint(tmpDir)).toBe(before);
+    expect(await isCacheFresh(tmpDir)).toBe(true);
+
+    // Sanity: a real user-source change DOES flap the hash AND invalidate the cache —
+    // the exclusion suppresses only OpenLore's own churn, never the user's edits.
+    await writeFile(join(userSrc, 'app.ts'), 'export const x = 2;\nexport const y = 3;\n', 'utf-8');
+    expect(await computeProjectFingerprint(tmpDir)).not.toBe(before);
+    expect(await isCacheFresh(tmpDir)).toBe(false);
   });
 });
 

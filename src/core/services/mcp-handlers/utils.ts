@@ -381,7 +381,12 @@ async function walkForFingerprint(
   }
   for (const entry of entries) {
     if (entry.isDirectory()) {
-      if (!FINGERPRINT_SKIP_DIRS.has(entry.name)) {
+      // Skip the static skip set AND every OpenLore-managed dir (any `.openlore`
+      // prefix: `.openlore` analysis output, `.openlore-live-cache` cloned
+      // fixtures, …). These churn independently of the user's source — including
+      // them makes the content-hash flap, so isCacheFresh would force needless
+      // re-analysis whenever the live-data fixture cache is refreshed.
+      if (!FINGERPRINT_SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.openlore')) {
         await walkForFingerprint(join(dir, entry.name), root, out);
       }
     } else if (entry.isFile() && FINGERPRINT_SOURCE_EXTS.has(extname(entry.name))) {

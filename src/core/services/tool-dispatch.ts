@@ -20,7 +20,10 @@ import type { DecisionScope } from '../../types/index.js';
 
 import { handleOrient } from './mcp-handlers/orient.js';
 import { handleSelectTests } from './mcp-handlers/test-impact.js';
+import { handleBlastRadius } from './mcp-handlers/blast-radius.js';
 import { handleFindDeadCode } from './mcp-handlers/reachability.js';
+import { handleVerifyClaim } from './mcp-handlers/claim-verification.js';
+import type { ClaimKind } from './mcp-handlers/claim-verification.js';
 import { handleStructuralDiff } from './mcp-handlers/structural-diff.js';
 import { handleGetChangeCoupling } from './mcp-handlers/change-coupling.js';
 import { handleGetHealthMap } from './mcp-handlers/health-map.js';
@@ -28,6 +31,7 @@ import { handleGetSurprisingConnections } from './mcp-handlers/surprising-connec
 import { handleGetLandmarks } from './mcp-handlers/landmarks.js';
 import { handleGetMap } from './mcp-handlers/map.js';
 import { handleFindPath } from './mcp-handlers/pathfind.js';
+import { handleFederationStatus } from './mcp-handlers/federation.js';
 import { handleCheckArchitecture } from './mcp-handlers/architecture.js';
 import { handleGenerateChangeProposal, handleAnnotateStory } from './mcp-handlers/change.js';
 import {
@@ -137,17 +141,21 @@ export async function dispatchTool(
     const { directory, domain, orphansOnly } = args as { directory: string; domain?: string; orphansOnly?: boolean };
     return handleGetMapping(directory, domain, orphansOnly);
   } else if (name === 'analyze_impact') {
-    const { directory, symbol, depth = 2, directResolvedOnly = false, valueLevel = false, valueParam } =
-      args as { directory: string; symbol: string; depth?: number; directResolvedOnly?: boolean; valueLevel?: boolean; valueParam?: string };
-    return handleAnalyzeImpact(directory, symbol, depth, directResolvedOnly, valueLevel, valueParam);
+    const { directory, symbol, depth = 2, directResolvedOnly = false, valueLevel = false, valueParam, federation = false, federationRepos } =
+      args as { directory: string; symbol: string; depth?: number; directResolvedOnly?: boolean; valueLevel?: boolean; valueParam?: string; federation?: boolean; federationRepos?: string[] };
+    return handleAnalyzeImpact(directory, symbol, depth, directResolvedOnly, valueLevel, valueParam, federation, federationRepos);
   } else if (name === 'select_tests') {
-    const { directory, changedSymbols, diffRef, maxDepth, directResolvedOnly } =
-      args as { directory: string; changedSymbols?: string[]; diffRef?: string; maxDepth?: number; directResolvedOnly?: boolean };
-    return handleSelectTests({ directory, changedSymbols, diffRef, maxDepth, directResolvedOnly });
+    const { directory, changedSymbols, diffRef, maxDepth, directResolvedOnly, federation, federationRepos } =
+      args as { directory: string; changedSymbols?: string[]; diffRef?: string; maxDepth?: number; directResolvedOnly?: boolean; federation?: boolean; federationRepos?: string[] };
+    return handleSelectTests({ directory, changedSymbols, diffRef, maxDepth, directResolvedOnly, federation, federationRepos });
+  } else if (name === 'blast_radius') {
+    const { directory, baseRef, depth, maxSymbols } =
+      args as { directory: string; baseRef?: string; depth?: number; maxSymbols?: number };
+    return handleBlastRadius({ directory, baseRef, depth, maxSymbols });
   } else if (name === 'find_dead_code') {
-    const { directory, ifDeleted, maxResults, filePattern, directResolvedOnly } =
-      args as { directory: string; ifDeleted?: string; maxResults?: number; filePattern?: string; directResolvedOnly?: boolean };
-    return handleFindDeadCode({ directory, ifDeleted, maxResults, filePattern, directResolvedOnly });
+    const { directory, ifDeleted, maxResults, filePattern, directResolvedOnly, federation, federationRepos } =
+      args as { directory: string; ifDeleted?: string; maxResults?: number; filePattern?: string; directResolvedOnly?: boolean; federation?: boolean; federationRepos?: string[] };
+    return handleFindDeadCode({ directory, ifDeleted, maxResults, filePattern, directResolvedOnly, federation, federationRepos });
   } else if (name === 'structural_diff') {
     const { directory, baseRef, headRef, maxResults } =
       args as { directory: string; baseRef?: string; headRef?: string; maxResults?: number };
@@ -275,8 +283,11 @@ export async function dispatchTool(
     const { directory, communityId } = args as { directory: string; communityId?: string };
     return handleGetMap(directory, communityId);
   } else if (name === 'find_path') {
-    const { directory, from, to, useCallDistance, directResolvedOnly } = args as { directory: string; from: string; to: string; useCallDistance?: boolean; directResolvedOnly?: boolean };
-    return handleFindPath(directory, from, to, { useCallDistance, directResolvedOnly });
+    const { directory, from, to, useCallDistance, directResolvedOnly, federation, federationRepos } = args as { directory: string; from: string; to: string; useCallDistance?: boolean; directResolvedOnly?: boolean; federation?: boolean; federationRepos?: string[] };
+    return handleFindPath(directory, from, to, { useCallDistance, directResolvedOnly, federation, federationRepos });
+  } else if (name === 'federation_status') {
+    const { directory } = args as { directory: string };
+    return handleFederationStatus(directory);
   } else if (name === 'detect_changes') {
     const { directory, base } = args as { directory: string; base?: string };
     return handleDetectChanges(directory, base);
@@ -310,6 +321,10 @@ export async function dispatchTool(
     const { directory, task, limit = 10, tokenBudget, asOf, changedSince, type } =
       args as { directory: string; task?: string; limit?: number; tokenBudget?: number; asOf?: string; changedSince?: string; type?: string };
     return handleRecall(directory, task, limit, tokenBudget, asOf, changedSince, type);
+  } else if (name === 'verify_claim') {
+    const { directory, kind, subject, object } =
+      args as { directory: string; kind: ClaimKind; subject: string; object?: string };
+    return handleVerifyClaim({ directory, kind, subject, object });
   }
   throw new UnknownToolError(name);
 }

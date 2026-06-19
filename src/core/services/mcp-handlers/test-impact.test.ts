@@ -119,10 +119,50 @@ describe('handleSelectTests', () => {
     expect(r.message).toBeTruthy();
   });
 
+  // Honesty: opting into federation but resolving no local seed must explain why no
+  // cross-repo selection ran, not silently omit the federation surface.
+  it('discloses a federationNote when federation is requested but no seed resolves', async () => {
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['doesNotExist'], federation: true }) as { federationNote?: string };
+    expect(r.federationNote).toMatch(/federation/i);
+    const plain = await handleSelectTests({ directory: '/p', changedSymbols: ['doesNotExist'] }) as { federationNote?: string };
+    expect(plain.federationNote).toBeUndefined();
+  });
+
   it('errors cleanly when no analysis is cached', async () => {
     vi.mocked(readCachedContext).mockResolvedValueOnce(null as never);
     const r = await handleSelectTests({ directory: '/p', changedSymbols: ['bar'] }) as { error: string };
     expect(r.error).toMatch(/analyze_codebase/);
+  });
+
+  // confidenceBoundary wiring (spec: add-confidence-boundary-disclosure). The fixture
+  // dir has no fingerprint artifact → staleness silent, so `complete` tracks the basis.
+  it('attaches a complete confidenceBoundary on an all-direct selection', async () => {
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['bar'] }) as {
+      confidenceBoundary: { complete: boolean; basis: { directEdges: number; synthesizedEdges: number } };
+    };
+    expect(r.confidenceBoundary.complete).toBe(true);
+    expect(r.confidenceBoundary.basis.synthesizedEdges).toBe(0);
+  });
+
+  it('reports incomplete when a test reaches the change through a synthesized edge', async () => {
+    const synthEdges: CallEdge[] = [
+      { callerId: 'src/foo.test.ts::testFoo', calleeId: 'src/foo.ts::foo', calleeName: 'foo', confidence: 'synthesized', kind: 'calls', synthesizedBy: 'route-handler' },
+      ...EDGES.slice(1),
+    ];
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph(NODES, synthEdges) } as never);
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['bar'] }) as {
+      confidenceBoundary: { complete: boolean; knownUnknowable: Array<{ rule?: string }> };
+    };
+    expect(r.confidenceBoundary.complete).toBe(false);
+    expect(r.confidenceBoundary.knownUnknowable.some(c => c.rule === 'route-handler')).toBe(true);
+  });
+
+  it('attaches a confidenceBoundary on the no-seed (message) result', async () => {
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['doesNotExist'] }) as {
+      selectedTests: unknown[]; confidenceBoundary: { complete: boolean };
+    };
+    expect(r.selectedTests).toEqual([]);
+    expect(typeof r.confidenceBoundary.complete).toBe('boolean');
   });
 });
 

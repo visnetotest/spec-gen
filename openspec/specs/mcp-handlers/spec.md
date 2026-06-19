@@ -325,6 +325,93 @@ merge distinct memories or judge relative importance.
 - **GIVEN** a memory recorded with content X and anchor A
 - **WHEN** `remember` is called again with the same content X and anchor A
 - **THEN** the store contains one memory for (X, A); the same content on a different anchor B is distinct
+### Requirement: PreflightStructuralBriefing
+
+The system SHALL provide a pre-flight capability that, given a staged or working diff, returns a
+deterministic conclusion-shaped briefing of the change's structural blast radius: affected callers and
+layers crossed, the tests to run, the anchored memories and decisions the diff will turn `drifted` or
+`orphaned`, the specs it will make stale, and (under federation) the cross-repo consumers of any
+changed published interface. The briefing SHALL compose existing deterministic analyses only, with no
+LLM and no new structural computation, and SHALL be a briefing (counts and named risks), never a graph.
+
+> Decision recorded: 987286eb
+> Date: 2026-06-18
+
+#### Scenario: A hub change is briefed before commit
+
+- **GIVEN** a working diff that modifies a function with many callers and an anchored decision
+- **WHEN** the pre-flight briefing is requested
+- **THEN** it reports the caller count and layers, the tests to run, and that the anchored decision
+  will drift — as a single conclusion-shaped briefing
+
+### Requirement: AdvisoryByDefault
+
+The pre-flight guard SHALL be non-blocking by default: surfaced on demand or via an advisory git hook
+that does not fail a commit. A repository MAY opt into blocking for specific high-risk patterns (for
+example, orphaning an anchored decision) via configuration, but blocking SHALL never be the default
+posture.
+
+#### Scenario: Default hook is advisory
+
+- **GIVEN** the pre-flight git hook installed with default configuration
+- **WHEN** a commit is made for a high-blast-radius diff
+- **THEN** the briefing is emitted and the commit is not blocked
+
+#### Scenario: Opt-in blocking fires only on its pattern
+
+- **GIVEN** a repository configured to block when a commit orphans an anchored decision
+- **WHEN** a commit would orphan an anchored decision
+- **THEN** the hook blocks; and for any other high-blast-radius diff it remains advisory
+### Requirement: ConfidenceBoundaryOnConclusions
+
+Every conclusion-shaped answer (`analyze_impact`, `find_path`, `find_dead_code`, `get_subgraph`,
+`select_tests`, `recall`, `trace_execution_path`) SHALL carry a deterministic `confidenceBoundary`
+describing its epistemic basis: the portion resting on directly-resolved edges, the portion resting on
+synthesized edges (named by their `synthesizedBy` rule), and any **known-unknowable** crossings — a
+traversal that passed a reflection or computed-dispatch boundary, or, under federation, an unindexed
+repository. The boundary SHALL be categorical labels and counts, never a blended confidence score, and
+SHALL be additive metadata that callers may ignore. It SHALL be computed without an LLM, from the
+edge `confidence`/`synthesizedBy` provenance already present (decision `08e71184`).
+
+#### Scenario: A clean answer reports a clean boundary
+
+- **GIVEN** a query answered entirely via directly-resolved edges against a current index
+- **WHEN** the response is produced
+- **THEN** its `confidenceBoundary` reports only directly-resolved basis, no known-unknowable crossing,
+  and `complete: true`
+
+#### Scenario: A boundary-crossing answer is flagged, not hidden
+
+- **GIVEN** a `find_dead_code` query whose liveness partition is reached only across a synthesized
+  (heuristically-recovered dispatch) edge
+- **WHEN** the response is produced
+- **THEN** the `confidenceBoundary` names the synthesized crossing as known-unknowable, breaks down the
+  synthesized edges by rule, and reports `complete: false`
+
+### Requirement: StalenessBoundary
+
+When graph-relevant source files have changed since the index's build commit, every conclusion SHALL
+carry a staleness marker naming that build commit and the count of source files changed since it,
+derived deterministically from `git diff` against the commit captured at analyze time. A current index
+(zero source files changed) SHALL produce no staleness marker. When staleness cannot be assessed
+reliably — no build commit was captured, or the project is not a git repository — the system SHALL
+stay silent rather than emit a false-positive marker.
+
+#### Scenario: A stale index is disclosed
+
+- **GIVEN** an index built at commit X and a working tree with N files changed since X
+- **WHEN** any conclusion is produced
+- **THEN** the response discloses "computed against the index at commit X; N file(s) changed since" and
+  reports `complete: false`
+
+> Decision recorded: 08e71184
+> Date: 2026-06-18
+### Requirement: ExcludeAllOpenloreprefixedDirsFromTheProjectFingerprintSoOpenloresOwnCachesDontInvalidateTheAnalysisCache
+
+The system SHALL exclude all directories whose name starts with `.openlore` from project fingerprint computation so that OpenLore-managed caches do not invalidate analysis freshness.
+
+> Decision recorded: cd5ff82c
+> Date: 2026-06-18
 
 ## Decisions
 
@@ -477,3 +564,70 @@ The epistemic-lease feature injected escalating imperative language into every M
 recall previously ranked memories by binary substring token-overlap, which silently dropped relevant memories on a phrasing mismatch (e.g. a camelCase identifier vs a plain word). Replaced it with a deterministic field-weighted, graded ranker: identifier-aware normalization (camelCase/PascalCase/snake_case/kebab-case split before lower-casing, fixed stopword set), fixed field weights (anchorSymbol 4 > tag 3 > anchorFile 2 > content 1), occurrence-capped grading, and an exact-anchor boost (8) when the query names every subtoken of an anchored symbol. This keeps the memory path LLM-free and embedding-free per the north star (decision c6d1ad07) while fixing the worst retrieval failure mode. A substring fallback (weight 0.1, applied only when the token score is zero) guarantees the candidate set is a superset of the old behavior.
 
 **Consequences:** Weights and the stopword set are fixed, documented, exported constants — changing them is a code+test change, not a runtime knob. recall items gain an optional match {fields, anchorBoost} field for transparent ranking reasons. Embedding-backed recall is deliberately deferred to a future proposal with its own decision. The authoritative/orphaned freshness split is unchanged and still runs after ranking.
+
+### Name the pre-flight blast-radius guard `blast_radius` (MCP) / `blast-radius` (CLI), distinct from the existing `preflight` staleness gate
+
+**Status:** Approved
+**Date:** 2026-06-18
+**ID:** 987286eb
+
+The add-preflight-blast-radius-guard proposal is titled "pre-flight blast-radius guard," but `openlore preflight` already exists as an unrelated CI graph-staleness gate (src/cli/preflight/). Reusing the word "preflight" across both surfaces would conflate two different concerns. The new capability is named `blast_radius` everywhere to be collision-free and self-describing ("compute my diff's structural blast radius"). It is implemented as pure orchestration of existing deterministic analyses (analyze_impact, select_tests, check_spec_drift which already folds in anchored-memory + ADR drift, and getChangedFiles) composed into a single conclusion-shaped briefing — no new structural computation, no LLM. The MCP tool is classified `conclusion` and kept out of the `minimal` preset. The git hook is advisory-by-default (exit 0); opt-in blocking for named high-risk patterns reads `.openlore/config.json` `blastRadius.block`. The multi-repo-federation cross-repo-consumers input is scoped out (federation not yet shipped) and documented as a no-op with a note.
+
+**Consequences:** A new MCP tool `blast_radius` and CLI `openlore blast-radius` (with --install-hook, --hook, --json) ship; OpenLoreConfig gains an optional `blastRadius?: { block?: string[] }` field; a new advisory pre-commit hook block (marker `# openlore-blast-radius-hook`) installs alongside the decisions hook. Federation cross-repo consumers remain a documented gap until add-multi-repo-federation lands.
+### confidenceBoundary response shape: categorical edge-basis + known-unknowable crossings + staleness, never a blended score
+
+**Status:** Approved
+**Date:** 2026-06-18
+**ID:** 08e71184
+
+Every conclusion tool (analyze_impact, find_path, find_dead_code, get_subgraph, select_tests, trace_execution_path, recall) carries a deterministic `confidenceBoundary` computed from data already present: edge `confidence`/`synthesizedBy` provenance for the basis, synthesized-edge reliance for known-unknowable crossings, and the project fingerprint + git diff for staleness. The shape is categorical labels and counts (directEdges, synthesizedEdges, synthesizedByRule, knownUnknowable[], staleness, complete) — never a blended confidence number and never an LLM call, preserving the north-star (c6d1ad07). It is additive metadata: a caller that ignores it sees today's answer unchanged.
+
+**Consequences:** A new shared module src/core/services/mcp-handlers/confidence-boundary.ts owns the type and computation; seven conclusion handlers each spread a `confidenceBoundary` field into their response. analyze.ts's fingerprint.json gains an optional `commit` field (captured via git rev-parse at analyze time) so the staleness marker can name the build commit; staleness degrades gracefully (no commit / non-git repo → fingerprint-mismatch boolean without a commit name). `complete` is false whenever the computation leaned on a synthesized edge, crossed a known-unknowable boundary, or ran against a stale index — the answer-level NoFalseCompleteness contract.
+
+### Confidence-boundary staleness uses git-diff against the build commit, not a fingerprint-hash recompute
+
+**Status:** Approved
+**Date:** 2026-06-18
+**ID:** f0b7f99f
+
+Comparing the analyze-time project fingerprint (whole-tree mtime+size hash) against a query-time recompute is unreliable: fixture dirs and mtime drift cause false-positive staleness on every answer, training agents to ignore the marker. Replaced with a deterministic git signal: staleness fires iff `git diff --name-only <buildCommit>` reports graph-relevant source files changed since the index was built. Non-git repos and indexes with no captured commit get NO staleness marker (silent rather than false-positive) — a deliberate honesty tradeoff. This supersedes the "fingerprint-mismatch boolean" degradation described in decision 08e71184 above.
+
+**Consequences:** computeStaleness no longer calls computeProjectFingerprint; it reads the build commit from fingerprint.json and shells `git diff` (memoized 5s per dir). A pure buildStalenessMarker(commit, changedCount) holds the emit/silent logic and is unit-tested. The pre-existing fingerprint-includes-.openlore-live-cache bug that affects isCacheFresh is left untouched and flagged separately.
+
+### Exclude all .openlore-prefixed dirs from the project fingerprint so OpenLore's own caches don't invalidate the analysis cache
+
+**Status:** Approved
+**Date:** 2026-06-18
+**ID:** cd5ff82c
+
+computeProjectFingerprint walked .openlore-live-cache (the gitignored clone cache for live-data fixtures). Those foreign source files churn whenever the live-data MCP tools or integration tests run, so the content hash flapped even when the user's own source was unchanged — forcing needless full re-analysis and false staleness markers. Generalizing the directory skip from exact `.openlore` to any `.openlore`-prefixed name covers `.openlore`, `.openlore-live-cache`, and future OpenLore-managed dirs in one rule.
+
+**Consequences:** walkForFingerprint now skips directories whose name starts with `.openlore` in addition to the static FINGERPRINT_SKIP_DIRS set. The custom OPENLORE_LIVE_CACHE_DIR override (an arbitrary path) is not covered by the prefix rule — acceptable since the default is the in-repo `.openlore-live-cache`. A regression test asserts live-cache churn leaves the fingerprint unchanged while a real user-source edit still flips the hash.
+
+### Requirement: StructuralClaimVerification
+
+The system SHALL provide a `verify_claim` capability that accepts a structured structural claim
+(`{ kind: 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change', subject, object? }`) and returns
+a deterministic `{ verdict: 'confirmed' | 'refuted' | 'unverifiable', reason, receipt?, confidenceBoundary }`.
+The verdict SHALL be computed by the existing deterministic analysis for that claim kind (call-graph
+traversal for `calls`/`reaches`, backward reachability for `impacts`, mark-and-sweep reachability for
+`dead`, directly-resolved caller analysis for `safe-to-change`), never by an LLM and never as a
+confidence number. A `confirmed` or `refuted` verdict SHALL carry a receipt — the subject/object spans
+and content hashes (grounding-certificate shape) plus the index commit — suitable for the agent to cite
+to a human. A claim whose answer rests on a dispatch blind spot (a symbol reached only through
+synthesized dynamic-dispatch edges, or an unresolved/ambiguous symbol) SHALL return `unverifiable` with
+the boundary named (reusing the confidence-boundary disclosure), never a fabricated `confirmed`/`refuted`.
+The capability SHALL be conclusion-shaped (verdict + bounded receipt, never a graph to traverse) and
+registered only in an opt-in preset (`verify`), never in the minimal or first-run default surface.
+
+#### Scenario: A false claim is refuted with a receipt
+
+- **GIVEN** a claim that function A calls function B, when no such edge exists
+- **WHEN** the claim is verified
+- **THEN** the verdict is `refuted` with a receipt referencing the index commit and the relevant spans
+
+#### Scenario: A blind-spot claim is unverifiable, not fabricated
+
+- **GIVEN** a `dead` claim about a symbol reachable only through synthesized dynamic-dispatch edges
+- **WHEN** the claim is verified
+- **THEN** the verdict is `unverifiable` with the dispatch boundary named, never `confirmed` or `refuted`

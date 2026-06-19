@@ -389,6 +389,41 @@ The system SHALL preserve user formatting in existing JSON configuration files b
 
 > Decision recorded: df27e8ef
 > Date: 2026-06-16
+### Requirement: ConfidenceboundaryResponseShapeCategoricalEdgebasisKnownunknowableCrossingsStalenessNeverABlendedScore
+
+The system SHALL attach a deterministic confidenceBoundary object (edge provenance counts, known-unknowable crossings, staleness, and a complete flag) to every conclusion-tool response, computed solely from static analysis metadata without LLM inference.
+
+> Decision recorded: 08e71184
+> Date: 2026-06-18
+
+### Requirement: PreflightHookIsOptInAndAdvisory
+
+The CLI SHALL provide explicit installation of an advisory pre-flight git hook that emits the structural
+blast-radius briefing, reusing the install pattern of the decisions pre-commit hook. Installation SHALL
+be an explicit opt-in command (`openlore blast-radius --install-hook`), never auto-installed by
+`openlore setup`, and the installed hook SHALL be advisory (exit 0) by default. The hook SHALL honor
+`.openlore/config.json` to enable blocking for specific high-risk patterns only.
+
+> Decision recorded: 987286eb
+> Date: 2026-06-18
+
+#### Scenario: The hook is installed explicitly, never silently
+
+- **GIVEN** an OpenLore project
+- **WHEN** the user runs `openlore blast-radius --install-hook`
+- **THEN** the advisory pre-flight hook is installed, and it is never auto-installed by `openlore setup`
+
+#### Scenario: Configuration enables targeted blocking
+
+- **GIVEN** an installed advisory pre-flight hook
+- **WHEN** `.openlore/config.json` enables blocking for a named high-risk pattern
+- **THEN** the hook blocks only on that pattern and stays advisory otherwise
+### Requirement: FederationRegistryIsAProjectlocalIndexofindexesManifest
+
+The system SHALL maintain a project-local federation registry at .openlore/federation.json that references external repos' independently-built indexes without materializing a union graph.
+
+> Decision recorded: bf5aff2d
+> Date: 2026-06-19
 
 ## Technical Notes
 
@@ -535,3 +570,41 @@ Surface 'which functions are structural anchors and why' as a set of labeled sig
 When the target file already exists, applying JSON.stringify rewrites the entire file and clobbers user formatting (e.g. collapsing multi-line arrays, normalizing indent), producing noisy git diffs and violating the merge-not-clobber install contract. Fix: use jsonc-parser (a zero-dependency JSON-CST editor from the VS Code ecosystem) to apply minimal edits to only the OpenLore-managed paths, with formatting options detected from the file. This is preferred over hand-rolling text edits (error-prone) or indent-detection-only fixes (still normalizes intra-line formatting). New files are still created with JSON.stringify.
 
 **Consequences:** Adds jsonc-parser as a runtime dependency. A shared helper (json-managed.ts) applies path edits preserving byte-identical formatting for untouched keys. The claude-code adapter's settings.json and .mcp.json writes use it for apply and uninstall. Other adapters (cursor, continue) can adopt the same helper.
+
+### Name the pre-flight blast-radius guard `blast_radius` (MCP) / `blast-radius` (CLI), distinct from the existing `preflight` staleness gate
+
+**Status:** Approved
+**Date:** 2026-06-18
+**ID:** 987286eb
+
+The add-preflight-blast-radius-guard proposal is titled "pre-flight blast-radius guard," but `openlore preflight` already exists as an unrelated CI graph-staleness gate (src/cli/preflight/). Reusing the word "preflight" across both surfaces would conflate two different concerns. The new capability is named `blast_radius` everywhere to be collision-free and self-describing ("compute my diff's structural blast radius"). It is implemented as pure orchestration of existing deterministic analyses (analyze_impact, select_tests, check_spec_drift which already folds in anchored-memory + ADR drift, and getChangedFiles) composed into a single conclusion-shaped briefing — no new structural computation, no LLM. The MCP tool is classified `conclusion` and kept out of the `minimal` preset. The git hook is advisory-by-default (exit 0); opt-in blocking for named high-risk patterns reads `.openlore/config.json` `blastRadius.block`. The multi-repo-federation cross-repo-consumers input is scoped out (federation not yet shipped) and documented as a no-op with a note.
+
+**Consequences:** A new MCP tool `blast_radius` and CLI `openlore blast-radius` (with --install-hook, --hook, --json) ship; OpenLoreConfig gains an optional `blastRadius?: { block?: string[] }` field; a new advisory pre-commit hook block (marker `# openlore-blast-radius-hook`) installs alongside the decisions hook. Federation cross-repo consumers remain a documented gap until add-multi-repo-federation lands.
+### confidenceBoundary response shape: categorical edge-basis + known-unknowable crossings + staleness, never a blended score
+
+**Status:** Approved
+**Date:** 2026-06-18
+**ID:** 08e71184
+
+Every conclusion tool (analyze_impact, find_path, find_dead_code, get_subgraph, select_tests, trace_execution_path, recall) carries a deterministic `confidenceBoundary` computed from data already present: edge `confidence`/`synthesizedBy` provenance for the basis, synthesized-edge reliance for known-unknowable crossings, and the project fingerprint + git diff for staleness. The shape is categorical labels and counts (directEdges, synthesizedEdges, synthesizedByRule, knownUnknowable[], staleness, complete) — never a blended confidence number and never an LLM call, preserving the north-star (c6d1ad07). It is additive metadata: a caller that ignores it sees today's answer unchanged.
+
+**Consequences:** A new shared module src/core/services/mcp-handlers/confidence-boundary.ts owns the type and computation; seven conclusion handlers each spread a `confidenceBoundary` field into their response. analyze.ts's fingerprint.json gains an optional `commit` field (captured via git rev-parse at analyze time) so the staleness marker can name the build commit; staleness degrades gracefully (no commit / non-git repo → fingerprint-mismatch boolean without a commit name). `complete` is false whenever the computation leaned on a synthesized edge, crossed a known-unknowable boundary, or ran against a stale index — the answer-level NoFalseCompleteness contract.
+
+### Confidence-boundary staleness uses git-diff against the build commit, not a fingerprint-hash recompute
+
+**Status:** Approved
+**Date:** 2026-06-18
+**ID:** f0b7f99f
+
+Comparing the analyze-time project fingerprint (whole-tree mtime+size hash) against a query-time recompute is unreliable: fixture dirs and mtime drift cause false-positive staleness on every answer, training agents to ignore the marker. Replaced with a deterministic git signal: staleness fires iff `git diff --name-only <buildCommit>` reports graph-relevant source files changed since the index was built. Non-git repos and indexes with no captured commit get NO staleness marker (silent rather than false-positive) — a deliberate honesty tradeoff. This supersedes the "fingerprint-mismatch boolean" degradation described in decision 08e71184 above.
+
+**Consequences:** computeStaleness no longer calls computeProjectFingerprint; it reads the build commit from fingerprint.json and shells `git diff` (memoized 5s per dir). A pure buildStalenessMarker(commit, changedCount) holds the emit/silent logic and is unit-tested. The pre-existing fingerprint-includes-.openlore-live-cache bug that affects isCacheFresh is left untouched and flagged separately.
+### Federation registry is a project-local index-of-indexes manifest
+
+**Status:** Approved
+**Date:** 2026-06-19
+**ID:** bf5aff2d
+
+Multi-repo federation needs a registry that references each repo's independently-built .openlore index without merging graphs. Store it project-local at .openlore/federation.json (hermetic, deterministic, co-located with the index) rather than ~/.openlore. Each entry is { name, path (absolute), fingerprint, schemaVersion, lastBuilt } sourced from the target repo's .openlore/analysis/fingerprint.json. The home repo (the one holding the registry) is implicitly in scope. Adding/removing a repo edits only the registry plus that repo's own local build — never a global rebuild.
+
+**Consequences:** A new src/core/federation/ module owns registry load/save/add/remove/list. Federated queries load per-repo CachedContext lazily via readCachedContext on demand; no union graph is materialized. Remote (git-remote) repos and a global ~/.openlore registry are deferred to a follow-up.

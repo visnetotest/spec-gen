@@ -135,6 +135,23 @@ export {
 // dropping the one fact that matters (it must be absolute, not relative).
 const DIR_DESC = 'Absolute project path';
 
+// Optional federation scope, shared by the four federation-aware conclusion tools
+// (analyze_impact, select_tests, find_dead_code, find_path). Inert unless an
+// `.openlore/federation.json` registry exists (built via `openlore federation add`),
+// so the default surface registers no active cross-repo behavior.
+// (change: add-multi-repo-federation)
+const FEDERATION_PROPS = {
+  federation: {
+    type: 'boolean',
+    description: 'Opt-in: compute across federated repos (.openlore/federation.json); no-op without a registry (default false).',
+  },
+  federationRepos: {
+    type: 'array',
+    items: { type: 'string' },
+    description: 'Limit federation scope to these registry repo names (default: all).',
+  },
+} as const;
+
 export const TOOL_DEFINITIONS = [
   {
     name: 'orient',
@@ -484,6 +501,7 @@ export const TOOL_DEFINITIONS = [
           type: 'string',
           description: 'Parameter/variable to trace (with valueLevel; omit = all params).',
         },
+        ...FEDERATION_PROPS,
       },
       required: ['directory', 'symbol'],
     },
@@ -512,6 +530,28 @@ export const TOOL_DEFINITIONS = [
         },
         maxDepth: { type: 'number', description: 'Backward reachability depth (default 12)' },
         directResolvedOnly: { type: 'boolean', description: 'Traverse only directly-resolved edges, ignoring synthesized dynamic-dispatch edges (default false).' },
+        ...FEDERATION_PROPS,
+      },
+      required: ['directory'],
+    },
+  },
+  {
+    name: 'blast_radius',
+    description:
+      'USE THIS WHEN: before committing/editing, you want one briefing of what your diff actually ' +
+      'touches — "what is the blast radius of my changes?", "is this change safe to commit?". ' +
+      'Composes existing deterministic analyses over the staged/working diff into a single ' +
+      'conclusion-shaped briefing: affected callers and layers crossed (analyze_impact), the tests ' +
+      'to run (select_tests), the anchored memories/decisions the diff will turn drifted/orphaned and ' +
+      'the specs it will make stale (check_spec_drift). No LLM, no new analysis — pure orchestration. ' +
+      'Advisory: it informs, you act. Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        baseRef: { type: 'string', description: 'Git ref to diff the working tree against (e.g. "HEAD", "main"). Default HEAD (uncommitted changes).' },
+        depth: { type: 'number', description: 'Impact-analysis traversal depth (default 2).' },
+        maxSymbols: { type: 'number', description: 'Cap on the number of highest-fan-in changed symbols analyzed for impact (default 12). Truncation is reported.' },
       },
       required: ['directory'],
     },
@@ -533,8 +573,32 @@ export const TOOL_DEFINITIONS = [
         maxResults: { type: 'number', description: 'Max candidate-dead results (default 100)' },
         filePattern: { type: 'string', description: 'Only report candidates whose file path contains this substring' },
         directResolvedOnly: { type: 'boolean', description: 'Restrict reachability to directly-resolved edges, ignoring synthesized dynamic-dispatch edges — strict certainty over completeness (default false).' },
+        ...FEDERATION_PROPS,
       },
       required: ['directory'],
+    },
+  },
+  {
+    name: 'verify_claim',
+    description:
+      'USE THIS BEFORE asserting a structural fact ("X is dead", "Y calls Z", "this is safe to change"). ' +
+      'Returns a deterministic verdict (confirmed | refuted | unverifiable) + a citation receipt (spans, ' +
+      'content hashes, index commit) — a graph computation, never an LLM guess. kinds: calls, reaches, ' +
+      'impacts, dead, safe-to-change. "unverifiable" is first-class when the claim hits a dynamic-dispatch ' +
+      'blind spot — hedge or read the source. Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        kind: {
+          type: 'string',
+          enum: ['calls', 'reaches', 'dead', 'impacts', 'safe-to-change'],
+          description: 'The kind of structural claim to verify.',
+        },
+        subject: { type: 'string', description: 'The symbol the claim is about (a function/method name).' },
+        object: { type: 'string', description: 'The second symbol — required for relational kinds (calls, reaches, impacts).' },
+      },
+      required: ['directory', 'kind', 'subject'],
     },
   },
   {
@@ -1340,8 +1404,22 @@ export const TOOL_DEFINITIONS = [
         to: { type: 'string', description: 'Goal endpoint: a function name, or landmark:<id> / role:entrypoint|hub|sink / file:<path>' },
         useCallDistance: { type: 'boolean', description: 'Rank by confidence-weighted call-distance (default true); false ranks by fewest hops' },
         directResolvedOnly: { type: 'boolean', description: 'Traverse only directly-resolved edges, ignoring synthesized dynamic-dispatch edges (default false).' },
+        ...FEDERATION_PROPS,
       },
       required: ['directory', 'from', 'to'],
+    },
+  },
+  {
+    name: 'federation_status',
+    description:
+      'Report the multi-repo federation registry (.openlore/federation.json) and each registered ' +
+      'repo\'s live index state (indexed/stale/unindexed/missing). Index-of-indexes: no merged graph. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+      },
+      required: ['directory'],
     },
   },
   {
@@ -1578,7 +1656,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   orient: _RO, analyze_codebase: _RWI, get_architecture_overview: _RO,
   get_refactor_report: _RO, get_call_graph: _RO, get_duplicate_report: _RO,
   get_signatures: _RO, get_subgraph: _RO, trace_execution_path: _RO,
-  get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO, select_tests: _RO, find_dead_code: _RO, structural_diff: _RO, get_change_coupling: _RO, check_architecture: _RO,
+  get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO, select_tests: _RO, blast_radius: _RO, find_dead_code: _RO, structural_diff: _RO, get_change_coupling: _RO, check_architecture: _RO,
   get_low_risk_refactor_candidates: _RO, get_leaf_functions: _RO,
   get_critical_hubs: _RO, get_function_skeleton: _RO, get_god_functions: _RO,
   suggest_insertion_points: _RO, search_code: _RO, list_spec_domains: _RO,
@@ -1590,7 +1668,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   get_test_coverage: _RO, get_minimal_context: _RO, get_cluster: _RO,
   detect_changes: _RO, get_health_map: _RO, get_surprising_connections: _RO, record_decision: _RW, list_decisions: _RO,
   approve_decision: _RWI, reject_decision: _RWI, sync_decisions: _RWI,
-  remember: _RW, recall: _RO,
+  remember: _RW, recall: _RO, verify_claim: _RO,
 };
 
 // Tools that touch external entities (LLM / network) → openWorldHint: true.
@@ -1636,6 +1714,21 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
   // the tools an agent must consider).
   memory: new Set([
     'orient', 'remember', 'recall',
+  ]),
+  // Claim verification (opt-in): orient to ground, then verify a structural claim
+  // and cite the receipt before asserting it to a human. Deliberately NOT in the
+  // default or `minimal` surface (mcp-quality: minimize the tools an agent must
+  // consider). search_code helps the agent name the subject/object precisely.
+  verify: new Set([
+    'orient', 'search_code', 'verify_claim',
+  ]),
+  // Multi-repo federation (opt-in): the cross-repo conclusion tools plus the
+  // registry status tool. `federation_status` exists ONLY here — the default and
+  // `minimal` surfaces register no federation capability (change:
+  // add-multi-repo-federation; architecture: FederationScopedConclusions opt-in).
+  federation: new Set([
+    'orient', 'federation_status',
+    'analyze_impact', 'find_dead_code', 'select_tests', 'find_path',
   ]),
 };
 
@@ -1938,6 +2031,6 @@ export const mcpCommand = new Command('mcp')
   .option('--daemon', 'Delegate tool calls to a shared `openlore serve` daemon, spawning one if needed (coherent state across agents — one warm process + one watcher per repo). Without it, MCP reuses a daemon only if one is already running, else runs in-process.')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
-  .option('--minimal', 'Expose only core 5 tools (orient, search_code, record_decision, detect_changes, check_spec_drift). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', 'Expose a named tool preset instead of all ~45. "minimal" = orient+search+governance; "navigation" = graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton) for low-overhead code navigation. Takes precedence over --minimal.')
+  .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
+  .option('--preset <name>', 'Expose a named tool preset instead of all 58. "minimal" = orient+search+governance; "navigation" = graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton) for low-overhead code navigation; "memory" = orient+remember+recall; "federation" = orient + federation_status + the four cross-repo conclusion tools. Takes precedence over --minimal.')
   .action((options: McpServerOptions) => startMcpServer(options));

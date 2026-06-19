@@ -113,9 +113,12 @@ describe('handleFindDeadCode', () => {
   it('"what dies if I delete handler" returns helper (reachable only via handler)', async () => {
     const r = await handleFindDeadCode({ directory: '/p', ifDeleted: 'handler' }) as {
       target: string; becomesDeadIfDeleted: Array<{ name: string }>; count: number;
+      confidenceBoundary?: { complete: boolean };
     };
     expect(r.target).toBe('handler');
     expect(r.becomesDeadIfDeleted.map(n => n.name)).toEqual(['helper']);
+    // The boundary is attached to the delete-impact (target-mode) return too.
+    expect(typeof r.confidenceBoundary?.complete).toBe('boolean');
   });
 
   it('"what dies if I delete a leaf" returns nothing', async () => {
@@ -144,5 +147,44 @@ describe('handleFindDeadCode', () => {
     vi.mocked(readCachedContext).mockResolvedValueOnce(null as never);
     const r = await handleFindDeadCode({ directory: '/p' }) as { error: string };
     expect(r.error).toMatch(/analyze_codebase/);
+  });
+
+  // ── Confidence boundary (spec: add-confidence-boundary-disclosure) ──────────
+  it('reports a clean, complete boundary when liveness rests only on direct edges', async () => {
+    const r = await handleFindDeadCode({ directory: '/p' }) as {
+      confidenceBoundary: { basis: { directEdges: number; synthesizedEdges: number }; complete: boolean; knownUnknowable?: unknown };
+    };
+    expect(r.confidenceBoundary.basis.directEdges).toBeGreaterThan(0);
+    expect(r.confidenceBoundary.basis.synthesizedEdges).toBe(0);
+    expect(r.confidenceBoundary.complete).toBe(true);
+    expect(r.confidenceBoundary.knownUnknowable).toBeUndefined();
+  });
+
+  it('flags a known-unknowable crossing when liveness leans on a synthesized edge', async () => {
+    // helper is kept live only by a synthesized callback-registration edge from
+    // the (live) handler — the reachability sweep crossed a heuristic boundary.
+    const nodes = [
+      node({ id: 'src/main.ts::main', fanOut: 1 }),
+      node({ id: 'src/app.ts::handler', fanIn: 1, fanOut: 1 }),
+      node({ id: 'src/app.ts::helper', fanIn: 1 }),
+    ];
+    const edges: CallEdge[] = [
+      edge('src/main.ts::main', 'src/app.ts::handler'),
+      { callerId: 'src/app.ts::handler', calleeId: 'src/app.ts::helper', calleeName: 'helper', confidence: 'synthesized', kind: 'calls', synthesizedBy: 'callback-registration' },
+    ];
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(nodes, edges) } as never);
+    vi.mocked(readFile).mockResolvedValueOnce(JSON.stringify({ edges: [{ importedNames: ['main'] }] }) as never);
+
+    const r = await handleFindDeadCode({ directory: '/p' }) as {
+      confidenceBoundary: {
+        basis: { synthesizedEdges: number; synthesizedByRule?: Record<string, number> };
+        complete: boolean;
+        knownUnknowable?: Array<{ kind: string; rule?: string }>;
+      };
+    };
+    expect(r.confidenceBoundary.basis.synthesizedEdges).toBe(1);
+    expect(r.confidenceBoundary.basis.synthesizedByRule).toEqual({ 'callback-registration': 1 });
+    expect(r.confidenceBoundary.complete).toBe(false);
+    expect(r.confidenceBoundary.knownUnknowable?.[0]).toMatchObject({ kind: 'synthesized-dispatch', rule: 'callback-registration' });
   });
 });

@@ -27,6 +27,7 @@ import {
 } from '../../decisions/anchor.js';
 import { getHeadCommit, resolveCommitSha, isAncestor } from '../../decisions/git-time.js';
 import { queryTerms, scoreMemory, type RankFields } from './memory-ranking.js';
+import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
 import {
   MEMORY_TYPES,
   type AnchoredMemory,
@@ -385,6 +386,10 @@ export async function handleRecall(
         unreconciled: unreconciled.length ? unreconciled : undefined,
         budget,
         note: [budgetNote, reanchorNote, unreconciledNote, ...warnings].filter(Boolean).join(' ') || undefined,
+        // Recall does no graph traversal — its boundary is the freshness of the
+        // index the anchors were checked against (per-memory verdicts cover the
+        // rest). (spec: add-confidence-boundary-disclosure)
+        confidenceBoundary: assembleBoundary({ staleness: await computeStaleness(rootPath) }),
       };
     } finally {
       ctx?.close();

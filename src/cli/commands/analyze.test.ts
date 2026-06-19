@@ -3,7 +3,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { analyzeCommand, runAnalysis } from './analyze.js';
+import { ARTIFACT_FINGERPRINT } from '../../constants.js';
 
 // ============================================================================
 // MOCKS
@@ -571,6 +576,53 @@ describe('analyze command', () => {
 
       expect(errorSpy).toHaveBeenCalledWith('--max-files must be a positive integer');
       expect(process.exitCode).toBe(1);
+    });
+  });
+
+  // Producer side of the confidence-boundary staleness marker: analyze must capture
+  // the short HEAD commit into fingerprint.json so the marker can name the index's
+  // build commit. The consumer (computeStaleness/buildStalenessMarker) is unit-tested
+  // separately; this guards that the field is always written and degrades to null off
+  // a git repo, never silently dropped. (spec: add-confidence-boundary-disclosure)
+  describe('runAnalysis — build commit in fingerprint.json', () => {
+    let writeFileMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(async () => {
+      const fsMod = await import('node:fs/promises');
+      writeFileMock = vi.mocked(fsMod.writeFile);
+      writeFileMock.mockClear();
+      const cfgMod = await import('../../core/services/config-manager.js');
+      vi.mocked(cfgMod.readOpenLoreConfig).mockResolvedValue(null as never);
+    });
+
+    function fingerprint(): { hash: string; commit: string | null } {
+      const call = writeFileMock.mock.calls.find(c => String(c[0]).endsWith(ARTIFACT_FINGERPRINT));
+      expect(call, 'fingerprint.json was written').toBeDefined();
+      return JSON.parse(String((call as unknown[])[1]));
+    }
+
+    it('records the short HEAD commit when analyzing a git repo', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'ol-analyze-git-'));
+      const git = (...a: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: dir });
+      try {
+        git('init', '-q');
+        writeFileSync(join(dir, 'a.ts'), 'export const x = 1;\n');
+        git('add', 'a.ts');
+        git('commit', '-q', '-m', 'init');
+        const head = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: dir }).toString().trim();
+
+        await runAnalysis(dir, join(dir, '.openlore', 'analysis'), { maxFiles: 100000, include: [], exclude: [] });
+        expect(fingerprint().commit).toBe(head);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('writes commit: null off a git repo — degrades, never omits the field', async () => {
+      await runAnalysis('/fake/root', '/fake/root/.openlore/analysis', { maxFiles: 100000, include: [], exclude: [] });
+      const fp = fingerprint();
+      expect('commit' in fp).toBe(true);
+      expect(fp.commit).toBeNull();
     });
   });
 });

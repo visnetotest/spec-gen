@@ -115,6 +115,19 @@ describe('handleRecall — bullet-proof guarantee', () => {
     const r = (await handleRecall(root)) as { total: number };
     expect(r.total).toBe(2);
   });
+
+  // confidenceBoundary wiring (spec: add-confidence-boundary-disclosure). Recall does no
+  // graph traversal, so it carries no basis — its boundary is purely the index staleness.
+  // The tmp root is non-git with no fingerprint, so staleness is silent → complete.
+  it('attaches a basis-free confidenceBoundary tracking index staleness', async () => {
+    await handleRemember(root, 'foo must stay pure', [{ symbol: 'foo', file: 'src/foo.ts' }]);
+    const r = (await handleRecall(root, 'foo')) as {
+      confidenceBoundary: { complete: boolean; basis?: unknown; staleness?: unknown };
+    };
+    expect(r.confidenceBoundary.complete).toBe(true);
+    expect(r.confidenceBoundary.basis).toBeUndefined();
+    expect(r.confidenceBoundary.staleness).toBeUndefined();
+  });
 });
 
 // ── decisions in recall + adversarial inputs ──────────────────────────────────

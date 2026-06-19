@@ -65,6 +65,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   get_function_skeleton: 'conclusion',
   get_god_functions: 'conclusion',
   check_spec_drift: 'conclusion',
+  blast_radius: 'conclusion',
   search_code: 'conclusion',
   suggest_insertion_points: 'conclusion',
   search_specs: 'conclusion',
@@ -90,6 +91,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   get_landmarks: 'conclusion',
   get_map: 'conclusion',
   find_path: 'conclusion',
+  federation_status: 'conclusion',
   detect_changes: 'conclusion',
   get_health_map: 'conclusion',
   get_surprising_connections: 'conclusion',
@@ -100,6 +102,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   sync_decisions: 'conclusion',
   remember: 'conclusion',
   recall: 'conclusion',
+  verify_claim: 'conclusion',
 };
 
 /** The tools intentionally allowed to emit raw topology, sorted for stable assertions. */

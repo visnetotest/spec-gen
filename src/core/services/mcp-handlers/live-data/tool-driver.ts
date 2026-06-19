@@ -102,6 +102,7 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
   get_test_coverage: { kind: 'read', buildArgs: dirOnly },
   find_dead_code: { kind: 'read', buildArgs: dirOnly },
   select_tests: { kind: 'read', buildArgs: dirOnly },
+  blast_radius: { kind: 'read', buildArgs: dirOnly },
 
   // ── function/symbol tools ────────────────────────────────────────────────
   get_subgraph: {
@@ -124,6 +125,7 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
     kind: 'read',
     buildArgs: needFn((f, fn) => ({ directory: f.directory, from: fn, to: f.secondFunction ?? fn })),
   },
+  federation_status: { kind: 'read', buildArgs: dirOnly },
   get_function_body: {
     kind: 'read',
     buildArgs: (f) =>
@@ -179,6 +181,8 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
     }),
   },
   recall: { kind: 'read', buildArgs: (f) => ({ directory: f.directory, limit: 5 }) },
+  // safe-to-change needs only a subject — a single-symbol probe over the fixture.
+  verify_claim: { kind: 'read', buildArgs: needFn((f, fn) => ({ directory: f.directory, kind: 'safe-to-change', subject: fn })) },
 
   // ── LLM-backed tools (openWorldHint) ─────────────────────────────────────
   // generate_tests has a deterministic no-LLM path (useLlm:false + dryRun:true), so
