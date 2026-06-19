@@ -280,6 +280,21 @@ export class EdgeStore {
     ).map(rawToCallEdge);
   }
 
+  /**
+   * The distinct names of every unresolved external reference this repo makes
+   * (`confidence === 'external'`) — the upstream interfaces this repo consumes from
+   * the rest of the fleet. The producer side of federation resolves each of these to
+   * the repo that publishes it. Non-fleet externals (npm/stdlib) appear here too and
+   * are filtered downstream when no registered repo produces them.
+   */
+  getExternalReferenceNames(): string[] {
+    return (
+      this.db
+        .prepare("SELECT DISTINCT callee_name FROM edges WHERE confidence = 'external' AND callee_name IS NOT NULL")
+        .all() as unknown as Array<{ callee_name: string }>
+    ).map((r) => r.callee_name);
+  }
+
   /** Batch: outgoing edges for a set of caller IDs — one query instead of N. */
   getCalleesForIds(callerIds: string[]): CallEdge[] {
     if (callerIds.length === 0) return [];

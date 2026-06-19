@@ -35,18 +35,25 @@
       symbol alive via a consumer; `analyze_impact` names the consumer; `select_tests` selects the
       consumer's test; `find_path` locates the producer + bridge.
 
-## 4. Fleet-level memory and decisions  — DEFERRED (needs bitemporal memory, PR #163)
-- [ ] Allow a memory/decision to anchor to a published interface via stable ID; surface it in consumer
-      repos. Reuse bitemporal + freshness machinery.
-- [ ] Test: a memory anchored to an upstream interface surfaces (with verdict) when recalling in a
-      consumer repo.
+## 4. Fleet-level memory and decisions  — DONE (PR #168, ADR-0019); needed bitemporal memory (PR #163, now in main)
+- [x] A memory anchored to a published interface surfaces in consumer repos. `recall` gains opt-in
+      `federation`/`federationRepos`; `src/core/federation/fleet-memory.ts` (`findFleetMemory`) resolves
+      the home repo's external references to producer repos, selects producer memories anchored to those
+      interfaces, and computes freshness against the PRODUCER's graph (orphaned/retired withheld).
+      `edge-store.getExternalReferenceNames()` provides the home's consumed interfaces. Matched by symbol
+      name (arity unconfirmed at an external call site — the standard federation caveat).
+- [x] Test: `fleet-memory.test.ts` (fresh surfaces, orphaned withheld, retired excluded, not-consumed
+      excluded, cap/truncation) + real-two-repo e2e dogfood (fresh surfaces with verdict; stale producer
+      skipped with reason; orphaned producer anchor withheld while consulted).
+- [x] Decision side (PR #168 follow-up): `findFleetMemory` also surfaces active producer **decisions**
+  anchored to a consumed interface, in a `decisions` array, with producer-side freshness (orphaned
+  withheld, inactive excluded). `record_decision` auto-anchors to the symbol, so a producer decision
+  surfaces in the consumer's `recall.fleetMemory.decisions` (verified by `fleet-memory.test.ts` + e2e).
 
-> **ARCHIVE NOTE.** The `FleetLevelAnchoredMemory` requirement in
-> `specs/mcp-handlers/spec.md` covers this deferred group. It is marked DEFERRED there
-> and MUST NOT be promoted into the live `openspec/specs/mcp-handlers/spec.md` when this
-> change is archived — doing so would make `audit_spec_coverage` flag a phantom
-> unimplemented requirement. Re-home it into its own change once PR #163 (bitemporal
-> typed memory) lands in `main`.
+> **RE-HOMED (PR #168).** The `FleetLevelAnchoredMemory` requirement is now promoted into the live
+> `openspec/specs/mcp-handlers/spec.md` (memory path), since PR #163 (bitemporal typed memory) is in
+> `main`. The DEFERRED copy below in this change's `specs/mcp-handlers/spec.md` is left as the historical
+> proposal record and MUST still NOT be re-merged at archive time (it would duplicate the live one).
 
 ## 5. Surface + docs
 - [x] Register federation capability behind an opt-in `federation` preset; nothing in the default.

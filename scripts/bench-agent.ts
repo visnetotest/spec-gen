@@ -21,7 +21,8 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSy
 import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
-import { REPOS, TASKS, type PinnedRepo, type BenchTask } from './bench-agent.tasks.js';
+import { REPOS, TASKS, type PinnedRepo, type BenchTask, type RepoTier } from './bench-agent.tasks.js';
+import { parseAgentOutput, analyzeAgentTranscript } from '../src/bench/transcript-metrics.js';
 
 // ── CLI args ────────────────────────────────────────────────────────────────
 interface Opts {
@@ -35,7 +36,7 @@ interface Opts {
   out: string;
   maxBudgetUsd: number;
   skipSetup: boolean;
-  withFullTools: boolean;   // WITH exposes all ~45 tools instead of a lean preset
+  withFullTools: boolean;   // WITH exposes all ~60 tools instead of a lean preset
   withPreset: string;       // lean tool preset for the WITH arm (default: navigation)
   leanOrient: boolean;      // instruct the WITH arm to call orient with lean:true (Spec 27)
 }
@@ -67,7 +68,7 @@ function parseArgs(argv: string[]): Opts {
 }
 
 // ── Metrics ─────────────────────────────────────────────────────────────────
-// Tokens are broken out because the WITH condition loads ~45 MCP tool
+// Tokens are broken out because the WITH condition loads ~60 MCP tool
 // definitions into the system prompt every call: that shows up as a large but
 // CHEAP cached-read component, so a single lumped "tokens" number flatters
 // WITHOUT and is misleading. `costUsd` is the honest bottom line (it prices
@@ -82,6 +83,12 @@ interface Metrics {
   answer: string;
   correct: boolean;
   error?: string;
+  // Re-read economy (add-trust-calibrated-context-economy, item 4). Populated from
+  // the agent transcript on live `stream-json` runs; undefined when no transcript is
+  // available (e.g. a legacy json-only result or a failed run).
+  fileReadOps?: number;     // source re-reads (Read/Grep/cat…) — what a certificate lets the agent skip
+  fileReadTokens?: number;  // tokens those reads loaded into the model — the re-derivation cost
+  certifiedFacts?: number;  // verified-current certificates openlore returned (WITH arm only)
 }
 
 type Condition = 'without' | 'with';
@@ -136,9 +143,9 @@ function localCli(): string {
 
 function writeMcpConfigs(work: string, opts: { fullTools: boolean; preset: string }): { openlore: string; empty: string } {
   // WITH = openlore as recommended. By default a lean **--preset** (navigation:
-  // 7 graph-traversal tools) rather than the full ~45 — the MCP best-practice
+  // 10 graph-traversal tools) rather than the full ~60 — the MCP best-practice
   // that tool schemas for tools the agent never calls are pure per-request
-  // overhead. `--with-full-tools` exposes all 45 for the overhead comparison.
+  // overhead. `--with-full-tools` exposes all ~60 for the overhead comparison.
   const cli = localCli();
   const oloreArgs = ['mcp', '--no-watch-auto', ...(opts.fullTools ? [] : ['--preset', opts.preset])];
   const openlore = join(work, `openlore-mcp-${opts.fullTools ? 'full' : opts.preset}.json`);
@@ -194,6 +201,15 @@ function runAgent(task: BenchTask, repoDir: string, condition: Condition, opts: 
     const answer = withCond
       ? `[mock] ${task.expect.mustInclude.join(', ')}`
       : `[mock] partial — ${task.expect.mustInclude.slice(0, 1).join(', ')}`;
+    // Tier-aware mock so the dry-run report demonstrates the scorecard's whole point:
+    // large-unfamiliar = big re-read savings; small-familiar = ~none (openlore is rent).
+    const tier: RepoTier = REPOS.find((r) => r.id === task.repo)?.tier ?? 'large-unfamiliar';
+    const small = tier === 'small-familiar';
+    const reread = withCond
+      // small/familiar WITH ≈ WITHOUT (openlore is rent — the model already knows the
+      // library, so the certificate removes no re-read it would have done anyway).
+      ? { fileReadOps: small ? 3 + (base % 2) : 2 + (base % 2), fileReadTokens: small ? 4100 + base * 90 : 2500 + base * 100, certifiedFacts: small ? 1 : 4 }
+      : { fileReadOps: small ? 3 + (base % 2) : 9 + base, fileReadTokens: small ? 4000 + base * 90 : 14000 + base * 400, certifiedFacts: 0 };
     return {
       freshInputTokens: withCond ? 4000 + base * 100 : 14000 + base * 400,
       cacheReadTokens: withCond ? 30000 + base * 500 : 6000 + base * 200,
@@ -203,12 +219,16 @@ function runAgent(task: BenchTask, repoDir: string, condition: Condition, opts: 
       durationMs: withCond ? 9000 + base * 300 : 26000 + base * 900,
       answer,
       correct: score(task, answer),
+      ...reread,
     };
   }
 
   const args = [
     '-p', task.prompt,
-    '--output-format', 'json',
+    // stream-json (requires --verbose with -p) emits the tool-use/tool-result
+    // transcript, not just the final result — needed to measure re-read avoidance.
+    // parseAgentOutput still reads the terminal `result` event for usage/cost.
+    '--output-format', 'stream-json', '--verbose',
     '--model', opts.model,
     '--max-budget-usd', String(opts.maxBudgetUsd),
     '--no-session-persistence',
@@ -253,21 +273,24 @@ function runAgent(task: BenchTask, repoDir: string, condition: Condition, opts: 
     raw = out; // some non-zero exits still emit the result json
   }
 
-  const j = JSON.parse(raw) as Record<string, unknown>;
-  const usage = (j.usage ?? {}) as Record<string, number>;
-  const fresh = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
-  const cacheRead = usage.cache_read_input_tokens ?? 0;
-  const output = usage.output_tokens ?? 0;
-  const answer = String(j.result ?? '');
+  const { transcript, result } = parseAgentOutput(raw);
+  if (!result) {
+    return { freshInputTokens: 0, cacheReadTokens: 0, outputTokens: 0, costUsd: 0, numTurns: 0, durationMs: Date.now() - t0, answer: '', correct: false, error: 'no result event in agent output' };
+  }
+  const reread = analyzeAgentTranscript(transcript);
   return {
-    freshInputTokens: fresh,
-    cacheReadTokens: cacheRead,
-    outputTokens: output,
-    costUsd: Number(j.total_cost_usd ?? 0),
-    numTurns: Number(j.num_turns ?? 0),
-    durationMs: Number(j.duration_ms ?? Date.now() - t0),
-    answer,
-    correct: score(task, answer),
+    freshInputTokens: result.freshInputTokens,
+    cacheReadTokens: result.cacheReadTokens,
+    outputTokens: result.outputTokens,
+    costUsd: result.costUsd,
+    numTurns: result.numTurns,
+    durationMs: result.durationMs || (Date.now() - t0),
+    answer: result.answer,
+    correct: score(task, result.answer),
+    fileReadOps: reread.fileReadOps,
+    fileReadTokens: reread.fileReadTokens,
+    // openlore certificates exist only in the WITH arm; the WITHOUT transcript has none.
+    certifiedFacts: condition === 'with' ? reread.certifiedFacts : 0,
   };
 }
 
@@ -283,7 +306,14 @@ interface Cell {
   costUsd: number; costMin: number; costMax: number;   // bottom line + variance
   freshInputTokens: number; cacheReadTokens: number; outputTokens: number;
   numTurns: number; durationMs: number; correctRate: number; n: number;
+  // Re-read economy medians — undefined when no run produced transcript data.
+  fileReadOps?: number; fileReadTokens?: number; certifiedFacts?: number;
 }
+/** Median over the runs that actually reported a value (skips undefined). */
+const medianDefined = (xs: Array<number | undefined>): number | undefined => {
+  const present = xs.filter((x): x is number => typeof x === 'number');
+  return present.length ? median(present) : undefined;
+};
 function summarize(runs: Metrics[]): Cell {
   const costs = runs.map((r) => r.costUsd);
   return {
@@ -297,6 +327,9 @@ function summarize(runs: Metrics[]): Cell {
     durationMs: median(runs.map((r) => r.durationMs)),
     correctRate: runs.length ? runs.filter((r) => r.correct).length / runs.length : 0,
     n: runs.length,
+    fileReadOps: medianDefined(runs.map((r) => r.fileReadOps)),
+    fileReadTokens: medianDefined(runs.map((r) => r.fileReadTokens)),
+    certifiedFacts: medianDefined(runs.map((r) => r.certifiedFacts)),
   };
 }
 
@@ -318,9 +351,9 @@ function renderReport(
   L.push('');
   L.push('### Methodology');
   L.push('');
-  L.push(`- **Agent:** \`claude -p --output-format json\`, model \`${opts.model}\`, ${opts.runs} run(s)/task, median reported.`);
+  L.push(`- **Agent:** \`claude -p --output-format stream-json\`, model \`${opts.model}\`, ${opts.runs} run(s)/task, median reported. The transcript stream is parsed for the re-read economy below; usage/cost come from the terminal \`result\` event.`);
   L.push(`- **Isolation:** both arms run with \`--strict-mcp-config\` so the agent uses ONLY the config we pass (a globally-registered openlore can't leak into the baseline). Same as CodeGraph's published benchmark.`);
-  L.push(`- **Conditions:** WITHOUT = empty MCP config (grep/read tools only) — the baseline. WITH = openlore (the repo's **local build**): \`openlore mcp --no-watch-auto ${opts.withFullTools ? '' : '--preset ' + opts.withPreset}\` (${opts.withFullTools ? 'all ~45 tools' : `**--preset ${opts.withPreset}** — a lean graph-navigation surface, the MCP best-practice of not paying schema overhead for tools the agent never calls`}), repo pre-analyzed with \`openlore analyze --no-embed\`, **plus** a system-prompt instruction to call \`orient()\` before reading files (a faithful mirror of the shipped \`openlore-orient\` skill — measures the product, not tools the agent ignores).`);
+  L.push(`- **Conditions:** WITHOUT = empty MCP config (grep/read tools only) — the baseline. WITH = openlore (the repo's **local build**): \`openlore mcp --no-watch-auto ${opts.withFullTools ? '' : '--preset ' + opts.withPreset}\` (${opts.withFullTools ? 'all ~60 tools' : `**--preset ${opts.withPreset}** — a lean graph-navigation surface, the MCP best-practice of not paying schema overhead for tools the agent never calls`}), repo pre-analyzed with \`openlore analyze --no-embed\`, **plus** a system-prompt instruction to call \`orient()\` before reading files (a faithful mirror of the shipped \`openlore-orient\` skill — measures the product, not tools the agent ignores).`);
   L.push('- **Scoring:** correct = the agent\'s final answer contains every independently-verifiable expected substring (`expect.mustInclude` in `bench-agent.tasks.ts`), confirmed against the pinned source by grep — not derived from openlore\'s own graph.');
   L.push('- **Metrics:** **cost (USD)** is the bottom line (it prices fresh vs cached tokens correctly). Tokens are broken into *fresh* input (`input_tokens` + cache creation — what the model processed fresh) and *cached* reads (`cache_read_input_tokens` — ~10× cheaper); plus output, round-trips (`num_turns`), wall-clock.');
   L.push('');
@@ -360,7 +393,58 @@ function renderReport(
   L.push('');
   L.push('> Spec 13 kill-signal: if the relational-task reduction is small or negative, that is the earliest signal to re-weight toward the governance layer (specs 15+). Report losses honestly; do not bury this number.');
   L.push('');
+  for (const line of rereadSection(perTask, opts.dryRun)) L.push(line);
   return L.join('\n');
+}
+
+/**
+ * Re-read economy section (add-trust-calibrated-context-economy, item 4): how much
+ * re-derivation openlore removes, reported SEPARATELY per arena because the answer
+ * differs — the small/familiar tier is openlore's honest worst case (the +43% rent).
+ */
+function rereadSection(perTask: Array<{ task: BenchTask; without: Cell; with: Cell }>, dryRun = false): string[] {
+  const L: string[] = [];
+  L.push(`### Re-read economy (trust-calibrated context economy)${dryRun ? ' — DRY RUN (synthetic numbers)' : ''}`);
+  L.push('');
+  L.push('A grounding certificate (`verifiedCurrent`) is the agent\'s permission to NOT re-read a span; the re-read tokens it removes are the rent openlore is supposed to subtract. Reported per arena because the answer differs — and the small/familiar case is openlore\'s honest worst case, tracked here rather than hidden.');
+  L.push('');
+  const haveData = perTask.some((p) => p.without.fileReadOps !== undefined || p.with.fileReadOps !== undefined);
+  if (!haveData) {
+    L.push('> No transcript data in this run — the re-read metrics require a live `--output-format stream-json` run (a `--dry-run` populates synthetic values). Section omitted.');
+    L.push('');
+    return L;
+  }
+  const tierOf = (id: string): RepoTier => REPOS.find((r) => r.id === id)?.tier ?? 'large-unfamiliar';
+  const fmt = (v: number | undefined): string => (v === undefined ? 'n/a' : v.toFixed(0));
+  const delta = (a: number | undefined, b: number | undefined): string =>
+    a === undefined || b === undefined ? 'n/a' : (a - b).toFixed(0);
+  L.push('| Arena | Re-reads wo→w | Re-reads avoided | Read-tokens wo→w | Read-tokens avoided | Certificates (w) |');
+  L.push('|-------|---------------|------------------|------------------|---------------------|------------------|');
+  for (const tier of ['large-unfamiliar', 'small-familiar'] as RepoTier[]) {
+    const rows = perTask.filter((p) => tierOf(p.task.repo) === tier);
+    if (rows.length === 0) continue;
+    const woOps = medianDefined(rows.map((r) => r.without.fileReadOps));
+    const wOps = medianDefined(rows.map((r) => r.with.fileReadOps));
+    const woTok = medianDefined(rows.map((r) => r.without.fileReadTokens));
+    const wTok = medianDefined(rows.map((r) => r.with.fileReadTokens));
+    const certs = medianDefined(rows.map((r) => r.with.certifiedFacts));
+    L.push(`| ${tier} | ${fmt(woOps)}→${fmt(wOps)} | ${delta(woOps, wOps)} | ${fmt(woTok)}→${fmt(wTok)} | ${delta(woTok, wTok)} | ${fmt(certs)} |`);
+  }
+  L.push('');
+  L.push('_wo = WITHOUT openlore, w = WITH. "avoided" = wo − w (re-reads / read-tokens the certificate lever removed). Certificates = median verified-current facts openlore handed the WITH arm._');
+  L.push('');
+  // Honest callout for the worst-case arena.
+  const small = perTask.filter((p) => tierOf(p.task.repo) === 'small-familiar');
+  const woTokS = medianDefined(small.map((r) => r.without.fileReadTokens));
+  const wTokS = medianDefined(small.map((r) => r.with.fileReadTokens));
+  if (woTokS !== undefined && wTokS !== undefined) {
+    const avoided = woTokS - wTokS;
+    L.push(avoided > 0
+      ? `> Small/familiar arena: WITH removed ~${avoided.toFixed(0)} re-read tokens — the certificate lever does real work even where the model already knows the library.`
+      : `> Small/familiar arena: WITH removed **no** re-read tokens (Δ ${avoided.toFixed(0)}). openlore is rent in this arena — the scorecard says so rather than hiding it (the +43% case the proposal commits to tracking).`);
+    L.push('');
+  }
+  return L;
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────

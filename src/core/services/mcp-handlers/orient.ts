@@ -36,6 +36,8 @@ import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
 import type { MemoryFreshness } from '../../../types/index.js';
 
+import { type Reversal, collectReversals, fileScope, supersededDecisionIds } from './reversals.js';
+
 // ============================================================================
 // MANIFEST CACHE
 // ============================================================================
@@ -421,13 +423,27 @@ export async function handleOrient(
   // (add-bitemporal-typed-memory-operations). Computed across the decisions surfaced
   // here plus the task-relevant `remember` notes.
   let unreconciledMemories: UnreconciledGroup[] | undefined;
+  // Reverted/superseded intent in scope, surfaced as do-not-repeat warnings
+  // (ReversalAwareness). Read from the bitemporal supersession record + decision
+  // supersedes links; never re-served as authoritative current context.
+  let reversals: Reversal[] | undefined;
+  // Ids of decisions superseded by another (shared by every authoritative decision
+  // surface below — pendingDecisions and governingDecisions — so a superseded decision
+  // is never served as current intent on any of them). Populated in the block below.
+  let supersededIds: ReadonlySet<string> = new Set<string>();
   if (!lean) try {
     const { loadDecisionStore, INACTIVE_STATUSES } = await import('../../decisions/store.js');
     const store = await loadDecisionStore(absDir);
     const relevantDomainSet = new Set(specDomains.map((s) => s.domain));
     const relevantFileSet = new Set(relevantFiles);
+    // A decision superseded by another (and not yet flipped to `rejected` by
+    // consolidation — which may never run without an LLM) must never be served as
+    // authoritative current context; it surfaces only under `reversals`. Same predicate
+    // collectReversals uses, so the two surfaces cannot disagree (ReversalAwareness).
+    supersededIds = supersededDecisionIds(store.decisions);
     const active = store.decisions.filter((d) => {
       if (INACTIVE_STATUSES.has(d.status)) return false;
+      if (supersededIds.has(d.id)) return false;
       // Surface if it touches a domain or file the orient task identified
       if (d.affectedDomains.some((dom) => relevantDomainSet.has(dom))) return true;
       if (d.affectedFiles.some((f) => relevantFileSet.has(f))) return true;
@@ -469,8 +485,9 @@ export async function handleOrient(
     // relevant symbol is surfaced at the default entry tool. Gated on the graph view.
     const scopeFiles = new Set<string>(relevantFileSet);
     for (const d of active) for (const f of d.affectedFiles) scopeFiles.add(f);
+    // Loaded once and reused for both the contradiction fold and the reversal scan.
+    const memStore = await loadMemoryStore(absDir);
     if (view && scopeFiles.size > 0) {
-      const memStore = await loadMemoryStore(absDir);
       for (const m of memStore.memories) {
         if (m.invalidatedAt) continue;
         if (!m.anchors.some((a) => scopeFiles.has(a.filePath))) continue;
@@ -480,6 +497,21 @@ export async function handleOrient(
     }
     const groups = findUnreconciled(contradictionItems);
     if (groups.length > 0) unreconciledMemories = groups;
+
+    // ── ReversalAwareness (do-not-repeat) ──────────────────────────────────
+    // Reversal scope is the TASK's scope ONLY: files the search surfaced, plus the
+    // files of decisions relevant to the task by domain/file. Deliberately NOT
+    // `scopeFiles` — that set also absorbs the files of every `approved` decision
+    // (the always-surface-for-sync rule), which would leak a reverted decision/
+    // memory on an unrelated approved-decision's file into this task.
+    const revScopeFiles = new Set<string>(relevantFileSet);
+    for (const d of store.decisions) {
+      const taskRelevant =
+        d.affectedDomains.some((dom) => relevantDomainSet.has(dom)) ||
+        d.affectedFiles.some((f) => relevantFileSet.has(f));
+      if (taskRelevant) for (const f of d.affectedFiles) revScopeFiles.add(f);
+    }
+    reversals = collectReversals(memStore.memories, store.decisions, fileScope(revScopeFiles, relevantDomainSet));
   } catch {
     // non-fatal — decisions feature may not be initialised
   }
@@ -495,7 +527,9 @@ export async function handleOrient(
   if (!lean) try {
     const es = llmCtx?.edgeStore;
     if (es && relevantFiles.length > 0) {
-      const govs = es.getDecisionsForFiles(relevantFiles);
+      // Exclude superseded decisions here too: a retired decision must not be served as
+      // an authoritative governing decision either, matching the pendingDecisions filter.
+      const govs = es.getDecisionsForFiles(relevantFiles).filter((d) => !supersededIds.has(d.decisionId));
       if (govs.length > 0) {
         governingDecisions = govs.map((d) => ({
           id: d.decisionId,
@@ -745,6 +779,7 @@ export async function handleOrient(
     ...(pendingDecisions !== undefined ? { pendingDecisions } : {}),
     ...(staleDecisions !== undefined ? { staleDecisions } : {}),
     ...(unreconciledMemories !== undefined ? { unreconciledMemories } : {}),
+    ...(reversals !== undefined ? { reversals } : {}),
     ...(governingDecisions !== undefined ? { governingDecisions } : {}),
     ...(provenance !== undefined ? { provenance } : {}),
     ...(changeCoupling !== undefined ? { changeCoupling } : {}),

@@ -318,9 +318,9 @@ export async function dispatchTool(
       args as { directory: string; content: string; anchors?: AnchorHint[]; tags?: string[]; type?: string; supersedes?: string };
     return handleRemember(directory, content, anchors, tags, type, supersedes);
   } else if (name === 'recall') {
-    const { directory, task, limit = 10, tokenBudget, asOf, changedSince, type } =
-      args as { directory: string; task?: string; limit?: number; tokenBudget?: number; asOf?: string; changedSince?: string; type?: string };
-    return handleRecall(directory, task, limit, tokenBudget, asOf, changedSince, type);
+    const { directory, task, limit = 10, tokenBudget, asOf, changedSince, type, federation, federationRepos } =
+      args as { directory: string; task?: string; limit?: number; tokenBudget?: number; asOf?: string; changedSince?: string; type?: string; federation?: boolean; federationRepos?: string[] };
+    return handleRecall(directory, task, limit, tokenBudget, asOf, changedSince, type, federation, federationRepos);
   } else if (name === 'verify_claim') {
     const { directory, kind, subject, object } =
       args as { directory: string; kind: ClaimKind; subject: string; object?: string };

@@ -530,6 +530,36 @@ describe('handleTraceExecutionPath', () => {
     expect(result.paths.every(p => p.hops === 2)).toBe(true);
   });
 
+  it('resolves the EXACT target (not a same-substring node) and discloses a synthesized hop in the boundary', async () => {
+    // "area" must not also resolve "totalArea". Before the exact-match fix, the DFS
+    // stopped at the same-substring `totalArea` (reached by a direct edge) and never
+    // reached the literal `area` (reachable only across a synthesized dispatch edge),
+    // reporting a misleadingly `complete: true` boundary for a path to a target it
+    // never reached. Now it reaches `area` and the boundary discloses the synthesized hop.
+    const nodes = [
+      makeNode({ id: 'm.ts::main', fanOut: 1 }),
+      makeNode({ id: 's.ts::totalArea', fanOut: 1 }),
+      makeNode({ id: 's.ts::area', fanOut: 0 }),
+    ];
+    const synth = (from: string, to: string): CallEdge =>
+      ({ callerId: from, calleeId: to, calleeName: to.split('::')[1] ?? to, confidence: 'synthesized', kind: 'calls', synthesizedBy: 'cha-name-only' });
+    const edges = [
+      makeEdge('m.ts::main', 's.ts::totalArea'),   // direct
+      synth('s.ts::totalArea', 's.ts::area'),       // synthesized dispatch → the only way to area
+    ];
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: makeGraph(nodes, edges) } as never);
+
+    const result = await handleTraceExecutionPath('/tmp/proj', 'main', 'area') as {
+      pathsFound: number;
+      shortestPath: string;
+      confidenceBoundary: { complete: boolean };
+    };
+
+    expect(result.pathsFound).toBe(1);
+    expect(result.shortestPath).toBe('main → totalArea → area'); // reached the literal target
+    expect(result.confidenceBoundary.complete).toBe(false);      // leaned on a synthesized edge — disclosed
+  });
+
   it('returns pathsFound: 0 with a hint when no path exists', async () => {
     const nodes = [
       makeNode({ id: 'f.ts::isolated', fanOut: 0 }),

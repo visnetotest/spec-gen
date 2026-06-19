@@ -478,7 +478,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       // The preset is ADVISORY (reported by /health for clients that want a
       // curated list, e.g. the Pi extension). The daemon dispatches any known
       // tool so it can back multiple clients with different surfaces — notably
-      // the MCP server, which delegates all ~45 tools here. Unknown tools 404
+      // the MCP server, which delegates all ~60 tools here. Unknown tools 404
       // via UnknownToolError below.
       let body: Record<string, unknown>;
       try {

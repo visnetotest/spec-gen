@@ -28,6 +28,9 @@ import {
 import { getHeadCommit, resolveCommitSha, isAncestor } from '../../decisions/git-time.js';
 import { queryTerms, scoreMemory, type RankFields } from './memory-ranking.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
+import { resolveFederationScope } from '../../federation/resolver.js';
+import { findFleetMemory } from '../../federation/fleet-memory.js';
+import { collectReversals, supersededDecisionIds } from './reversals.js';
 import {
   MEMORY_TYPES,
   type AnchoredMemory,
@@ -200,6 +203,8 @@ export async function handleRecall(
   asOf?: string,
   changedSince?: string,
   typeFilter?: string,
+  federation?: boolean,
+  federationRepos?: string[],
 ): Promise<unknown> {
   try {
     const rootPath = await validateDirectory(directory);
@@ -298,7 +303,12 @@ export async function handleRecall(
       // Decisions are outside the bitemporal model — skip them when a temporal filter
       // or a type filter is active (they are untyped and lifecycle-governed).
       if (!temporal && !wantType) {
+        // A decision superseded by another (pre-consolidation, still draft/approved/
+        // verified) must not be served as authoritative — it surfaces only under
+        // `reversals`. Same predicate as collectReversals so the two never disagree.
+        const supersededIds = supersededDecisionIds(decisionStore.decisions);
         for (const d of activeDecisions(decisionStore.decisions)) {
+          if (supersededIds.has(d.id)) continue;
           const anchors = decisionAnchors(d);
           const f = memoryFreshness(anchors, view);
           const r = scoreMemory(terms, decisionFields(d, anchors));
@@ -369,6 +379,46 @@ export async function handleRecall(
         ? `${unreconciled.length} symbol(s) have two or more authoritative memories — reconcile or supersede one (see unreconciled).`
         : undefined;
 
+      // Fleet-level memory (ADR-0019): opt-in cross-repo recall. Surface memories
+      // recorded in producer repos and anchored to interfaces THIS (consumer) repo
+      // references, each with its producer-side freshness verdict. Orphaned/retired
+      // producer memories are withheld by findFleetMemory (the authoritative-recall
+      // invariant across the boundary). Deterministic, lazy per-repo load, no LLM.
+      let fleetMemory:
+        | { memories: unknown[]; decisions: unknown[]; reposConsulted: string[]; reposSkipped: Array<{ name: string; state: string; reason?: string }>; caveats: string[]; note?: string }
+        | undefined;
+      const fedScope = resolveFederationScope(rootPath, { federation, federationRepos });
+      if (fedScope.active) {
+        const fleet = await findFleetMemory(rootPath, fedScope);
+        const cov = fleet.coverage;
+        if (fleet.memories.length > 0 || fleet.decisions.length > 0 || cov.reposConsulted.length > 0 || cov.reposSkipped.length > 0) {
+          fleetMemory = {
+            memories: fleet.memories,
+            decisions: fleet.decisions,
+            reposConsulted: cov.reposConsulted.map((r) => r.name),
+            reposSkipped: cov.reposSkipped.map((r) => ({ name: r.name, state: r.state, reason: r.reason })),
+            caveats: cov.caveats,
+            ...(fleet.truncated > 0 ? { note: `${fleet.truncated} more fleet record(s) not shown — cap reached.` } : {}),
+          };
+        }
+      }
+
+      // Reversal-briefing (the dedicated recall surface for ReversalAwareness): reverted/
+      // superseded intent relevant to this recall, surfaced as do-not-repeat warnings via
+      // the same shared logic as orient. Scoped by TASK relevance (not current-memory files)
+      // so a fully-reverted approach surfaces even when no current memory anchors to its file.
+      // With no task, everything reverted is in scope (bounded by the omission cap).
+      const scoreInScope = (fields: RankFields): boolean => !hasQuery || scoreMemory(terms, fields).score > 0;
+      const reversals = collectReversals(memStore.memories, decisionStore.decisions, {
+        memoryInScope: (m) => scoreInScope({
+          anchorSymbols: m.anchors.map((a) => a.symbolName).filter((s): s is string => !!s),
+          tags: m.tags ?? [],
+          anchorFiles: m.anchors.map((a) => a.filePath),
+          content: m.content,
+        }),
+        decisionInScope: (a) => scoreInScope(decisionFields(a, decisionAnchors(a))),
+      });
+
       return {
         task: task ?? null,
         graphAvailable: ctx !== null,
@@ -384,6 +434,8 @@ export async function handleRecall(
         authoritative: authoritativeOut.map(stripScore),
         needsReanchoring: needsReanchoring.map(stripScore),
         unreconciled: unreconciled.length ? unreconciled : undefined,
+        ...(reversals !== undefined ? { reversals } : {}),
+        ...(fleetMemory !== undefined ? { fleetMemory } : {}),
         budget,
         note: [budgetNote, reanchorNote, unreconciledNote, ...warnings].filter(Boolean).join(' ') || undefined,
         // Recall does no graph traversal — its boundary is the freshness of the
