@@ -1075,11 +1075,23 @@ export async function handleTraceExecutionPath(
 
   const entryLower  = entryFunction.toLowerCase();
   const targetLower = targetFunction.toLowerCase();
-  const entryNodes  = cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(entryLower));
-  const targetNodes = cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(targetLower));
+  const entryMatches  = cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(entryLower));
+  const targetMatches = cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(targetLower));
 
-  if (entryNodes.length === 0)  return { error: `No function matching "${entryFunction}" found in call graph.` };
-  if (targetNodes.length === 0) return { error: `No function matching "${targetFunction}" found in call graph.` };
+  if (entryMatches.length === 0)  return { error: `No function matching "${entryFunction}" found in call graph.` };
+  if (targetMatches.length === 0) return { error: `No function matching "${targetFunction}" found in call graph.` };
+
+  // Prefer EXACT name matches when any exist (same as find_path). Otherwise a query
+  // like "area" also resolves "totalArea", and the DFS — which stops at the first
+  // target it reaches — can halt at the same-substring node via a direct edge and
+  // never reach the literal target (which may be reachable only across a synthesized
+  // edge). That produced a misleadingly `complete: true` boundary for a path that
+  // never reached the requested target; exact-match keeps the trace and its boundary
+  // honest and consistent with find_path / analyze_impact.
+  const exactEntry  = entryMatches.filter(n => n.name.toLowerCase() === entryLower);
+  const exactTarget = targetMatches.filter(n => n.name.toLowerCase() === targetLower);
+  const entryNodes  = exactEntry.length  > 0 ? exactEntry  : entryMatches;
+  const targetNodes = exactTarget.length > 0 ? exactTarget : targetMatches;
 
   // Value-level opt-in (spec: add-intraprocedural-cfg-dataflow-overlay): restrict
   // each entry's first hop to the calls whose arguments are data-dependent on the
