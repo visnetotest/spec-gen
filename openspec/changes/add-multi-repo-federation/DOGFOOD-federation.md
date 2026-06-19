@@ -176,7 +176,32 @@ the count and "tools" so the phrasing is guarded going forward. Added an **Hones
 mask in-window drift — use `--force`), and a consumer that locally shadows an imported name resolves the
 call to its local node, so it won't appear as a cross-repo consumer (a disclosed false-negative).
 
-**Out of scope (pre-existing, flagged not fixed):** `find_path`'s non-federation path-chain emits a
-broken relative file path (`relative(absDir, repoRelativePath)`, present since the original `find_path`
-feature, commit 4e42e5e); the `--minimal` help says "5 tools" while `MINIMAL_TOOLS` holds 6; the
-`analyze` recency TTL can mask peer drift fleet-wide (now documented as a federation limit).
+### Three pre-existing callouts pulled into this PR
+
+The first two were flagged as pre-existing (not strictly federation), then fixed here at the maintainer's
+request; the third is documented as a limit rather than code-changed (touching the `analyze` TTL has a
+fleet-wide blast radius).
+
+1. **`find_path` emitted a broken relative path** (`pathfind.ts`, present since the original `find_path`
+   feature, commit 4e42e5e — not federation). The chain ran each node's *already repo-relative* path
+   through `relative(absDir, …)`, which re-resolved it against `process.cwd()` and emitted
+   `"../../…/<cwd>/src/app.ts"` garbage whenever the MCP server's cwd differed from the analyzed directory
+   (the normal server case — it only looked right when cwd happened to equal the project dir).
+   Reproduced live: home repo analyzed by absolute path from a different cwd →
+   `"../../../../../../private/tmp/fp-repro/examples/opencode/agent-guard.ts"`. Fixed to relativize only
+   genuinely-absolute paths and pass repo-relative ones through verbatim; regression test asserts the
+   chain stays repo-relative (no `../`) when the analyzed dir is not cwd.
+
+2. **`--minimal` help said "5 tools" while the preset holds 6** (`mcp.ts`). `get_health_map` was added to
+   `MINIMAL_TOOLS` (commit 4b76575) and the `mcp-presets` test already pins the 6-tool *set*, but the
+   user-facing `--minimal` help string and `docs/agent-setup.md` still listed the old 5. Both corrected to
+   6 (now naming `get_health_map`), and a new guard ties the `--minimal` help text to `TOOL_PRESETS.minimal`
+   (count + every member) so it can't drift from the set again. (Dated benchmark/spec records that measured
+   the historical "5 tools / ~45 tools" surface are left intact, like the tool-count guard's exclusions.)
+
+3. **`analyze`'s recency TTL can mask peer drift fleet-wide** — documented, not code-changed. A peer edited
+   and re-`analyze`d inside the recency window is TTL-short-circuited, so its `fingerprint.json` doesn't
+   move and federation still reads it as `indexed`/consultable. This affects all of OpenLore (the TTL is
+   not federation code) and changing it has a wide blast radius, so it is disclosed in the **Honest limits**
+   section of `docs/federation.md` (run `openlore analyze --force` in a peer to be certain) rather than
+   altered here.

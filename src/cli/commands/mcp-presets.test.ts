@@ -7,7 +7,7 @@
  * surface), and the selector's precedence/error behaviour must hold.
  */
 import { describe, it, expect } from 'vitest';
-import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS } from './mcp.js';
+import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS, mcpCommand } from './mcp.js';
 
 const NAV = [
   'orient', 'search_code', 'get_subgraph', 'trace_execution_path',
@@ -36,6 +36,19 @@ describe('MCP tool presets', () => {
   it('minimal preset keeps its 6-tool contract', () => {
     const tools = selectActiveTools(TOOL_DEFINITIONS, { minimal: true }).map(t => t.name);
     expect(new Set(tools)).toEqual(new Set(['orient', 'search_code', 'record_decision', 'detect_changes', 'check_spec_drift', 'get_health_map']));
+  });
+
+  // Guard: the user-facing `--minimal` help text must match the actual preset — it
+  // drifted to "5 tools" once after get_health_map was added to the 6-tool set.
+  it('the --minimal help text matches the minimal preset (count + every member named)', () => {
+    const minimal = [...TOOL_PRESETS.minimal];
+    const opt = mcpCommand.options.find(o => o.long === '--minimal');
+    expect(opt, 'the --minimal option is registered').toBeTruthy();
+    const help = opt!.description;
+    expect(help, 'help states the live minimal-preset size').toContain(`core ${minimal.length} tools`);
+    for (const t of minimal) {
+      expect(help, `help names the minimal tool "${t}"`).toContain(t);
+    }
   });
 
   it('no selector exposes the full tool set', () => {

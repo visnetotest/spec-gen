@@ -11,7 +11,7 @@
  * weighted traversal (weightedBfs) from add-call-distance-scoping.
  */
 
-import { relative } from 'node:path';
+import { relative, isAbsolute } from 'node:path';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { resolveFederationScope, locateSymbolProducers } from '../../federation/resolver.js';
 import { buildAdjacency, buildWeightedAdjacency, weightedBfs } from './graph.js';
@@ -212,8 +212,14 @@ export async function handleFindPath(
 
   const useCallDistance = opts.useCallDistance !== false;
   const result = findCheapestPath(cg, fromRes.nodes.map(n => n.id), toRes.nodes.map(n => n.id), { useCallDistance, forward });
+  // Call-graph node paths are already repo-relative (e.g. "src/app.ts"); only an
+  // absolute path needs relativizing. The bare `relative(absDir, …)` mis-resolved a
+  // repo-relative path against process.cwd(), emitting "../../…/abs/cwd/src/app.ts"
+  // garbage whenever the MCP server's cwd differed from the analyzed directory (the
+  // normal case) — it only looked right when cwd happened to equal absDir.
+  const displayFile = (filePath: string): string => (isAbsolute(filePath) ? relative(absDir, filePath) : filePath);
   const toChain = (p: { ids: string[]; hops: number; distance: number }) => ({
-    chain: p.ids.map(id => { const n = nodeMap.get(id); return { name: n?.name ?? id, file: n ? relative(absDir, n.filePath) : '' }; }),
+    chain: p.ids.map(id => { const n = nodeMap.get(id); return { name: n?.name ?? id, file: n ? displayFile(n.filePath) : '' }; }),
     hops: p.hops,
     distance: useCallDistance ? p.distance : undefined,
   });
