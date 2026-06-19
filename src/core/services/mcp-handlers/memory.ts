@@ -380,19 +380,20 @@ export async function handleRecall(
       // producer memories are withheld by findFleetMemory (the authoritative-recall
       // invariant across the boundary). Deterministic, lazy per-repo load, no LLM.
       let fleetMemory:
-        | { memories: unknown[]; reposConsulted: string[]; reposSkipped: Array<{ name: string; state: string; reason?: string }>; caveats: string[]; note?: string }
+        | { memories: unknown[]; decisions: unknown[]; reposConsulted: string[]; reposSkipped: Array<{ name: string; state: string; reason?: string }>; caveats: string[]; note?: string }
         | undefined;
       const fedScope = resolveFederationScope(rootPath, { federation, federationRepos });
       if (fedScope.active) {
         const fleet = await findFleetMemory(rootPath, fedScope);
         const cov = fleet.coverage;
-        if (fleet.memories.length > 0 || cov.reposConsulted.length > 0 || cov.reposSkipped.length > 0) {
+        if (fleet.memories.length > 0 || fleet.decisions.length > 0 || cov.reposConsulted.length > 0 || cov.reposSkipped.length > 0) {
           fleetMemory = {
             memories: fleet.memories,
+            decisions: fleet.decisions,
             reposConsulted: cov.reposConsulted.map((r) => r.name),
             reposSkipped: cov.reposSkipped.map((r) => ({ name: r.name, state: r.state, reason: r.reason })),
             caveats: cov.caveats,
-            ...(fleet.truncated > 0 ? { note: `${fleet.truncated} more fleet memor(ies) not shown — cap reached.` } : {}),
+            ...(fleet.truncated > 0 ? { note: `${fleet.truncated} more fleet record(s) not shown — cap reached.` } : {}),
           };
         }
       }

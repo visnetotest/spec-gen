@@ -676,18 +676,19 @@ in scope was reverted.
 
 ### Requirement: FleetLevelAnchoredMemory
 
-A memory anchored to a published interface SHALL surface, with its freshness verdict, when an agent
-recalls while editing a consumer repository that references that interface. `recall` SHALL accept the
-opt-in `federation` / `federationRepos` params (inert without an `.openlore/federation.json` registry)
-and, when active, return a `fleetMemory` block: for each upstream interface the home repo references
-(its external call edges), it loads each scoped producer repo's index once, selects the producer
-memories anchored to that interface (matched by exact symbol name — arity/overload unconfirmed at an
-external call site), and computes each memory's freshness against the **producer's** graph. A
-fleet-level memory whose anchor no longer exists in the producer SHALL be `orphaned` and withheld from
-the authoritative set, identically to a single-repo memory; a retired (invalidated) producer memory
-SHALL likewise be excluded. The selection SHALL be deterministic (no LLM), bounded with an explicit
-omission note, and SHALL name the repos consulted and skipped (a stale/unindexed producer is reported,
-never guessed). Decisions extend the same mechanism and are a documented follow-up.
+A memory **or decision** anchored to a published interface SHALL surface, with its freshness verdict,
+when an agent recalls while editing a consumer repository that references that interface. `recall` SHALL
+accept the opt-in `federation` / `federationRepos` params (inert without an `.openlore/federation.json`
+registry) and, when active, return a `fleetMemory` block with `memories` and `decisions` arrays: for
+each upstream interface the home repo references (its external call edges), it loads each scoped producer
+repo's index once, selects the producer memories and active decisions anchored to that interface (matched
+by exact symbol name — arity/overload unconfirmed at an external call site), and computes each record's
+freshness against the **producer's** graph. A fleet-level record whose anchor no longer exists in the
+producer SHALL be `orphaned` and withheld from the authoritative set, identically to a single-repo
+record; a retired (invalidated) producer memory or an inactive (rejected/synced/phantom) producer
+decision SHALL likewise be excluded. The selection SHALL be deterministic (no LLM), bounded per kind with
+an explicit omission note, and SHALL name the repos consulted and skipped (a stale/unindexed producer is
+reported, never guessed).
 
 #### Scenario: A producer-side memory surfaces in a consumer
 

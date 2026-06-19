@@ -45,8 +45,10 @@
 - [x] Test: `fleet-memory.test.ts` (fresh surfaces, orphaned withheld, retired excluded, not-consumed
       excluded, cap/truncation) + real-two-repo e2e dogfood (fresh surfaces with verdict; stale producer
       skipped with reason; orphaned producer anchor withheld while consulted).
-- DEFERRED follow-up: the **decision** side (anchor a decision to a published interface) — the same
-  mechanism; only the memory path is implemented here.
+- [x] Decision side (PR #168 follow-up): `findFleetMemory` also surfaces active producer **decisions**
+  anchored to a consumed interface, in a `decisions` array, with producer-side freshness (orphaned
+  withheld, inactive excluded). `record_decision` auto-anchors to the symbol, so a producer decision
+  surfaces in the consumer's `recall.fleetMemory.decisions` (verified by `fleet-memory.test.ts` + e2e).
 
 > **RE-HOMED (PR #168).** The `FleetLevelAnchoredMemory` requirement is now promoted into the live
 > `openspec/specs/mcp-handlers/spec.md` (memory path), since PR #163 (bitemporal typed memory) is in

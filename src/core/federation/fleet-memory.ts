@@ -19,14 +19,15 @@
 import { resolve } from 'node:path';
 import { readCachedContext } from '../services/mcp-handlers/utils.js';
 import { loadMemoryStore } from '../decisions/memory-store.js';
+import { loadDecisionStore, INACTIVE_STATUSES } from '../decisions/store.js';
 import { makeFreshnessView } from '../decisions/anchor-adapter.js';
-import { memoryFreshness } from '../decisions/anchor.js';
+import { memoryFreshness, decisionAnchors } from '../decisions/anchor.js';
 import { repoStatus } from './registry.js';
 import type { FederationScope } from './resolver.js';
 import type { ConsultedRepo, FederationCoverage } from './types.js';
-import type { MemoryFreshness } from '../../types/index.js';
+import type { MemoryFreshness, StructuralAnchor } from '../../types/index.js';
 
-/** Default cap on fleet memories returned, to keep the recall conclusion bounded. */
+/** Default cap on fleet records returned (per kind), to keep the recall conclusion bounded. */
 export const DEFAULT_MAX_FLEET_MEMORIES = 50;
 
 /** A producer-repo memory about an interface the home repo consumes. */
@@ -44,10 +45,29 @@ export interface FleetMemory {
   recordedAt: string;
 }
 
+/** A producer-repo decision about an interface the home repo consumes. */
+export interface FleetDecision {
+  repo: string;
+  symbol: string;
+  filePath: string;
+  title: string;
+  status: string;
+  /** Freshness against the PRODUCER's graph; `orphaned` is withheld, never returned. */
+  freshness: Exclude<MemoryFreshness, 'orphaned'>;
+  recordedAt: string;
+}
+
 export interface FleetMemoryResult {
   memories: FleetMemory[];
+  decisions: FleetDecision[];
   truncated: number;
   coverage: FederationCoverage;
+}
+
+/** First anchor whose symbol the home repo consumes (with a defined symbolName). */
+function consumedAnchor(anchors: readonly StructuralAnchor[], consumedNames: ReadonlySet<string>): (StructuralAnchor & { symbolName: string }) | undefined {
+  return anchors.find((a): a is StructuralAnchor & { symbolName: string } =>
+    a.symbolName !== undefined && consumedNames.has(a.symbolName));
 }
 
 /**
@@ -65,16 +85,17 @@ export async function findFleetMemory(
   const reposConsulted: ConsultedRepo[] = [];
   const reposSkipped: ConsultedRepo[] = [];
   const memories: FleetMemory[] = [];
+  const decisions: FleetDecision[] = [];
   let truncated = 0;
 
   // The upstream interfaces the home repo consumes from the fleet.
   const homeCtx = await readCachedContext(resolve(homeDir));
   if (!homeCtx?.edgeStore) {
-    return { memories, truncated, coverage: { applied: true, reposConsulted, reposSkipped, caveats: ['home repo has no edge store — re-run "openlore analyze"'] } };
+    return { memories, decisions, truncated, coverage: { applied: true, reposConsulted, reposSkipped, caveats: ['home repo has no edge store — re-run "openlore analyze"'] } };
   }
   const consumedNames = new Set(homeCtx.edgeStore.getExternalReferenceNames());
   if (consumedNames.size === 0) {
-    return { memories, truncated, coverage: { applied: true, reposConsulted, reposSkipped, caveats: [] } };
+    return { memories, decisions, truncated, coverage: { applied: true, reposConsulted, reposSkipped, caveats: [] } };
   }
 
   for (const entry of scope.repos) {
@@ -87,13 +108,13 @@ export async function findFleetMemory(
       continue;
     }
     reposConsulted.push(status);
-    const store = await loadMemoryStore(repoPath);
-    if (store.memories.length === 0) continue;
     const view = makeFreshnessView(ctx.edgeStore, repoPath);
-    for (const m of store.memories) {
+
+    // Memories anchored to a consumed interface (retired ones excluded).
+    const memStore = await loadMemoryStore(repoPath);
+    for (const m of memStore.memories) {
       if (m.invalidatedAt) continue;                         // retired — authoritative-recall invariant
-      const anchor = m.anchors.find((a): a is typeof a & { symbolName: string } =>
-        a.symbolName !== undefined && consumedNames.has(a.symbolName));
+      const anchor = consumedAnchor(m.anchors, consumedNames);
       if (!anchor) continue;                                 // not about an interface home consumes
       const f = memoryFreshness(m.anchors, view);
       if (f.freshness === 'orphaned') continue;              // anchor gone in producer — withheld
@@ -108,14 +129,37 @@ export async function findFleetMemory(
         recordedAt: m.recordedAt,
       });
     }
+
+    // Decisions anchored to a consumed interface (inactive ones excluded — the same
+    // lifecycle gate single-repo recall/orient applies). Freshness from the producer's
+    // graph; orphaned withheld.
+    const decStore = await loadDecisionStore(repoPath);
+    for (const d of decStore.decisions) {
+      if (INACTIVE_STATUSES.has(d.status)) continue;
+      const anchors = decisionAnchors(d);
+      const anchor = consumedAnchor(anchors, consumedNames);
+      if (!anchor) continue;
+      const f = memoryFreshness(anchors, view);
+      if (f.freshness === 'orphaned') continue;
+      if (decisions.length >= cap) { truncated++; continue; }
+      decisions.push({
+        repo: entry.name,
+        symbol: anchor.symbolName,
+        filePath: anchor.filePath,
+        title: d.title,
+        status: d.status,
+        freshness: f.freshness,
+        recordedAt: d.recordedAt,
+      });
+    }
   }
 
   const caveats: string[] = [];
-  if (memories.length > 0 || truncated > 0) {
-    caveats.push('Fleet memories are matched to an interface by exact symbol name at the home repo\'s external call sites; arity/overload is unconfirmed across the boundary.');
+  if (memories.length > 0 || decisions.length > 0 || truncated > 0) {
+    caveats.push('Fleet records are matched to an interface by exact symbol name at the home repo\'s external call sites; arity/overload is unconfirmed across the boundary.');
   }
   if (scope.unknownNames.length > 0) {
     caveats.push(`Requested repos not in the registry (ignored): ${scope.unknownNames.join(', ')}.`);
   }
-  return { memories, truncated, coverage: { applied: true, reposConsulted, reposSkipped, caveats } };
+  return { memories, decisions, truncated, coverage: { applied: true, reposConsulted, reposSkipped, caveats } };
 }

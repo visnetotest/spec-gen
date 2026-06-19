@@ -49,6 +49,18 @@ function writeProducerMemories(dir: string, memories: Array<Record<string, unkno
   writeFileSync(join(mdir, 'notes.json'), JSON.stringify({ version: '1', updatedAt: '', memories: full }));
 }
 
+/** Write a producer repo's decision store. */
+function writeProducerDecisions(dir: string, decisions: Array<Record<string, unknown>>): void {
+  const ddir = join(dir, '.openlore', 'decisions');
+  mkdirSync(ddir, { recursive: true });
+  const full = decisions.map((d, i) => ({
+    id: `pd${i}`, status: 'approved', title: 'decision', rationale: '', consequences: '', proposedRequirement: null,
+    affectedDomains: [], affectedFiles: [], anchors: [], sessionId: 's', recordedAt: '2026-01-01T00:00:00Z',
+    confidence: 'medium', syncedToSpecs: [], ...d,
+  }));
+  writeFileSync(join(ddir, 'pending.json'), JSON.stringify({ version: '1', sessionId: 's', updatedAt: '', decisions: full }));
+}
+
 let producer: string; // repo A — publishes greet
 let consumer: string; // repo B — welcome() calls greet (external)
 
@@ -128,5 +140,38 @@ describe('findFleetMemory', () => {
     const res = await findFleetMemory(consumer, scope, { maxMemories: 2 });
     expect(res.memories).toHaveLength(2);
     expect(res.truncated).toBe(2);
+  });
+
+  // ── Decision side (ADR-0019 follow-up) ──────────────────────────────────────
+  it('surfaces a fresh producer DECISION anchored to a consumed interface', async () => {
+    writeProducerDecisions(producer, [
+      { id: 'pdFresh', status: 'approved', title: 'greet is the only public entry point', anchors: [{ symbolName: 'greet', filePath: 'src/index.ts' }] },
+    ]);
+    addRepo(consumer, producer, { name: 'producer-a' });
+    const scope = resolveFederationScope(consumer, { federation: true });
+    const res = await findFleetMemory(consumer, scope);
+    expect(res.decisions).toHaveLength(1);
+    expect(res.decisions[0]).toMatchObject({ repo: 'producer-a', symbol: 'greet', title: 'greet is the only public entry point', status: 'approved', freshness: 'fresh' });
+  });
+
+  it('withholds an orphaned producer decision and excludes an inactive (rejected) one', async () => {
+    writeProducerDecisions(producer, [
+      { id: 'pdOrphan', status: 'approved', title: 'about a deleted symbol', anchors: [{ symbolName: 'greet', filePath: 'src/deleted.ts' }] },
+      { id: 'pdRejected', status: 'rejected', title: 'a rejected idea', anchors: [{ symbolName: 'greet', filePath: 'src/index.ts' }] },
+    ]);
+    addRepo(consumer, producer, { name: 'producer-a' });
+    const scope = resolveFederationScope(consumer, { federation: true });
+    const res = await findFleetMemory(consumer, scope);
+    expect(res.decisions).toHaveLength(0);                  // orphaned withheld, rejected excluded
+    expect(res.coverage.reposConsulted.map((r) => r.name)).toEqual(['producer-a']);
+  });
+
+  it('does not surface a producer decision about an interface the consumer never references', async () => {
+    writeProducerDecisions(producer, [
+      { id: 'pdInternal', status: 'approved', title: 'internal-only', anchors: [{ symbolName: 'internalHelper', filePath: 'src/index.ts' }] },
+    ]);
+    addRepo(consumer, producer, { name: 'producer-a' });
+    const scope = resolveFederationScope(consumer, { federation: true });
+    expect((await findFleetMemory(consumer, scope)).decisions).toHaveLength(0);
   });
 });
