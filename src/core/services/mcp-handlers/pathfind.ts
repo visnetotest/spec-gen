@@ -163,11 +163,23 @@ export async function handleFindPath(
   let federationBlock: Record<string, unknown> | undefined;
   const fedScope = resolveFederationScope(absDir, { federation: opts.federation, federationRepos: opts.federationRepos });
   if (fedScope.active) {
-    // A kind-selector (role:/landmark:/file:) has no single symbol name unless it
-    // happened to resolve to one node; an explicit `name:foo` (or a bare name) is a
-    // symbol name we strip and use directly for the cross-repo producer lookup.
-    const hasKindSelector = /^(role:|landmark:|file:)/.test(to);
-    const toName = hasKindSelector ? (toRes.kind === 'name' ? toRes.nodes[0]?.name : undefined) : to.replace(/^name:/, '');
+    // Determine the single symbol name (if any) the `to` selector denotes, for the
+    // cross-repo producer lookup. A bare name or `name:foo` is a symbol name. A
+    // `landmark:foo` whose id is a plain symbol name (not a `file::name` node id) is
+    // also a symbol reference, so it resolves cross-repo identically to `name:foo`.
+    // `role:` and `file:` denote a role/path, not a symbol, so they have no name
+    // unless they happened to resolve locally to a single named node.
+    let toName: string | undefined;
+    if (/^(role:|file:)/.test(to)) {
+      toName = toRes.kind === 'name' ? toRes.nodes[0]?.name : undefined;
+    } else if (to.startsWith('landmark:')) {
+      const id = to.slice('landmark:'.length);
+      toName = id && !id.includes('/') && !id.includes('::')
+        ? id
+        : (toRes.kind === 'name' ? toRes.nodes[0]?.name : undefined);
+    } else {
+      toName = to.replace(/^name:/, '');
+    }
     const bridgeCallers = toName && ctx.edgeStore
       ? [...new Set(ctx.edgeStore.getExternalConsumers(toName).map(e => e.callerId))]
           .map(id => ctx.edgeStore!.getNode(id)?.name ?? id)
@@ -192,10 +204,14 @@ export async function handleFindPath(
     // answer with the cross-repo location + bridge instead of a bare error.
     const producers = (federationBlock?.producers as unknown[] | undefined) ?? [];
     if (producers.length > 0) {
+      // Report the stripped symbol name (federation.to), not the raw selector, so
+      // `to:"name:greet"` reads as `"greet" is not defined…` rather than echoing
+      // the selector prefix.
+      const toLabel = (federationBlock?.to as string | undefined) ?? to;
       return withFed({
         from, to, resolvedFrom, resolvedTo, path: null,
         crossRepo: true,
-        note: `"${to}" is not defined in the home repo; it is published by another federated repo. The home path reaches it at the external call site(s) named in federation.bridge.`,
+        note: `"${toLabel}" is not defined in the home repo; it is published by another federated repo. The home path reaches it at the external call site(s) named in federation.bridge.`,
       });
     }
     return withFed({ error: `"${to}" resolved to no functions.` });

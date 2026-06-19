@@ -49,7 +49,7 @@ here?" scenario.
 
 **select_tests `greet` + federation** — selects the consumer's test across the repo boundary:
 ```json
-"federation": { "crossRepoTests": [ { "repo": "consumer-b", "test": "testWelcome", "file": "src/app.test.ts", "viaSymbol": "greet", "confidence": "high" } ], "crossRepoTestCount": 1 }
+"federation": { "crossRepoTests": [ { "repo": "consumer-b", "test": "app.test", "file": "src/app.test.ts", "viaSymbol": "greet", "confidence": "high" } ], "crossRepoTestCount": 1 }
 ```
 (Test nodes live only in `ctx.callGraph`, not the SQLite store which persists production nodes —
 the federated test walk uses the call graph, matching the single-repo `select_tests`.)
@@ -205,3 +205,40 @@ fleet-wide blast radius).
    not federation code) and changing it has a wide blast radius, so it is disclosed in the **Honest limits**
    section of `docs/federation.md` (run `openlore analyze --force` in a peer to be certain) rather than
    altered here.
+
+## Adversarial re-dogfood (2026-06-19, session 4)
+
+Fourth pass: four parallel adversarial probes (registry/CLI, cross-repo resolution, test-selection/
+pathfinding, docs) driving the real `dispatchTool` path over freshly `openlore analyze`-built repos. All
+prior fixes and the four headline scenarios re-verified. Registry/CLI hardening held under ~35 adversarial
+cases (symlink-canonical self-add, corrupt-manifest list/remove, junk-entry filtering, name clashes) with
+no crashes and correct exit codes. Three further gaps fixed with regression tests:
+
+1. **Consumer-cap starvation flipped a `find_dead_code` liveness verdict to a false positive** (`resolver.ts`,
+   `findCrossRepoConsumersBatch`). The cap on returned consumers was a single counter shared across all
+   symbols in a batch. In the multi-symbol `find_dead_code` path, an earlier symbol (e.g. `farewell`, sorted
+   first) could exhaust the cap, leaving a later, *genuinely-consumed* symbol (`greet`) with an empty
+   consumer list — so it was reported as candidate-**dead** despite a real cross-repo consumer (a confidently-
+   wrong "safe to delete"). Fixed so the cap bounds the consumer *list* but never zeroes a symbol's liveness
+   signal: each consumed symbol keeps at least one consumer past the cap, with the remainder truncated and
+   disclosed. Regression test in `resolver.test.ts`.
+
+2. **`find_path` `landmark:<exact-name>` did not resolve cross-repo** where bare `greet` / `name:greet` did
+   (`pathfind.ts`). The kind-selector regex lumped `landmark:` with `role:`/`file:` and forced the cross-repo
+   symbol lookup off, so `to:"landmark:greet"` gave a bare "resolved to no functions" while `name:greet`
+   returned the full producer + bridge. A `landmark:` whose id is a plain symbol name (not a `file::name`
+   node id) is a symbol reference, so it now resolves cross-repo identically to `name:`. `role:`/`file:`
+   still correctly carry no symbol name. Verified end-to-end.
+
+3. **`find_path` cross-repo `note` echoed the raw `name:` selector** (`pathfind.ts`) — `to:"name:greet"`
+   produced `"name:greet" is not defined…` instead of `"greet" …`. Now reports the stripped name
+   (`federation.to`). Cosmetic; verified end-to-end.
+
+Docs reconciled to reality: the `select_tests` scenario block above corrected (`testWelcome` → `app.test`,
+matching the file's own session-2 fix note and real analyzer output); stale full-surface tool counts fixed
+(`docs/cli-reference.md`, the `--preset` help in `mcp.ts`: `~45` → `58`); stale `tools/list` size figures
+fixed (`docs/mcp-tools.md`, `docs/agent-setup.md`: `~48 KB / ~12k tokens` → `~55 KB / ~14k tokens`). The
+tool-count guard was broadened to cover `docs/cli-reference.md` and to tie the documented KB/token figures
+to the measured payload, so neither the count nor the size can silently drift again.
+
+Full suite green: 3926 passed, 2 skipped (+3 guards/regressions).

@@ -139,6 +139,42 @@ describe('findCrossRepoConsumers', () => {
     expect(batch.bySymbol.get('greet')).toHaveLength(1);
     expect(batch.bySymbol.get('farewell')).toHaveLength(0);
   });
+
+  // Regression: the consumer cap bounds the returned LIST, but must never zero a
+  // symbol's liveness signal. In a multi-symbol batch (the find_dead_code path),
+  // an earlier symbol exhausting the shared cap must NOT leave a later, genuinely-
+  // consumed symbol with an empty list — that flipped find_dead_code to a false-
+  // positive "dead" (a confidently-wrong "safe to delete"). Each consumed symbol
+  // keeps at least one consumer past the cap; the rest are truncated and disclosed.
+  it('keeps at least one consumer per symbol when an earlier symbol exhausts the cap', async () => {
+    // Consumer repo: 3 callers of farewell, 1 caller of greet.
+    const callers: FunctionNode[] = [];
+    const fullEdges: CallEdge[] = [];
+    const prodEdges: CallEdge[] = [];
+    const farewellExt = node('external::farewell', 'farewell', 'external', { isExternal: true });
+    const greetExt = node('external::greet', 'greet', 'external', { isExternal: true });
+    for (let i = 0; i < 3; i++) {
+      const c = node(`src/f${i}.ts::useF${i}`, `useF${i}`, `src/f${i}.ts`);
+      callers.push(c);
+      const e = edge(c.id, 'external::farewell', 'farewell', 'external');
+      prodEdges.push(e); fullEdges.push(e);
+    }
+    const g = node('src/g.ts::useG', 'useG', 'src/g.ts');
+    callers.push(g);
+    const ge = edge(g.id, 'external::greet', 'greet', 'external');
+    prodEdges.push(ge); fullEdges.push(ge);
+    const starve = makeRepoIndex('starve', callers, prodEdges, {
+      nodes: [...callers, farewellExt, greetExt], edges: fullEdges,
+    });
+    addRepo(producer, starve, { name: 'consumer-starve' });
+    const scope = resolveFederationScope(producer, { federation: true });
+    // Cap of 2: farewell (iterated first) fills it, so without the liveness guard
+    // greet's single consumer would be dropped to an empty list.
+    const batch = await findCrossRepoConsumersBatch(scope, ['farewell', 'greet'], { maxConsumers: 2 });
+    expect(batch.bySymbol.get('farewell')).toHaveLength(2);
+    expect(batch.bySymbol.get('greet')).toHaveLength(1); // liveness preserved, not zeroed
+    expect(batch.truncated).toBeGreaterThanOrEqual(1);    // the dropped farewell consumer is disclosed
+  });
 });
 
 describe('locateSymbolProducers', () => {

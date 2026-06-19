@@ -130,7 +130,14 @@ export async function findCrossRepoConsumersBatch(
       for (const edge of edges) {
         if (seenCallers.has(edge.callerId)) continue;
         seenCallers.add(edge.callerId);
-        if (total >= cap) { truncated++; continue; }
+        // The cap bounds the consumer *list*, but must never zero a symbol's
+        // liveness signal: always keep at least one consumer per symbol-with-edges
+        // even past the cap, then truncate the rest. Without this, a multi-symbol
+        // batch (e.g. find_dead_code over many candidates) where an earlier symbol
+        // exhausts the shared cap would leave a later, genuinely-consumed symbol
+        // with an empty list — and find_dead_code would flip it to a false-positive
+        // "dead" (a confidently-wrong "safe to delete"). See decision 67ca60fe.
+        if (list.length >= 1 && total >= cap) { truncated++; continue; }
         total++;
         const node = ctx.edgeStore.getNode(edge.callerId);
         list.push({

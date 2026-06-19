@@ -15,13 +15,15 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { TOOL_DEFINITIONS } from './mcp.js';
+import { TOOL_DEFINITIONS, toolAnnotations } from './mcp.js';
 
 // src/cli/commands/<this> → repo root is three levels up.
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
-// Files whose every "<N> tools" mention is the live full surface.
-const GUARDED_DOCS = ['README.md', 'docs/mcp-tools.md'];
+// Files whose every "<N> tools" mention is the live full surface. cli-reference.md
+// is included: its sole "<N> tools" mention ("all 58 tools on a fixed port") is the
+// full `serve --preset all` surface, so the exact check holds there too.
+const GUARDED_DOCS = ['README.md', 'docs/mcp-tools.md', 'docs/cli-reference.md'];
 
 describe('documented MCP tool count', () => {
   const expected = TOOL_DEFINITIONS.length;
@@ -37,5 +39,30 @@ describe('documented MCP tool count', () => {
     for (const n of counts) {
       expect(n, `${rel} cites "${n} tools" but the live surface is ${expected}; update the doc (and the byte/token figures) when the tool count changes`).toBe(expected);
     }
+  });
+});
+
+// The byte/token figures next to the tool count drifted too: docs cited "~48 KB /
+// ~12k tokens" long after the real `tools/list` payload grew to ~55 KB / ~14k, because
+// the count guard above only checks the integer, not the size figures. This ties the
+// documented `~N KB` / `~Nk tokens` of the full `tools/list` line to the payload the
+// ListTools handler actually emits (schemas + annotations), within a rounding band.
+describe('documented tools/list size figures track the real payload', () => {
+  // Mirror what the ListTools handler emits: each tool's schema plus its annotations.
+  const tools = TOOL_DEFINITIONS.map(t => ({ ...t, annotations: toolAnnotations(t.name) }));
+  const bytes = Buffer.byteLength(JSON.stringify({ tools }), 'utf8');
+  const kb = bytes / 1024;
+  const ktokens = bytes / 4 / 1000; // the ~bytes/4 token heuristic the docs use
+
+  it('the "~N KB / ~Nk tokens of tools/list" figure in docs/mcp-tools.md is current', () => {
+    const text = readFileSync(join(repoRoot, 'docs/mcp-tools.md'), 'utf8');
+    const line = text.split('\n').find(l => /tools\/list/.test(l) && /~\d+\s*KB/.test(l));
+    expect(line, 'expected a "~N KB … tools/list" figure line in docs/mcp-tools.md').toBeDefined();
+    const docKb = Number(/~(\d+)\s*KB/.exec(line!)?.[1]);
+    const docKtokens = Number(/~(\d+)k\s+tokens/.exec(line!)?.[1]);
+    // ±3 KB / ±2k tokens absorbs rounding but catches a real drift (the stale figure
+    // was 7 KB / 2k tokens light — well outside the band).
+    expect(Math.abs(docKb - kb), `docs/mcp-tools.md cites ~${docKb} KB but the real tools/list payload is ~${kb.toFixed(1)} KB`).toBeLessThanOrEqual(3);
+    expect(Math.abs(docKtokens - ktokens), `docs/mcp-tools.md cites ~${docKtokens}k tokens but the real payload is ~${ktokens.toFixed(1)}k tokens`).toBeLessThanOrEqual(2);
   });
 });
