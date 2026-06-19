@@ -164,4 +164,22 @@ describe('runBlastRadiusCli (advisory posture & exit codes)', () => {
     vi.mocked(readOpenLoreConfig).mockRejectedValue(new Error('disk gone'));
     expect(await runBlastRadiusCli({ cwd: '/p', hook: true })).toBe(0);
   });
+
+  it('human render discloses capped detail lists with a "… and N more" line (no silent truncation)', async () => {
+    const capped = {
+      headline: 'h', posture: 'advisory',
+      impact: { hubsTouched: [], layersCrossed: [], governingDecisions: [] },
+      tests: { count: 0, toRun: [] },
+      memory: { orphaned: 0, drifted: 0, willDrift: [] },
+      // 8 stale specs but items capped at 5 → render must show "… and 3 more"
+      specs: { willGoStale: 8, items: Array.from({ length: 5 }, (_, i) => ({ kind: 'stale', message: `s${i}`, domain: null, specPath: null })) },
+      decisions: { affected: 23, orphaned: 0, items: Array.from({ length: 20 }, () => ({ kind: 'adr-gap', message: 'g', domain: null })) },
+    } as unknown as BlastRadiusBriefing;
+    vi.mocked(computeBlastRadius).mockResolvedValue(capped);
+    const code = await runBlastRadiusCli({ cwd: '/p' });
+    expect(code).toBe(0);
+    const out = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(out).toMatch(/and 3 more spec/i);
+    expect(out).toMatch(/and 3 more decision/i); // 23 affected − 20 shown
+  });
 });

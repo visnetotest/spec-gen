@@ -128,8 +128,13 @@ function renderHuman(b: BlastRadiusBriefing): string {
     lines.push(`   Tests to run (${b.tests.count}): ${top}${b.tests.count > 8 ? ', …' : ''}`);
   }
   for (const m of b.memory.willDrift) lines.push(`   ⚠ memory ${m.kind === 'memory-orphaned' ? 'ORPHANED' : 'drifted'}: ${m.message}`);
+  const memTotal = b.memory.drifted + b.memory.orphaned;
+  if (memTotal > b.memory.willDrift.length) lines.push(`   … and ${memTotal - b.memory.willDrift.length} more anchored memor${memTotal - b.memory.willDrift.length === 1 ? 'y' : 'ies'}`);
   for (const d of b.decisions.items) lines.push(`   ⚠ decision ${d.kind}: ${d.message}`);
-  for (const s of b.specs.items.slice(0, 5)) lines.push(`   ⚠ spec ${s.kind}: ${s.message}`);
+  if (b.decisions.affected > b.decisions.items.length) lines.push(`   … and ${b.decisions.affected - b.decisions.items.length} more decision issue(s)`);
+  const SPEC_SHOWN = 5;
+  for (const s of b.specs.items.slice(0, SPEC_SHOWN)) lines.push(`   ⚠ spec ${s.kind}: ${s.message}`);
+  if (b.specs.willGoStale > SPEC_SHOWN) lines.push(`   … and ${b.specs.willGoStale - SPEC_SHOWN} more spec issue(s)`);
   lines.push('');
   return lines.join('\n');
 }

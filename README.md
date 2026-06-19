@@ -429,7 +429,7 @@ OpenLore dogfoods its own decision system. These ADRs were recorded with `record
 | **EdgeStore uses SCHEMA_VERSION rebuild-on-bump, not migrations** | The graph is fully derivable from source, so a schema change drops and rebuilds — no migration code, no drift | `analyzer` spec · `src/core/services/edge-store.ts` |
 | **BM25 keyword retrieval is the zero-network floor** | `orient`/`search_code` work with no API key or embedding server; dense embeddings are an optional upgrade, never a requirement | `analyzer` spec · Spec 06 |
 | **SCIP is a one-way export, not a round-trip format** | The SQLite graph stays canonical; SCIP exports only the subset it can model, avoiding a lossy bidirectional contract | `cli` spec · `src/cli/export/scip.ts` |
-| **MCP exposes a curated `navigation` preset, not all 50 tools** | A lean graph-traversal surface is what wins the Spec 14 agent benchmark; the full set stays available opt-in | `cli` spec · Spec 14 |
+| **MCP exposes a curated `navigation` preset, not all 58 tools** | A lean graph-traversal surface is what wins the Spec 14 agent benchmark; the full set stays available opt-in | `cli` spec · Spec 14 |
 | **The `tools/list` prefix is trimmed losslessly + bounded by a guard, not byte-shaved** | Spec 28 measured it: MCP has no server-side schema deferral and the lossless byte-lever is ~2%; the real levers are the client (deferred schemas) and tool count, so we trim safely, guard against bloat, and report the limit | `cli` spec · Spec 28 |
 | **Lean orientation skips enrichment compute, not just its payload** | `orient --lean` returns the navigation core for shallow lookups and skips the work behind the dropped blocks (extra embedding search, manifest/git reads); the rich default is unchanged | `cli` spec · Spec 27 |
 | **Decision consolidation is serialized with a cross-process file lock** | Concurrent `record_decision` calls were losing drafts; a lock makes consolidation safe and every commit instant | `cli` spec · Spec 15 |
@@ -468,7 +468,7 @@ The manifest captures the public API surface, HTTP routes, stats, dependencies, 
 
 | Topic | Doc |
 |-------|-----|
-| MCP tools reference (50 tools + parameters) | [docs/mcp-tools.md](docs/mcp-tools.md) |
+| MCP tools reference (58 tools + parameters) | [docs/mcp-tools.md](docs/mcp-tools.md) |
 | Agent setup (Claude Code, Cline, OpenCode, Vibe…) | [docs/agent-setup.md](docs/agent-setup.md) |
 | `openlore install` — auto-configure agent surfaces | [docs/install.md](docs/install.md) |
 | LLM providers + embedding config | [docs/providers.md](docs/providers.md) |

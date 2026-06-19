@@ -124,3 +124,24 @@ Tests for the feature: **24 → 27**. Full suite re-confirmed green (`vitest run
 > `blast-radius.ts` is mapped to the `analyzer` domain; they semantically belong to `mcp-handlers`/`cli`.
 > The advisory/opt-in *requirements* are already correctly captured in the mcp-handlers/cli specs via the
 > change's hand-written deltas, so no requirement is missing — only the decision filing is off-domain.
+
+## 7. Third pass — real end-to-end execution + surface/doc polish (2026-06-19)
+
+This pass exercised the surfaces the earlier passes only unit-tested, against real inputs:
+
+- **Real `git commit` through the installed hook.** In a throwaway repo (real `openlore init` + `analyze`,
+  hook resolving to this build), an actual `git commit` ran the advisory briefing to stderr and exited 0;
+  the commit landed. Confirmed it coexists with a decisions-gate hook and that the capability probe
+  silently degrades to advisory when only an older global `openlore` (no `--hook`) is on PATH.
+- **Live MCP protocol.** Drove `node dist/cli/index.js mcp` over JSON-RPC stdio: `tools/list` advertises
+  58 tools including `blast_radius` (schema `required:["directory"]`, props `directory/baseRef/depth/maxSymbols`);
+  `tools/call blast_radius` returns `isError:false` and a valid conclusion-shaped briefing (with the new
+  `decisions.orphaned`), honoring `maxSymbols`.
+- **Edge cases.** Unborn HEAD (first-ever commit) with and without an analysis both exit 0 — no crash,
+  the first commit is never blocked.
+- **Surface/doc polish.** Added an explicit `blast_radius: _RO` entry to `TOOL_ANNOTATIONS` (was relying on
+  the silent `_RO` fallback); corrected four remaining stale "50 tools" references (`README.md` ×2,
+  `docs/agent-setup.md` ×2) to 58; the hook's human render now appends a "… and N more" line for any capped
+  detail list (specs/decisions/memory) so the developer-facing output is never silently truncated.
+
+Feature tests: **27 → 28**. Full suite re-confirmed green (`vitest run src examples`); `tsc` + `eslint` clean.
