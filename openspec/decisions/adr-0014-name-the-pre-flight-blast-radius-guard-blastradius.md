@@ -1,4 +1,4 @@
-# ADR-0013: Name the pre-flight blast-radius guard `blast_radius` (MCP) / `blast-radius` (CLI), distinct from the existing `preflight` staleness gate
+# ADR-0014: Name the pre-flight blast-radius guard `blast_radius` (MCP) / `blast-radius` (CLI), distinct from the existing `preflight` staleness gate
 
 ## Status
 

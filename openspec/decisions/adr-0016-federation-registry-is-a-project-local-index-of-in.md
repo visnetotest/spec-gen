@@ -1,4 +1,4 @@
-# ADR-0013: Federation registry is a project-local index-of-indexes manifest
+# ADR-0016: Federation registry is a project-local index-of-indexes manifest
 
 ## Status
 

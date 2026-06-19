@@ -1,4 +1,4 @@
-# ADR-0013: confidenceBoundary response shape: categorical edge-basis + known-unknowable crossings + staleness, never a blended score
+# ADR-0015: confidenceBoundary response shape: categorical edge-basis + known-unknowable crossings + staleness, never a blended score
 
 ## Status
 
