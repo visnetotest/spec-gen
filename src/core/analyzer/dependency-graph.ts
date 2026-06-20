@@ -73,6 +73,8 @@ export interface DependencyEdge {
   httpEdge?: HttpEdge;
   /** True when this edge was synthesized from a call-graph cross-file call (implicit import) */
   isCallEdge?: boolean;
+  /** Present when this edge is an HTML page → asset reference (decision b555b680) */
+  assetKind?: 'script' | 'stylesheet';
 }
 
 /**
@@ -370,6 +372,8 @@ export class DependencyGraphBuilder {
           isTypeOnly: imp.isTypeOnly,
           weight: imp.isTypeOnly ? 0.5 : 1,
         };
+        // Carry the HTML asset label (script / stylesheet) onto the edge.
+        if (imp.assetKind) edge.assetKind = imp.assetKind;
 
         this.edges.push(edge);
 

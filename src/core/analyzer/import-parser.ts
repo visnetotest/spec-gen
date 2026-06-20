@@ -27,6 +27,12 @@ export interface ImportInfo {
   isTypeOnly: boolean;
   isDynamic: boolean;
   line: number;
+  /**
+   * Set when this import is an HTML asset reference (`<script src>` /
+   * `<link rel=stylesheet href>`) rather than a code import, so the dependency
+   * graph can label the edge. Absent for ordinary code imports.
+   */
+  assetKind?: 'script' | 'stylesheet';
 }
 
 /**
@@ -997,6 +1003,86 @@ async function resolveJavaImport(
 /**
  * Import/Export Parser
  */
+// ============================================================================
+// HTML ASSET IMPORTS (decision b555b680)
+// ============================================================================
+
+// `<script ... src="…">` — any inline-referenced external script is a file dep.
+const HTML_SCRIPT_SRC_RE = /<script\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi;
+// `<link …>` — filtered to rel=stylesheet below (rel/href order varies).
+const HTML_LINK_RE = /<link\b([^>]*)>/gi;
+
+/**
+ * Normalize an HTML asset href into a document-relative import source, or null
+ * when it should not produce a dependency edge. Absolute URLs (`http(s)://`,
+ * protocol-relative `//`), `data:`/`mailto:`/`tel:`/`javascript:` URIs, `#`
+ * anchors, root-absolute `/…` (web-root — out of scope), and empty refs are
+ * dropped. Query strings and fragments are stripped, and a bare `app.js` is
+ * prefixed `./` so it is treated as relative by isRelativeImport / resolveImport.
+ */
+function normalizeAssetHref(href: string): string | null {
+  const trimmed = href.trim();
+  if (!trimmed) return null;
+  if (/^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(trimmed)) return null; // http(s):// or //
+  if (/^(?:data|mailto|tel|javascript):/i.test(trimmed)) return null;
+  if (trimmed.startsWith('#')) return null;
+  const clean = trimmed.split(/[?#]/)[0];
+  if (!clean) return null;
+  if (clean.startsWith('/')) return null; // root-absolute assumes a web root — out of scope
+  return clean.startsWith('.') ? clean : './' + clean;
+}
+
+function assetImport(source: string, line: number, assetKind: 'script' | 'stylesheet'): ImportInfo {
+  return {
+    source,
+    isRelative: true,
+    isPackage: false,
+    isBuiltin: false,
+    importedNames: [],
+    hasDefault: false,
+    hasNamespace: false,
+    isTypeOnly: false,
+    isDynamic: false,
+    line,
+    assetKind,
+  };
+}
+
+/**
+ * Extract local asset references from an HTML file as ImportInfo entries:
+ * `<script src=…>` (script) and `<link rel="stylesheet" href=…>` (stylesheet).
+ * External/CDN URLs and non-stylesheet links are excluded. The existing
+ * dependency-graph edge machinery resolves these against the document directory.
+ */
+export function parseHtmlAssetImports(content: string): ImportInfo[] {
+  const out: ImportInfo[] = [];
+  // Blank out HTML comments so commented-out <script>/<link> tags don't produce
+  // phantom edges. Same-length whitespace (newlines kept) preserves line numbers.
+  const scan = content.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, ' '));
+  const lineAt = (idx: number): number => scan.slice(0, idx).split('\n').length;
+
+  HTML_SCRIPT_SRC_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = HTML_SCRIPT_SRC_RE.exec(scan)) !== null) {
+    const src = normalizeAssetHref(m[1]);
+    if (src) out.push(assetImport(src, lineAt(m.index), 'script'));
+  }
+
+  HTML_LINK_RE.lastIndex = 0;
+  while ((m = HTML_LINK_RE.exec(scan)) !== null) {
+    const attrs = m[1];
+    // rel attribute anchored on a left boundary (so `data-rel` does not match)
+    // and order-independent over multi-token rel (`preload stylesheet`).
+    if (!/(?:^|\s)rel\s*=\s*["']?[^"'>]*\bstylesheet\b/i.test(attrs)) continue;
+    const hrefM = /(?:^|\s)href\s*=\s*["']([^"']+)["']/i.exec(attrs);
+    if (!hrefM) continue;
+    const href = normalizeAssetHref(hrefM[1]);
+    if (href) out.push(assetImport(href, lineAt(m.index), 'stylesheet'));
+  }
+
+  return out;
+}
+
 export class ImportExportParser {
   private cache: Map<string, FileAnalysis> = new Map();
 
@@ -1010,13 +1096,14 @@ export class ImportExportParser {
   /**
    * Get file extension type
    */
-  private getFileType(filePath: string): 'js' | 'ts' | 'python' | 'java' | 'unknown' {
+  private getFileType(filePath: string): 'js' | 'ts' | 'python' | 'java' | 'html' | 'unknown' {
     const ext = extname(filePath).toLowerCase();
 
     if (['.ts', '.tsx', '.mts', '.cts'].includes(ext)) return 'ts';
     if (['.js', '.jsx', '.mjs', '.cjs'].includes(ext)) return 'js';
     if (['.py', '.pyw'].includes(ext)) return 'python';
     if (ext === '.java') return 'java';
+    if (['.html', '.htm'].includes(ext)) return 'html';
 
     return 'unknown';
   }
@@ -1054,6 +1141,9 @@ export class ImportExportParser {
         analysis.imports = parseJavaImports(content);
         analysis.exports = parseJavaExports(content);
         analysis.javaPackage = parseJavaPackage(content);
+      } else if (fileType === 'html') {
+        // HTML asset references (decision b555b680): <script src>, <link stylesheet>.
+        analysis.imports = parseHtmlAssetImports(content);
       } else {
         analysis.parseErrors.push(`Unsupported file type: ${extname(filePath)}`);
       }
