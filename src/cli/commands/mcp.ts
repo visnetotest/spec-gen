@@ -832,7 +832,9 @@ export const TOOL_DEFINITIONS = [
       'USE THIS WHEN: you don\'t know which file or function handles a concept — ' +
       '"where is rate limiting implemented?", "which function validates tokens?", ' +
       '"what handles authentication?". Beats grep when the function name is unknown. ' +
-      'Falls back to keyword search automatically if the embedding server is down. ' +
+      'Falls back to keyword search if the embedding server is down, and to a ' +
+      'literal-text index on zero hits so strings in markup/text are still found ' +
+      '(mode:"text" forces it). ' +
       'Requires "openlore analyze --embed" to have been run at least once.',
     inputSchema: {
       type: 'object',
@@ -860,6 +862,11 @@ export const TOOL_DEFINITIONS = [
         tokenBudget: {
           type: 'number',
           description: 'Optional: cap results to ~this many tokens (highest-scored kept, exact duplicates collapsed); each hit carries an `expand` handle for get_function_body',
+        },
+        mode: {
+          type: 'string',
+          enum: ['text'],
+          description: 'Set "text" to search literal strings in markup/text directly; returns file:line matches.',
         },
       },
       required: ['directory', 'query'],

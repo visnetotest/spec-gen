@@ -460,6 +460,17 @@ export class McpWatcher {
     }
     await this.persistContext(context);
 
+    // 3.5. Literal-text line index — keep it fresh for the changed files. Runs
+    //      regardless of the embed setting (the text index is BM25-only).
+    //      Scope (consistent with the symbol index in watch mode): the watcher
+    //      reacts only to 'change' events on SOURCE_EXTENSIONS files — there is
+    //      no 'unlink' handler — so neither markup/stylesheet edits nor file
+    //      DELETIONS are live-reconciled here. A deleted file's lines linger
+    //      until the next full `analyze`, which overwrites the table completely
+    //      (the same staleness the symbol index already carries for deleted
+    //      files). This keeps code-file literals (e.g. JSX strings) current.
+    await this.updateTextLines(changedFiles);
+
     // 4. Vector update — decoupled from signature freshness (Step 4).
     const isBulk = consumedVcsBulk || changedFiles.length >= this.bulkThreshold;
     if (this.embed && !this.embedDegraded && context.callGraph) {
@@ -648,6 +659,24 @@ export class McpWatcher {
       }
     } catch (err) {
       process.stderr.write(`[mcp-watcher] embed error: ${(err as Error).message}\n`);
+    }
+  }
+
+  /**
+   * Row-level literal-text line update for the changed files. No-op when the
+   * text-line index has not been built. Never throws into the batch loop.
+   */
+  private async updateTextLines(changedFiles: ChangedFile[]): Promise<void> {
+    try {
+      const { TextLineIndex } = await import('../analyzer/text-line-index.js');
+      if (!TextLineIndex.exists(this.outputPath)) return;
+      const changed = changedFiles.map((f) => ({ filePath: f.rel, content: f.content }));
+      await TextLineIndex.updateFiles(this.outputPath, changed);
+      if (this.debug) {
+        process.stderr.write(`[mcp-watcher] text-line index: updated ${changed.length} file(s)\n`);
+      }
+    } catch (err) {
+      process.stderr.write(`[mcp-watcher] text-line error: ${(err as Error).message}\n`);
     }
   }
 

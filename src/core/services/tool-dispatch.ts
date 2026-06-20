@@ -193,9 +193,9 @@ export async function dispatchTool(
       args as { directory: string; base?: string; files?: string[]; domains?: string[]; failOn?: 'error' | 'warning' | 'info'; maxFiles?: number };
     return handleCheckSpecDrift(directory, base, files, domains, failOn, maxFiles);
   } else if (name === 'search_code') {
-    const { directory, query, limit = 10, language, minFanIn, tokenBudget } =
-      args as { directory: string; query: string; limit?: number; language?: string; minFanIn?: number; tokenBudget?: number };
-    return handleSearchCode(directory, query, limit, language, minFanIn, tokenBudget);
+    const { directory, query, limit = 10, language, minFanIn, tokenBudget, mode } =
+      args as { directory: string; query: string; limit?: number; language?: string; minFanIn?: number; tokenBudget?: number; mode?: 'text' };
+    return handleSearchCode(directory, query, limit, language, minFanIn, tokenBudget, mode);
   } else if (name === 'suggest_insertion_points') {
     const { directory, description, limit = 5, language } =
       args as { directory: string; description: string; limit?: number; language?: string };

@@ -852,12 +852,57 @@ async function runEmbedStep(
       console.log(`    → ${outputPath.replace(rootPath + '/', '')}vector-index/`);
     }
 
+    // Build the literal-text line index (BM25-only, separate from the symbol
+    // index) so literal strings in markup/text — UI copy, error messages — are
+    // findable even when they extract no symbols. Non-fatal.
+    await runTextLineIndexing(rootPath, outputPath);
+
     // Also index specs if they exist
     await runSpecIndexing(rootPath, outputPath, openloreConfig, keywordOnly);
   } catch (embedErr) {
     console.log(`    ✗ Vector index failed: ${(embedErr as Error).message}`);
   }
   console.log('');
+}
+
+// ============================================================================
+// TEXT-LINE INDEXING HELPER
+// ============================================================================
+
+/** Skip individual files larger than this when building the text-line index. */
+const TEXT_INDEX_MAX_FILE_BYTES = 2_000_000;
+
+/**
+ * Build the literal-text line index over all walked files. Reuses the same
+ * FileWalker as analysis (so it honours ignore rules and skips binaries), reads
+ * each file, and indexes its non-blank lines. Non-fatal: a failure here never
+ * breaks `analyze`.
+ */
+async function runTextLineIndexing(rootPath: string, outputPath: string): Promise<void> {
+  try {
+    const { FileWalker } = await import('../../core/analyzer/file-walker.js');
+    const { TextLineIndex } = await import('../../core/analyzer/text-line-index.js');
+    const { readFile: read } = await import('node:fs/promises');
+
+    const walk = await new FileWalker(rootPath).walk();
+    const files: { filePath: string; content: string }[] = [];
+    await Promise.all(
+      walk.files.map(async (f) => {
+        if (f.size > TEXT_INDEX_MAX_FILE_BYTES) return;
+        try {
+          files.push({ filePath: f.path, content: await read(f.absolutePath, 'utf-8') });
+        } catch {
+          /* skip unreadable files */
+        }
+      }),
+    );
+
+    const { lines, files: indexedFiles } = await TextLineIndex.build(outputPath, files);
+    console.log(`    ✓ Text line index built (${lines} lines across ${indexedFiles} files)`);
+    console.log(`    → ${outputPath.replace(rootPath + '/', '')}text-line-index/`);
+  } catch (err) {
+    console.log(`    ⚠ Text line index skipped: ${(err as Error).message}`);
+  }
 }
 
 // ============================================================================

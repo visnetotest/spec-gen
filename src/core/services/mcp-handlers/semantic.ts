@@ -133,13 +133,51 @@ export function compositeScore(semanticRelevance: number, role: InsertionRole): 
  * - callers / callees from the call graph (graph-first context)
  * - linkedSpecs from mapping.json (bidirectional code↔spec linking)
  */
+/**
+ * Query the literal-text line index and shape the response. Returns the result
+ * object, or — in `text_fallback` mode only — `null` when the index is absent or
+ * yields no matches, so the caller can fall through to its normal empty
+ * response. In forced `text` mode it always returns an object.
+ */
+async function searchTextLines(
+  outputDir: string,
+  query: string,
+  limit: number,
+  searchMode: 'text' | 'text_fallback',
+): Promise<unknown | null> {
+  const { TextLineIndex } = await import('../../analyzer/text-line-index.js');
+  if (!TextLineIndex.exists(outputDir)) {
+    return searchMode === 'text'
+      ? { query, searchMode, count: 0, results: [], note: 'No text line index found. Run "openlore analyze".' }
+      : null;
+  }
+  const hits = await TextLineIndex.searchText(outputDir, query, { limit: Math.max(1, Math.min(limit, 100)) });
+  if (hits.length === 0 && searchMode === 'text_fallback') return null;
+  return {
+    query,
+    searchMode,
+    ...(searchMode === 'text_fallback'
+      ? { note: 'No code symbols matched; these are literal-text matches from markup/text files.' }
+      : {}),
+    count: hits.length,
+    results: hits.map((h) => ({
+      filePath: h.filePath,
+      line: h.lineNumber,
+      text: h.text,
+      score: h.score,
+      kind: 'text' as const,
+    })),
+  };
+}
+
 export async function handleSearchCode(
   directory: string,
   query: string,
   limit = 10,
   language?: string,
   minFanIn?: number,
-  tokenBudget?: number
+  tokenBudget?: number,
+  mode?: 'text'
 ): Promise<unknown> {
   const tooLong = queryTooLongError(query); if (tooLong) return tooLong;
   const absDir = await validateDirectory(directory);
@@ -147,6 +185,12 @@ export async function handleSearchCode(
 
   const { VectorIndex } = await import('../../analyzer/vector-index.js');
   const { EmbeddingService } = await import('../../analyzer/embedding-service.js');
+
+  // Forced literal-text mode: query the separate line index directly, bypassing
+  // symbol search. Use when hunting a literal string (UI copy, error text).
+  if (mode === 'text') {
+    return searchTextLines(outputDir, query, limit, 'text');
+  }
 
   if (!VectorIndex.exists(outputDir)) {
     return {
@@ -177,6 +221,20 @@ export async function handleSearchCode(
     loadMappingIndex(absDir),
     readCachedContext(absDir),
   ]);
+
+  // Zero symbol hits: the string may live in static markup/text that extracts
+  // no symbols (UI copy, error messages). Fall back to the literal-text line
+  // index rather than returning a dead end. This is an optional enrichment —
+  // its failure must never turn a valid empty symbol result into a tool error,
+  // so a throw degrades silently to the normal empty response below.
+  if (results.length === 0) {
+    try {
+      const textFallback = await searchTextLines(outputDir, query, limit, 'text_fallback');
+      if (textFallback) return textFallback;
+    } catch {
+      /* text index unavailable/corrupt — fall through to the empty symbol response */
+    }
+  }
 
   type Neighbour = { name: string; filePath: string };
 
