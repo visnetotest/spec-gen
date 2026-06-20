@@ -4,12 +4,21 @@
  * while the surface grew to 58) because nothing tied the prose to the code. This
  * ties them: add or remove a tool and the doc count must move with it, or CI fails.
  *
- * Scope is deliberately limited to the two current-tense surfaces a user reads to
- * learn the live tool count — README.md and docs/mcp-tools.md. In BOTH of those
- * files every `<N> tools` mention refers to the full surface, so the check is exact.
- * Dated point-in-time spec records under docs/specs/** are intentionally excluded:
- * "Spec 28 measured 50 tools / 47,037 bytes" is a historical measurement, not a
- * claim about today, and rewriting it would falsify the record.
+ * Scope is the current-tense surfaces a user (or agent) reads to learn the live tool
+ * count: README.md, docs/mcp-tools.md, docs/cli-reference.md, docs/governance-dogfooding.md,
+ * and the live consolidated spec openspec/specs/cli/spec.md. In each, every `<N> tools`
+ * mention the regex catches is a present-tense claim about the full surface, so the check
+ * is exact. This list was widened after a v2.1.1 e2e dogfood found the same decision —
+ * "MCP exposes a curated navigation preset, not all <N> tools" — drifted to "45" in the
+ * spec heading and "50" in governance-dogfooding.md while README (guarded) correctly said
+ * "60". Nothing tied those two surfaces to the code, so they lagged.
+ *
+ * Dated point-in-time spec records under docs/specs/** stay excluded: "Spec 28 measured
+ * 50 tools / 47,037 bytes" is a historical measurement, not a claim about today, and
+ * rewriting it would falsify the record. The same distinction holds INSIDE cli/spec.md:
+ * the decision *heading* ("not all <N> tools") is a present-tense fact and is guarded,
+ * while its body's dated benchmark line ("loading all ~45 MCP tool definitions") says
+ * "tool definitions" (singular) — the `tools\b` regex skips it, preserving the record.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -20,10 +29,19 @@ import { TOOL_DEFINITIONS, toolAnnotations } from './mcp.js';
 // src/cli/commands/<this> → repo root is three levels up.
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
-// Files whose every "<N> tools" mention is the live full surface. cli-reference.md
-// is included: its sole "<N> tools" mention ("all <count> tools on a fixed port") is the
-// full `serve --preset all` surface, so the exact check holds there too.
-const GUARDED_DOCS = ['README.md', 'docs/mcp-tools.md', 'docs/cli-reference.md'];
+// Files whose every "<N> tools" mention the regex catches is the live full surface.
+// cli-reference.md: its sole match ("all <count> tools on a fixed port") is the full
+// `serve --preset all` surface. governance-dogfooding.md and cli/spec.md each have exactly
+// one match — the present-tense "not all <N> tools" decision claim — so the exact check
+// holds there too (verified: their only other count phrasing, "~45 MCP tool definitions",
+// is singular "tool" and is not matched).
+const GUARDED_DOCS = [
+  'README.md',
+  'docs/mcp-tools.md',
+  'docs/cli-reference.md',
+  'docs/governance-dogfooding.md',
+  'openspec/specs/cli/spec.md',
+];
 
 describe('documented MCP tool count', () => {
   const expected = TOOL_DEFINITIONS.length;
