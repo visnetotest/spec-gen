@@ -103,6 +103,13 @@ interface ChangedFile {
 }
 
 const SOURCE_EXTENSIONS = /\.(ts|tsx|js|jsx|py|go|rs|rb|java|kt|php|cs|cpp|cc|cxx|h|hpp|c|swift)$/;
+// HTML is watched too. detectLanguage() returns 'unknown' for it, so it takes a
+// dedicated path: an edit refreshes the literal-text line index, the inline-
+// <script> call-graph nodes (blanked → JavaScript in buildGraphSubset), and the
+// dependency-graph asset edges (<script src>/<link rel=stylesheet>). Letting HTML
+// into the call-graph loop REQUIRES the buildGraphSubset blanking — otherwise the
+// atomic swap would delete a page's inline-script nodes on every edit.
+const HTML_EXTENSIONS = /\.html?$/i;
 
 // Directory NAMES that must never be watched. Build-output and dependency
 // directories can hold hundreds of thousands of files (a Rust `target/` is
@@ -242,7 +249,7 @@ export class McpWatcher {
       });
 
       this.fsWatcher.on('change', (absPath: string) => {
-        if (SOURCE_EXTENSIONS.test(absPath)) {
+        if (SOURCE_EXTENSIONS.test(absPath) || HTML_EXTENSIONS.test(absPath)) {
           this.enqueue(absPath);
         }
       });
@@ -368,7 +375,9 @@ export class McpWatcher {
     for (const abs of absPaths) {
       const rel = relative(this.rootPath, abs);
       if (isTestFile(rel)) continue;
-      if (detectLanguage(rel) === 'unknown') continue;
+      // HTML is 'unknown' to detectLanguage but takes the dedicated HTML path
+      // (text-line + inline-script call graph + dependency asset edges).
+      if (detectLanguage(rel) === 'unknown' && !HTML_EXTENSIONS.test(rel)) continue;
       let content: string;
       try {
         content = await readFile(abs, 'utf-8');
@@ -461,15 +470,12 @@ export class McpWatcher {
     }
     await this.persistContext(context);
 
-    // 3.5. Literal-text line index — keep it fresh for the changed files. Runs
-    //      regardless of the embed setting (the text index is BM25-only).
-    //      Scope (consistent with the symbol index in watch mode): the watcher
-    //      reacts only to 'change' events on SOURCE_EXTENSIONS files — there is
-    //      no 'unlink' handler — so neither markup/stylesheet edits nor file
-    //      DELETIONS are live-reconciled here. A deleted file's lines linger
-    //      until the next full `analyze`, which overwrites the table completely
-    //      (the same staleness the symbol index already carries for deleted
-    //      files). This keeps code-file literals (e.g. JSX strings) current.
+    // 3.5. Literal-text line index — keep it fresh for the changed files
+    //      (source + HTML). Runs regardless of the embed setting (BM25-only).
+    //      Note: there is no 'unlink' handler, so file DELETIONS are not
+    //      live-reconciled — a deleted file's lines linger until the next full
+    //      `analyze` overwrites the table (the same staleness every other watcher
+    //      lane carries for deletions).
     await this.updateTextLines(changedFiles);
 
     // 3.6. Dependency graph — keep dependency-graph.json's file→file import edges
@@ -814,8 +820,10 @@ export class McpWatcher {
  * Re-parse changedFile + up to CALLER_REPARSE_LIMIT callerFiles.
  * Returns fresh edges (all files in subset) and nodes (changedFile only —
  * callerFiles nodes are untouched since their function signatures didn't change).
+ *
+ * Exported for unit testing (locks the HTML-blanking node-refresh contract).
  */
-async function buildGraphSubset(
+export async function buildGraphSubset(
   changedRel: string,
   changedContent: string,
   callerFiles: string[],
@@ -826,13 +834,25 @@ async function buildGraphSubset(
   nodes: import('../analyzer/call-graph.js').FunctionNode[];
   cfgs: Array<{ functionId: string; filePath: string; cfg: import('../analyzer/cfg.js').FunctionCfg }>;
 }> {
-  const lang = detectLanguage(changedRel);
+  let lang = detectLanguage(changedRel);
+  let content = changedContent;
+  // HTML: blank everything outside inline <script> bodies (offset-preserving) so
+  // the JS extractor parses the inline scripts at their true positions. Without
+  // this, html is 'unknown' → empty result → the caller's atomic swap would
+  // DELETE the page's inline-script nodes on every edit (regression).
+  if (lang === 'unknown' && HTML_EXTENSIONS.test(changedRel)) {
+    const { extractHtmlScripts } = await import('../analyzer/html-script-extractor.js');
+    const blanked = extractHtmlScripts(changedContent);
+    if (!blanked) return { edges: [], nodes: [], cfgs: [] }; // no inline JS
+    content = blanked;
+    lang = 'JavaScript';
+  }
   if (!CALL_GRAPH_LANGS.has(lang)) return { edges: [], nodes: [], cfgs: [] };
 
   const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
   // Use relative paths as node IDs (consistent with analyze output)
   const files: Array<{ path: string; content: string; language: string }> = [
-    { path: changedRel, content: changedContent, language: lang },
+    { path: changedRel, content, language: lang },
   ];
 
   for (const cf of callerFiles.slice(0, CALLER_REPARSE_LIMIT)) {

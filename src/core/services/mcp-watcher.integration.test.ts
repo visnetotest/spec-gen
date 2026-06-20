@@ -208,6 +208,41 @@ describe('McpWatcher — real fs watcher', () => {
     expect(g.edges.some(e => e.source === absA && e.isCallEdge === true)).toBe(true);
   }, 15_000);
 
+  it('keeps HTML asset edges live when an inline <script src> changes', async () => {
+    const { rootPath, outputPath } = await setupProject();
+    const htmlFile = join(rootPath, 'index.html');
+    const absHtml = htmlFile, absOld = join(rootPath, 'old.js'), absApp = join(rootPath, 'app.js');
+    await writeFile(htmlFile, '<html><body><script src="old.js"></script></body></html>\n', 'utf-8');
+    await writeFile(absOld, 'console.log(1);\n', 'utf-8');
+    await writeFile(absApp, 'console.log(2);\n', 'utf-8');
+
+    const graphPath = join(outputPath, 'dependency-graph.json');
+    await writeFile(graphPath, JSON.stringify({
+      nodes: [
+        { id: absHtml, metrics: { inDegree: 0, outDegree: 1 } },
+        { id: absOld, metrics: { inDegree: 1, outDegree: 0 } },
+        { id: absApp, metrics: { inDegree: 0, outDegree: 0 } },
+      ],
+      edges: [{ source: absHtml, target: absOld, importedNames: [], isTypeOnly: false, weight: 1, assetKind: 'script' }],
+    }), 'utf-8');
+
+    const watcher = new McpWatcher({ rootPath, outputPath, debounceMs: DEBOUNCE_MS });
+    watchers.push(watcher);
+    await watcher.start();
+
+    // Re-point the script from old.js to app.js.
+    await writeFile(htmlFile, '<html><body><script src="app.js"></script></body></html>\n', 'utf-8');
+    await wait(WAIT_MS);
+
+    const g = JSON.parse(await readFile(graphPath, 'utf-8')) as {
+      edges: Array<{ source: string; target: string; assetKind?: string }>;
+    };
+    expect(g.edges.some(e => e.source === absHtml && e.target === absOld)).toBe(false);
+    const appEdge = g.edges.find(e => e.source === absHtml && e.target === absApp);
+    expect(appEdge, 'index.html → app.js asset edge').toBeDefined();
+    expect(appEdge!.assetKind).toBe('script');
+  }, 15_000);
+
   it('leaves the dependency graph untouched when a non-node file changes', async () => {
     const { rootPath, outputPath } = await setupProject();
     const aFile = join(rootPath, 'a.ts');
