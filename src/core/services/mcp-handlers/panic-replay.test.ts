@@ -59,6 +59,20 @@ describe('replayBehavioralTrace', () => {
     expect(replayBehavioralTrace(steps, { sourceRoots: ['src'] }).peakLevel).toBe(0);
   });
 
+  it('tolerates malformed steps (regression: non-string filePath / bad gapMs must not crash)', () => {
+    // Steps as they might arrive from a hand-written or corrupt trace file.
+    const bad = [
+      { tool: 'search_code', filePath: 42 as unknown as string, gapMs: -5 },
+      { tool: 'search_code', filePath: { nope: true } as unknown as string },
+      { tool: 'search_code', gapMs: NaN as unknown as number },
+      { tool: 'search_code', filePath: 'src/auth/x.ts', gapMs: 1000 },
+    ];
+    expect(() => replayBehavioralTrace(bad)).not.toThrow();
+    const r = replayBehavioralTrace(bad);
+    expect(r.steps).toBe(4);
+    expect(r.timeline).toHaveLength(4);
+  });
+
   it('empty trace → no panic, empty timeline', () => {
     const r = replayBehavioralTrace([]);
     expect(r.steps).toBe(0);

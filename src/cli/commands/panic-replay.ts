@@ -22,8 +22,13 @@ function readTrace(path: string): ReplayStep[] {
     const t = line.trim();
     if (!t) continue;
     try {
-      const o = JSON.parse(t) as ReplayStep;
-      if (o && typeof o.tool === 'string') steps.push(o);
+      const o = JSON.parse(t) as Record<string, unknown>;
+      if (!o || typeof o.tool !== 'string') continue; // a step needs a tool name
+      // Sanitize: a non-string filePath / non-number gapMs is dropped, not crashed on.
+      const step: ReplayStep = { tool: o.tool };
+      if (typeof o.filePath === 'string') step.filePath = o.filePath;
+      if (typeof o.gapMs === 'number' && Number.isFinite(o.gapMs)) step.gapMs = o.gapMs;
+      steps.push(step);
     } catch { /* skip malformed line */ }
   }
   return steps;

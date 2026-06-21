@@ -59,14 +59,30 @@ export function readHotspotArtifact(analysisDir: string): BehavioralHotspotRepor
     if (!existsSync(path)) return null;
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Partial<BehavioralHotspotReport>;
     if (!Array.isArray(parsed.hotspots)) return null;
+    // Validate each hotspot's shape and drop malformed entries — a hand-edited or
+    // version-shifted artifact must never inject garbage into a consumer (e.g. orient's result).
+    const hotspots = parsed.hotspots.filter(isWellFormedHotspot);
     return {
-      generated_from_events: parsed.generated_from_events ?? 0,
-      modules_observed: parsed.modules_observed ?? 0,
-      hotspots: parsed.hotspots,
+      generated_from_events: typeof parsed.generated_from_events === 'number' ? parsed.generated_from_events : 0,
+      modules_observed: typeof parsed.modules_observed === 'number' ? parsed.modules_observed : 0,
+      hotspots,
     };
   } catch {
     return null;
   }
+}
+
+/** A hotspot is usable only if its core fields have the expected types. */
+function isWellFormedHotspot(h: unknown): h is BehavioralHotspot {
+  if (typeof h !== 'object' || h === null) return false;
+  const o = h as Record<string, unknown>;
+  return (
+    typeof o.module === 'string' &&
+    typeof o.events === 'number' &&
+    typeof o.max_depth === 'number' &&
+    Array.isArray(o.labels) &&
+    o.labels.every((l) => typeof l === 'string')
+  );
 }
 
 /** Hotspots whose module is in `modules` (contextual filtering for orient). */

@@ -75,9 +75,11 @@ export function replayBehavioralTrace(
 
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
-      now += Math.max(0, step.gapMs ?? 0);
+      now += Math.max(0, typeof step.gapMs === 'number' && Number.isFinite(step.gapMs) ? step.gapMs : 0);
 
-      updateTracker(tracker, step.tool, '', step.filePath);
+      // Defense in depth: only a string filePath reaches the engine (mirrors mcp.ts's guard).
+      const filePath = typeof step.filePath === 'string' ? step.filePath : undefined;
+      updateTracker(tracker, step.tool, '', filePath);
       if (step.tool === 'orient') {
         resetPanicOnOrient(tracker, '');
       } else {

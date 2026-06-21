@@ -119,6 +119,24 @@ describe('readHotspotArtifact', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
+  it('drops malformed hotspot entries (regression: orient must not surface garbage)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hs-art-'));
+    try {
+      writeFileSync(join(dir, HOTSPOT_ARTIFACT_FILE), JSON.stringify({
+        hotspots: [
+          { module: 'auth', events: 5, max_depth: 3, labels: ['deep-stale'] },        // valid
+          { module: 'billing', events: 2, max_depth: 1, labels: 'not-an-array' },      // labels not array
+          { module: 12345, events: 1, max_depth: 1, labels: [] },                      // module not string
+          { module: 'payments', events: 'lots', max_depth: 1, labels: [] },            // events not number
+          { module: 'orders', max_depth: 1, labels: [1, 2] },                          // labels not strings
+          'totally wrong',                                                             // not an object
+        ],
+      }));
+      const read = readHotspotArtifact(dir);
+      expect(read?.hotspots.map((h) => h.module)).toEqual(['auth']); // only the valid one survives
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it('reads a well-formed artifact', () => {
     const dir = mkdtempSync(join(tmpdir(), 'hs-art-'));
     try {
