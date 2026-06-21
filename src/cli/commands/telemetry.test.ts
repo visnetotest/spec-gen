@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { computePanicStats, computeRecovery, computeObstinacy } from './telemetry.js';
+import { computePanicStats, computeRecovery, computeObstinacy, computePanicValidation } from './telemetry.js';
 import type { PanicEvent, LeaseEvent, McpEvent } from './telemetry.js';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -323,3 +323,70 @@ describe('computeObstinacy', () => {
     expect(r.episodes[1].calls_before_orient).toBe(2);
   });
 });
+
+// ── computePanicValidation (observe-mode accuracy gate) ────────────────────────
+
+function orientDelta(offsetMs: number, delta = -40): PanicEvent {
+  return { ts: ts(offsetMs), event: 'panic_orient_reset', orient_kind: 'normal', delta };
+}
+function interventionOutcome(offsetMs: number, outcome = 'responded'): PanicEvent {
+  return { ts: ts(offsetMs), event: 'panic_intervention_outcome', outcome };
+}
+// One completed episode [start..end] with an optional score-reducing orient inside the window.
+function episode(startMs: number, endMs: number, withOrient: boolean): PanicEvent[] {
+  const evs: PanicEvent[] = [levelChange(0, 2, startMs)];
+  if (withOrient) evs.push(orientDelta(startMs + 1));
+  evs.push(levelChange(2, 0, endMs));
+  return evs;
+}
+
+describe('computePanicValidation', () => {
+  it('empty input → INSUFFICIENT_DATA, never CLEARED', () => {
+    const r = computePanicValidation([]);
+    expect(r.verdict).toBe('INSUFFICIENT_DATA');
+    expect(r.completed_episodes).toBe(0);
+    expect(r.fp_proxy_rate).toBeNull();
+    expect(r.intervention_follow_through).toBeNull();
+  });
+
+  it('episode resolved via orient counts as resolved_via_orient (not a false-positive)', () => {
+    const r = computePanicValidation(episode(0, 1000, true));
+    expect(r.completed_episodes).toBe(1);
+    expect(r.resolved_via_orient).toBe(1);
+    expect(r.resolved_via_decay).toBe(0);
+    expect(r.fp_proxy_rate).toBe(0);
+  });
+
+  it('episode that returns to L0 without any re-orient is a false-positive proxy', () => {
+    const r = computePanicValidation(episode(0, 1000, false));
+    expect(r.resolved_via_decay).toBe(1);
+    expect(r.fp_proxy_rate).toBe(1);
+  });
+
+  it('intervention follow-through = responded outcomes / hook intercepts', () => {
+    const events: PanicEvent[] = [
+      ...episode(0, 1000, true),
+      hookIntervention(100), hookIntervention(200),
+      interventionOutcome(150), // 1 responded of 2 intercepts → 0.5
+    ];
+    const r = computePanicValidation(events);
+    expect(r.hook_intercepts).toBe(2);
+    expect(r.intervention_responses).toBe(1);
+    expect(r.intervention_follow_through).toBe(0.5);
+  });
+
+  it('verdict flips to REVIEW_REQUIRED at the episode threshold but is never CLEARED', () => {
+    const events: PanicEvent[] = [];
+    for (let i = 0; i < r_min(); i++) events.push(...episode(i * 1000, i * 1000 + 500, true));
+    const r = computePanicValidation(events);
+    expect(r.completed_episodes).toBeGreaterThanOrEqual(r.min_episodes);
+    expect(r.verdict).toBe('REVIEW_REQUIRED');
+    // Even with a perfect record, the function never auto-clears the gate.
+    expect(['INSUFFICIENT_DATA', 'REVIEW_REQUIRED']).toContain(r.verdict);
+  });
+});
+
+// min episodes needed for the verdict to leave INSUFFICIENT_DATA (mirrors the impl constant)
+function r_min(): number {
+  return computePanicValidation([]).min_episodes;
+}

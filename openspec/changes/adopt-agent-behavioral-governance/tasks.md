@@ -32,6 +32,12 @@
 ## 3. Telemetry panic section (this PR)
 - [x] `panic.jsonl` domain events with provenance (`panic_score_delta`, `panic_level_change`).
 - [x] `openlore telemetry` panic summary (episodes, recovery latency, trigger frequency).
+- [x] **Observe-mode validation readout** (`computePanicValidation`) — the deterministic measurement
+      substrate for the accuracy gate: false-positive proxy (episodes resolved without re-orient),
+      intervention follow-through (`panic_intervention_outcome` per intercept), and a gate verdict that
+      is `INSUFFICIENT_DATA` / `REVIEW_REQUIRED` and **never auto-`CLEARED`** (clearing is a human call).
+      This ships the *tooling to measure*; actually running observe-mode, gathering episodes, and
+      deciding remains the follow-up (§5).
 
 ## 4. Decisions + spec sync (this PR)
 - [ ] `record_decision`: adopt behavioral governance as an extension of the EpistemicLease nudge surface;
