@@ -101,6 +101,35 @@ describe.skipIf(!haveCli)('panic CLI — e2e against the built binary', () => {
     expect(run(['panic-level', '--directory', dir]).stdout.trim()).toBe('');
   });
 
+  it('panic-validate reports the gate (human + JSON) from real panic.jsonl', () => {
+    const tel = join(dir, '.openlore', 'telemetry');
+    mkdirSync(tel, { recursive: true });
+    const base = Date.parse('2026-06-21T10:00:00Z');
+    const ts2 = (s: number) => new Date(base + s * 1000).toISOString();
+    const ev: Record<string, unknown>[] = [];
+    // 3 false-positive episodes (decay-resolved) with a noisy oscillation_spike trigger.
+    for (let i = 0; i < 3; i++) {
+      const s = i * 100;
+      ev.push({ ts: ts2(s), event: 'panic_level_change', from_level: 0, to_level: 2 });
+      ev.push({ ts: ts2(s + 1), event: 'panic_score_delta', triggers: [{ name: 'oscillation_spike', delta: 15 }] });
+      ev.push({ ts: ts2(s + 8), event: 'panic_level_change', from_level: 2, to_level: 0 });
+    }
+    writeFileSync(join(tel, 'panic.jsonl'), ev.map((e) => JSON.stringify(e)).join('\n') + '\n');
+
+    const human = run(['panic-validate', '--directory', dir]);
+    expect(human.code).toBe(0);
+    expect(human.stdout).toContain('panic signal accuracy gate');
+    expect(human.stdout).toMatch(/verdict\s+:\s+INSUFFICIENT_DATA/);
+    expect(human.stdout).toContain('oscillation_spike');
+
+    const json = run(['panic-validate', '--directory', dir, '--json']);
+    const report = JSON.parse(json.stdout.trim());
+    expect(report.verdict).toBe('INSUFFICIENT_DATA');
+    expect(report.false_positive.proxy_rate).toBe(1);
+    expect(report.false_positive.by_trigger[0].trigger).toBe('oscillation_spike');
+    expect(report.verdict).not.toBe('CLEARED');
+  });
+
   it('telemetry renders the observe-mode validation gate from real panic.jsonl', () => {
     const tel = join(dir, '.openlore', 'telemetry');
     mkdirSync(tel, { recursive: true });

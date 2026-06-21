@@ -59,7 +59,8 @@ interface PanicEvent {
   orient_kind?: 'normal' | 'rapid' | 'spam';
   delta?: number; from_score?: number; to_score?: number;
   intervention_count?: number;
-  call_triggers?: string[];
+  triggers?: Array<{ name: string; delta: number }>;
+  provenance?: Array<{ name: string; delta: number }>;
   gryph_enriched?: boolean;
   outcome?: string; intervention_lag_ms?: number;
 }
@@ -203,73 +204,11 @@ function computeRecovery(mcp: McpEvent[], lease: LeaseEvent[]) {
 
 // Exported for testing
 export type { PanicEvent, LeaseEvent, McpEvent };
-export { computePanicStats, computeRecovery, computeObstinacy, computePanicValidation };
+export { computePanicStats, computeRecovery, computeObstinacy };
 
-/**
- * Observe-mode validation (the accuracy gate, per adopt-agent-behavioral-governance).
- *
- * This does NOT prove the signal is accurate and never auto-declares the gate cleared —
- * that is a human decision. It surfaces the deterministic evidence a maintainer needs to
- * make that call from real `observe`-mode telemetry:
- *
- *  - false-positive proxy: completed episodes that returned to L0 *without* the agent ever
- *    re-orienting (resolved by passive decay). A high rate suggests the layer raised panic on
- *    work that did not actually need correcting — the failure mode that makes a nudge net-negative.
- *  - intervention follow-through: panic_intervention_outcome ('responded') per hook intercept —
- *    did interventions actually produce a corrective orient, or were they ignored/fought?
- *  - resolution: do episodes resolve at all (vs. open/oscillating)?
- *
- * Until enough episodes are observed the verdict is INSUFFICIENT_DATA; otherwise REVIEW_REQUIRED
- * with the evidence attached. It is never CLEARED by this function.
- */
-const PANIC_VALIDATION_MIN_EPISODES = 20;
-
-function computePanicValidation(panic: PanicEvent[]) {
-  const sorted = [...panic].sort((a, b) => a.ts.localeCompare(b.ts));
-  const levelChanges = sorted.filter(e => e.event === 'panic_level_change');
-  const orientResets = sorted.filter(e => e.event === 'panic_orient_reset' && (e.delta ?? 0) < 0);
-
-  // Episode windows: 0→>0 ... →0 (mirrors computePanicStats).
-  const episodes: { start: string; end?: string; peak: number }[] = [];
-  let inEpisode = false, peak = 0, startTs = '';
-  for (const e of levelChanges) {
-    const from = e.from_level ?? 0, to = e.to_level ?? 0;
-    if (!inEpisode && from === 0 && to > 0) { inEpisode = true; peak = to; startTs = e.ts; }
-    else if (inEpisode) {
-      if (to > peak) peak = to;
-      if (to === 0) { episodes.push({ start: startTs, end: e.ts, peak }); inEpisode = false; peak = 0; }
-    }
-  }
-  if (inEpisode) episodes.push({ start: startTs, peak });
-
-  const completed = episodes.filter(e => e.end);
-  // An episode is "resolved via orient" if a score-reducing orient happened inside its window.
-  const resolvedViaOrient = completed.filter(e =>
-    orientResets.some(o => o.ts >= e.start && o.ts <= e.end!)
-  ).length;
-  const resolvedViaDecay = completed.length - resolvedViaOrient;
-  const fpProxyRate = completed.length ? resolvedViaDecay / completed.length : null;
-
-  const hookIntercepts = sorted.filter(e => e.event === 'hook_intervention').length;
-  const responded = sorted.filter(e => e.event === 'panic_intervention_outcome' && e.outcome === 'responded').length;
-  const followThrough = hookIntercepts ? responded / hookIntercepts : null;
-
-  const verdict = completed.length < PANIC_VALIDATION_MIN_EPISODES ? 'INSUFFICIENT_DATA' : 'REVIEW_REQUIRED';
-
-  return {
-    verdict,                                   // never 'CLEARED' — gate is a human call
-    min_episodes: PANIC_VALIDATION_MIN_EPISODES,
-    total_episodes: episodes.length,
-    completed_episodes: completed.length,
-    open_episodes: episodes.length - completed.length,
-    resolved_via_orient: resolvedViaOrient,
-    resolved_via_decay: resolvedViaDecay,
-    fp_proxy_rate: fpProxyRate,                // resolved-without-reorient / completed
-    hook_intercepts: hookIntercepts,
-    intervention_responses: responded,
-    intervention_follow_through: followThrough, // responded / hook_intercepts
-  };
-}
+// Observe-mode validation (the accuracy gate) lives in the shared panic-validation module so the
+// `openlore panic-validate` command and the `openlore telemetry` summary compute it identically.
+import { validatePanicSignal } from '../../core/services/mcp-handlers/panic-validation.js';
 
 /**
  * Panic stats: episode count, avg recovery latency, hook intercepts, orient spam.
@@ -322,11 +261,13 @@ function computePanicStats(panic: PanicEvent[]) {
   // Gryph enrichments
   const gryphEnriched = panic.filter(e => e.event === 'hook_intervention' && e.gryph_enriched).length;
 
-  // Trigger frequency across all events
+  // Trigger frequency across all events. panic_score_delta carries per-trigger provenance under
+  // `triggers`; panic_level_change under `provenance`. (Previously read a non-existent
+  // `call_triggers` field, so this line was always empty.)
   const triggerCounts = new Map<string, number>();
   for (const e of panic) {
-    for (const t of e.call_triggers ?? []) {
-      triggerCounts.set(t, (triggerCounts.get(t) ?? 0) + 1);
+    for (const t of [...(e.triggers ?? []), ...(e.provenance ?? [])]) {
+      if (t.delta > 0) triggerCounts.set(t.name, (triggerCounts.get(t.name) ?? 0) + 1);
     }
   }
 
@@ -382,7 +323,7 @@ function renderSummary(
   const recovery = computeRecovery(mcp, lease);
   const trajectory = computeTrajectoryEntropy(lease);
   const panicStats = computePanicStats(panicEvents);
-  const panicValidation = computePanicValidation(panicEvents);
+  const panicValidation = validatePanicSignal(panicEvents);
 
   section('TOOL LATENCY');
   if (tools.stats.length) {
@@ -457,14 +398,10 @@ function renderSummary(
   const pv = panicValidation;
   const pct = (r: number | null) => (r != null ? `${Math.round(r * 100)}%` : '—');
   console.log(`  gate verdict             : ${pv.verdict}  (never auto-CLEARED — maintainer decides)`);
-  console.log(`  episodes observed        : ${pv.completed_episodes} completed / ${pv.total_episodes} total  (need ≥${pv.min_episodes})`);
-  console.log(`  false-positive proxy     : ${pct(pv.fp_proxy_rate)}  (${pv.resolved_via_decay}/${pv.completed_episodes} resolved without re-orient)`);
-  console.log(`  intervention follow-thru : ${pct(pv.intervention_follow_through)}  (${pv.intervention_responses}/${pv.hook_intercepts} intercepts → orient)`);
-  if (pv.verdict === 'INSUFFICIENT_DATA') {
-    console.log(`  → run mode:'observe' on real sessions to gather episodes before considering any intervention.`);
-  } else {
-    console.log(`  → review the evidence above; low fp-proxy + high follow-thru is the bar to enable advisory by default.`);
-  }
+  console.log(`  episodes observed        : ${pv.episodes.completed} completed / ${pv.episodes.total} total  (need ≥${pv.min_episodes})`);
+  console.log(`  false-positive proxy     : ${pct(pv.false_positive.proxy_rate)}  (${pv.false_positive.resolved_via_decay}/${pv.episodes.completed} resolved without re-orient)`);
+  console.log(`  intervention follow-thru : ${pct(pv.intervention.follow_through_rate)}  (${pv.intervention.responses}/${pv.intervention.hook_intercepts} intercepts → orient)`);
+  console.log(`  → full report: openlore panic-validate${pv.recommendations[0] ? `  —  ${pv.recommendations[0]}` : ''}`);
 
   hr();
 }

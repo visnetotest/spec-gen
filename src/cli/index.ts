@@ -37,6 +37,7 @@ import { manifestCommand } from './manifest/index.js';
 import { serveCommand } from './commands/serve.js';
 import { panicCheckCommand } from './commands/panic-check.js';
 import { panicLevelCommand } from './commands/panic-level.js';
+import { panicValidateCommand } from './commands/panic-validate.js';
 import { configureLogger } from '../utils/logger.js';
 
 // Read version from package.json at runtime so it never drifts from the published version
@@ -161,5 +162,6 @@ program.addCommand(manifestCommand);
 program.addCommand(serveCommand);
 program.addCommand(panicCheckCommand);
 program.addCommand(panicLevelCommand);
+program.addCommand(panicValidateCommand);
 
 program.parse();
