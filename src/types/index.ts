@@ -49,6 +49,14 @@ export interface OpenLoreConfig {
    * commit on. Empty/absent = advisory-only (the default posture).
    */
   blastRadius?: BlastRadiusConfig;
+  /**
+   * Optional binding to an external spec store that declares the code
+   * repositories its plans target and reference (change: add-spec-store-binding).
+   * Configuration only: OpenLore reads the declared relationships and never
+   * clones, writes to, synchronizes, or fences the store or any target. Absent
+   * binding = unchanged single-repository behavior.
+   */
+  specStore?: SpecStoreConfig;
 }
 
 /** Named high-risk patterns the blast-radius hook may block on (opt-in). */
@@ -56,6 +64,24 @@ export type BlastRadiusBlockPattern = 'orphans-anchored-memory' | 'orphans-ancho
 
 export interface BlastRadiusConfig {
   block?: BlastRadiusBlockPattern[];
+}
+
+/**
+ * A binding to an external spec store (change: add-spec-store-binding). The
+ * store is a standalone repository that holds specs/changes; `targets` and
+ * `references` are repository NAMES resolved against the federation registry
+ * (`.openlore/federation.json`). A target is a code repository the store's work
+ * is about; a reference is upstream context it draws on.
+ */
+export interface SpecStoreConfig {
+  /** Stable, user-facing name for the store. */
+  name: string;
+  /** Absolute or home-relative path to the external spec repository. */
+  path: string;
+  /** Federation-registered names of the code repositories the store targets. */
+  targets: string[];
+  /** Federation-registered names of repositories the store references for context. */
+  references?: string[];
 }
 
 export interface EmbeddingConfig {

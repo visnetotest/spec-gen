@@ -92,6 +92,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   get_map: 'conclusion',
   find_path: 'conclusion',
   federation_status: 'conclusion',
+  spec_store_status: 'conclusion',
   detect_changes: 'conclusion',
   get_health_map: 'conclusion',
   get_surprising_connections: 'conclusion',

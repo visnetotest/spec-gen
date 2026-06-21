@@ -424,6 +424,12 @@ The system SHALL maintain a project-local federation registry at .openlore/feder
 
 > Decision recorded: bf5aff2d
 > Date: 2026-06-19
+### Requirement: SpecstoreBindingResolvesDeclaredTargetsByNameAgainstTheFederationRegistry
+
+The system SHALL provide a declarative spec-store binding that resolves named targets against the federation registry and surfaces health findings as conclusion-shaped diagnostics without throwing or blocking.
+
+> Decision recorded: c6e36101
+> Date: 2026-06-21
 
 ## Technical Notes
 
@@ -441,7 +447,7 @@ openlore emits SCIP for interop with external indexers but never imports it; the
 
 **Consequences:** SCIP consumers get a snapshot; openlore never depends on SCIP being read back.
 
-### MCP exposes a curated navigation tool preset, not all 60 tools
+### MCP exposes a curated navigation tool preset, not all 61 tools
 
 **Status:** Approved
 **Date:** 2026-06-01
@@ -608,3 +614,34 @@ Comparing the analyze-time project fingerprint (whole-tree mtime+size hash) agai
 Multi-repo federation needs a registry that references each repo's independently-built .openlore index without merging graphs. Store it project-local at .openlore/federation.json (hermetic, deterministic, co-located with the index) rather than ~/.openlore. Each entry is { name, path (absolute), fingerprint, schemaVersion, lastBuilt } sourced from the target repo's .openlore/analysis/fingerprint.json. The home repo (the one holding the registry) is implicitly in scope. Adding/removing a repo edits only the registry plus that repo's own local build — never a global rebuild.
 
 **Consequences:** A new src/core/federation/ module owns registry load/save/add/remove/list. Federated queries load per-repo CachedContext lazily via readCachedContext on demand; no union graph is materialized. Remote (git-remote) repos and a global ~/.openlore registry are deferred to a follow-up.
+
+### Requirement: SpecStoreStatusCommand
+
+The system SHALL provide a CLI command `openlore spec-store status` that resolves a configured spec-store
+binding and emits its health check. The command SHALL support a `--json` flag whose output carries
+stable finding codes documented in the agent-facing contract, so an external orchestrator can consume
+the result without parsing prose. The command SHALL be read-only and SHALL exit zero whether or not
+findings are present; it SHALL NOT block any workflow.
+
+#### Scenario: Status emits machine-readable findings
+
+- **GIVEN** a configured spec-store binding with one unresolved target
+- **WHEN** `openlore spec-store status --json` is run
+- **THEN** the command exits zero and emits a finding with the stable code `target-unresolved` and a
+  remediation
+
+#### Scenario: No binding configured
+
+- **GIVEN** an environment with no spec-store binding
+- **WHEN** `openlore spec-store status` is run
+- **THEN** the command reports that no binding is configured and exits zero without error
+
+### Spec-store binding resolves declared targets by name against the federation registry
+
+**Status:** Approved
+**Date:** 2026-06-21
+**ID:** c6e36101
+
+A spec-store binding adds an optional OpenLoreConfig.specStore block { name, path, targets[], references? } where targets/references are NAMES that must match entries already in the federation registry (.openlore/federation.json). Resolution and index-state reuse the federation registry verbatim (loadRegistry/listRepos/evaluateRepoState), so the binding adds no new index machinery — it is a thin declarative layer over the shipped index-of-indexes. The health check is read-only and returns conclusion-shaped findings with stable codes (store-path-missing, target-unresolved, target-missing, index-missing, index-stale, reference-missing); it never throws and never blocks. The MCP tool spec_store_status follows the federation_status precedent: present in the full TOOL_DEFINITIONS surface and additionally in the opt-in federation preset, kept out of minimal/navigation/memory.
+
+**Consequences:** Using a spec-store binding requires the target repos to also be registered via `openlore federation add`; a declared name with no registry entry surfaces as a target-unresolved finding with a pasteable remediation rather than an error. Tool count rises 60→61, requiring updates to the count-guarded docs and the --preset help string. Future working-set and impact-certificate tools will extend this binding.

@@ -90,10 +90,12 @@ describe('MCP tool presets', () => {
   // change: add-multi-repo-federation — FederationScopedConclusions: the
   // federation capability (federation_status) appears ONLY under the federation
   // preset; the default and minimal surfaces register no federation capability.
+  // change: add-spec-store-binding — spec_store_status joins the federation preset
+  // (it resolves declared targets against the same registry), kept out of minimal.
   it('federation_status is gated to the federation preset, never in default/minimal', () => {
     const fed = selectActiveTools(TOOL_DEFINITIONS, { preset: 'federation' }).map(t => t.name);
     expect(fed).toContain('federation_status');
-    expect(new Set(fed)).toEqual(new Set(['orient', 'federation_status', 'analyze_impact', 'find_dead_code', 'select_tests', 'find_path']));
+    expect(new Set(fed)).toEqual(new Set(['orient', 'federation_status', 'spec_store_status', 'analyze_impact', 'find_dead_code', 'select_tests', 'find_path']));
 
     expect(selectActiveTools(TOOL_DEFINITIONS, { minimal: true }).map(t => t.name)).not.toContain('federation_status');
     // Default surface DOES list the four federation-aware tools, but federation_status
@@ -229,8 +231,11 @@ describe('tools/list payload budget (spec-28)', () => {
   // full surface widens. Conscious decision, not silent drift.
   // Bumped to 57_000 — the combined cost of blast_radius + verify_claim + federation_status
   // and the opt-in params added across PRs #163-#167. (merge reconciliation)
+  // Bumped 61_000 → 62_000 when the `spec_store_status` tool was added to the full surface
+  // (spec: add-spec-store-binding) — a read-only binding-health tool. It stays OUT of the
+  // minimal/navigation/memory presets; only the full surface widens. Conscious decision.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({})).toBeLessThan(61_000);
+    expect(payloadBytes({})).toBeLessThan(62_000);
   });
 
   it('navigation preset stays lean (the low-overhead surface that wins the benchmark)', () => {

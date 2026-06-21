@@ -418,6 +418,12 @@ The system SHALL exclude superseded decisions from authoritative recall and orie
 
 > Decision recorded: 6c32e6c6
 > Date: 2026-06-19
+### Requirement: SpecstoreBindingResolvesDeclaredTargetsByNameAgainstTheFederationRegistry
+
+The system SHALL provide a declarative spec-store binding that resolves named targets against the federation registry and surfaces health findings as conclusion-shaped diagnostics without throwing or blocking.
+
+> Decision recorded: c6e36101
+> Date: 2026-06-21
 
 ## Decisions
 
@@ -727,3 +733,78 @@ architectural constraints on the interface.
 A decision superseded by another (via record_decision with supersedes) remained draft/approved/verified until LLM consolidation flipped it to rejected — which never runs without an API key. This caused orient.pendingDecisions and recall authoritative to serve the superseded decision as current context while simultaneously surfacing it as a do-not-repeat reversal. Fix: a single shared predicate supersededDecisionIds() (where a superseder counts unless it is itself rejected/phantom, preserving the original if the supersession is declined) is used by both collectReversals (warn side) and the authoritative filter in orient.ts and memory.ts (exclude side), ensuring the two surfaces can never disagree, including in the pre-consolidation window.
 
 **Consequences:** A superseded-but-still-active decision is now withheld from pendingDecisions/recall authoritative and surfaced only under reversals. The superseding decision stays authoritative. No LLM consolidation required for supersession to take effect.
+
+### Requirement: SpecStoreBinding
+
+The system SHALL support an optional, additive binding between an OpenLore-indexed environment and an
+external spec repository that declares the code repositories its plans target and reference. The binding
+SHALL consist of the store's name, its local path, a list of declared **target** repositories, and an
+optional list of declared **reference** repositories. The binding SHALL be configuration only: the
+system SHALL read the store's declared relationships and SHALL NOT clone, write to, synchronize, or
+fence the store or any target. When no binding is configured, single-repository behavior SHALL be
+unchanged.
+
+#### Scenario: A binding declares targets and references
+
+- **GIVEN** an OpenLore environment configured with a spec-store binding naming two target repositories
+  and one reference repository
+- **WHEN** the binding is loaded
+- **THEN** the system records the store name, path, targets, and references, and makes no modification to
+  the store or any target
+
+#### Scenario: Absent binding preserves single-repo behavior
+
+- **GIVEN** an environment with no spec-store binding configured
+- **WHEN** OpenLore runs
+- **THEN** behavior is identical to the unbound single-repository case and no binding error is raised
+
+### Requirement: SpecStoreNameResolution
+
+The system SHALL resolve declared target and reference names to local repository indexes via the
+multi-repository federation index-of-indexes, and resolved targets SHALL carry their live index state so
+that cross-repository structural facts are computable across the plan's targets. A declared name that
+does not resolve to a registered repository SHALL produce a finding (`target-unresolved` for targets,
+`reference-missing` for references) rather than an error, and the remaining names SHALL still resolve.
+
+#### Scenario: One target is missing
+
+- **GIVEN** a binding declaring three targets, one of which is not registered in the federation registry
+- **WHEN** names are resolved
+- **THEN** two targets resolve and exactly one `target-unresolved` finding is reported for the missing
+  target
+
+### Requirement: SpecStoreHealthCheck
+
+The system SHALL provide a deterministic, read-only, conclusion-shaped health check for a spec-store
+binding that reports, per declared target, whether it resolves, whether its index is present, and
+whether its index is fresh relative to its working tree; per declared reference, whether it is present;
+the presence of the store's own path; and any malformed-binding problems. Each finding SHALL carry a
+stable code (`no-binding`, `binding-invalid`, `store-path-missing`, `target-unresolved`,
+`target-missing`, `index-missing`, `index-stale`, `reference-missing`) and a pasteable remediation. The
+check SHALL NOT block, SHALL be sound when it carries no error-severity finding, and SHALL degrade
+infrastructure failures to a finding rather than throwing. The check SHALL compose existing analyses
+only, with no LLM.
+
+#### Scenario: A healthy binding reports no findings
+
+- **GIVEN** a binding whose every target resolves to a present, fresh index and whose references are all
+  present
+- **WHEN** the health check runs
+- **THEN** it returns zero findings and a sound verdict
+
+#### Scenario: A stale target index is surfaced
+
+- **GIVEN** a binding whose target index is older than that target's working tree
+- **WHEN** the health check runs
+- **THEN** it returns exactly one finding with the stable code `index-stale` and a remediation, and does
+  not block
+
+### Spec-store binding resolves declared targets by name against the federation registry
+
+**Status:** Approved
+**Date:** 2026-06-21
+**ID:** c6e36101
+
+A spec-store binding adds an optional OpenLoreConfig.specStore block { name, path, targets[], references? } where targets/references are NAMES that must match entries already in the federation registry (.openlore/federation.json). Resolution and index-state reuse the federation registry verbatim (loadRegistry/listRepos/evaluateRepoState), so the binding adds no new index machinery — it is a thin declarative layer over the shipped index-of-indexes. The health check is read-only and returns conclusion-shaped findings with stable codes (store-path-missing, target-unresolved, target-missing, index-missing, index-stale, reference-missing); it never throws and never blocks. The MCP tool spec_store_status follows the federation_status precedent: present in the full TOOL_DEFINITIONS surface and additionally in the opt-in federation preset, kept out of minimal/navigation/memory.
+
+**Consequences:** Using a spec-store binding requires the target repos to also be registered via `openlore federation add`; a declared name with no registry entry surfaces as a target-unresolved finding with a pasteable remediation rather than an error. Tool count rises 60→61, requiring updates to the count-guarded docs and the --preset help string. Future working-set and impact-certificate tools will extend this binding.

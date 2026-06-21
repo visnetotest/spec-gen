@@ -32,6 +32,7 @@ import { handleGetLandmarks } from './mcp-handlers/landmarks.js';
 import { handleGetMap } from './mcp-handlers/map.js';
 import { handleFindPath } from './mcp-handlers/pathfind.js';
 import { handleFederationStatus } from './mcp-handlers/federation.js';
+import { handleSpecStoreStatus } from './mcp-handlers/spec-store.js';
 import { handleCheckArchitecture } from './mcp-handlers/architecture.js';
 import { handleGenerateChangeProposal, handleAnnotateStory } from './mcp-handlers/change.js';
 import {
@@ -288,6 +289,9 @@ export async function dispatchTool(
   } else if (name === 'federation_status') {
     const { directory } = args as { directory: string };
     return handleFederationStatus(directory);
+  } else if (name === 'spec_store_status') {
+    const { directory } = args as { directory: string };
+    return handleSpecStoreStatus(directory);
   } else if (name === 'detect_changes') {
     const { directory, base } = args as { directory: string; base?: string };
     return handleDetectChanges(directory, base);
