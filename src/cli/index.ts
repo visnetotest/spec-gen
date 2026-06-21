@@ -38,6 +38,7 @@ import { serveCommand } from './commands/serve.js';
 import { panicCheckCommand } from './commands/panic-check.js';
 import { panicLevelCommand } from './commands/panic-level.js';
 import { panicValidateCommand } from './commands/panic-validate.js';
+import { panicHotspotsCommand } from './commands/panic-hotspots.js';
 import { gryphWatchCommand } from './commands/gryph-watch.js';
 import { configureLogger } from '../utils/logger.js';
 
@@ -164,6 +165,7 @@ program.addCommand(serveCommand);
 program.addCommand(panicCheckCommand);
 program.addCommand(panicLevelCommand);
 program.addCommand(panicValidateCommand);
+program.addCommand(panicHotspotsCommand);
 program.addCommand(gryphWatchCommand);
 
 program.parse();

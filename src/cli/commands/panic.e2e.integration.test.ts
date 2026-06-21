@@ -121,6 +121,31 @@ describe.skipIf(!haveCli)('panic CLI — e2e against the built binary', () => {
     expect(run(['panic-level', '--directory', dir]).stdout.trim()).toBe('');
   });
 
+  it('panic-hotspots aggregates lease telemetry and --write persists the durable artifact', () => {
+    const tel = join(dir, '.openlore', 'telemetry');
+    mkdirSync(tel, { recursive: true });
+    const events = [
+      { ts: '2026-06-21T10:00:00Z', event: 'depth_escalate', module: 'auth', to_depth: 3, density: 0.9, oscillation: 0.8, tool: 'trace_execution_path' },
+      { ts: '2026-06-21T10:00:10Z', event: 'stale', module: 'auth', depth: 3, density: 0.7, oscillation: 0.6, tool: 'search_code' },
+      { ts: '2026-06-21T10:00:20Z', event: 'degraded', module: 'billing', density: 0.2, oscillation: 0.1, tool: 'search_code' },
+      { ts: '2026-06-21T10:00:30Z', event: 'orient_reset', module: null, tool: 'orient' }, // ignored
+    ];
+    writeFileSync(join(tel, 'epistemic-lease.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+
+    const json = run(['panic-hotspots', '--directory', dir, '--json']);
+    expect(json.code).toBe(0);
+    const report = JSON.parse(json.stdout.trim());
+    expect(report.modules_observed).toBe(2);
+    expect(report.hotspots[0].module).toBe('auth');
+    expect(report.hotspots[0].labels).toContain('deep-stale');
+
+    // --write persists the artifact the memory/orient layer can consume.
+    run(['panic-hotspots', '--directory', dir, '--write', '--json']);
+    const artifact = join(dir, '.openlore', 'analysis', 'behavioral-hotspots.json');
+    expect(existsSync(artifact)).toBe(true);
+    expect(JSON.parse(readFileSync(artifact, 'utf-8')).hotspots[0].module).toBe('auth');
+  });
+
   it('gryph-watch exits cleanly and writes no PID file when mode is off (safe default)', () => {
     setMode(dir, 'off');
     rmSync(join(dir, '.openlore', 'gryph-watch.pid'), { force: true });
