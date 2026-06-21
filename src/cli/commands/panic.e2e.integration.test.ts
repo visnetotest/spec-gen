@@ -12,7 +12,7 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -157,6 +157,30 @@ describe.skipIf(!haveCli)('panic CLI — e2e against the built binary', () => {
     expect(report.false_positive.proxy_rate).toBe(1);
     expect(report.false_positive.by_trigger[0].trigger).toBe('oscillation_spike');
     expect(report.verdict).not.toBe('CLEARED');
+  });
+
+  it('setup --panic sets the config mode (opt-in); setup --hooks installs idempotently', () => {
+    // setup --panic needs a config to exist.
+    writeFileSync(
+      join(dir, '.openlore', 'config.json'),
+      JSON.stringify({ version: '1.0.0', projectType: 'unknown', openspecPath: './openspec',
+        analysis: {}, generation: {}, panicResponse: { mode: 'off' }, createdAt: '', lastRun: null }),
+    );
+    const setMode2 = run(['setup', '--panic', 'observe', '--dir', dir]);
+    expect(setMode2.code).toBe(0);
+    expect(JSON.parse(readFileSync(join(dir, '.openlore', 'config.json'), 'utf-8')).panicResponse.mode).toBe('observe');
+
+    // --hooks installs PreToolUse panic-check + UserPromptSubmit gryph-watch.
+    run(['setup', '--hooks', 'claude', '--dir', dir]);
+    const settings1 = JSON.parse(readFileSync(join(dir, '.claude', 'settings.json'), 'utf-8'));
+    expect(settings1.hooks.PreToolUse.some((h: { command: string }) => h.command.includes('panic-check'))).toBe(true);
+    expect(settings1.hooks.UserPromptSubmit.some((h: { command: string }) => h.command.includes('gryph-watch'))).toBe(true);
+
+    // Idempotent: re-running adds no duplicates.
+    run(['setup', '--hooks', 'claude', '--dir', dir]);
+    const settings2 = JSON.parse(readFileSync(join(dir, '.claude', 'settings.json'), 'utf-8'));
+    expect(settings2.hooks.PreToolUse).toHaveLength(1);
+    expect(settings2.hooks.UserPromptSubmit).toHaveLength(1);
   });
 
   it('telemetry renders the observe-mode validation gate from real panic.jsonl', () => {
