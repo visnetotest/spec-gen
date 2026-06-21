@@ -110,7 +110,7 @@ Three layers, each usable independently:
 |-------|-------------|----------|
 | **1. Static Analysis** | Call graph, clusters, McCabe CC, external deps → `CODEBASE.md` digest | No |
 | **2. Spec Layer** | LLM-generated living specs, ADRs, drift detection, decision gates | For generation |
-| **3. Agent Runtime** | 60 MCP tools — `orient()`, semantic search, graph expansion | No |
+| **3. Agent Runtime** | 59 MCP tools — `orient()`, semantic search, graph expansion | No |
 
 You can use layer 1 alone to give agents structural context. Add layer 2 for semantic intent and architectural governance through OpenSpec-compatible living specifications. Layer 3 keeps that context continuously accessible through graph-native MCP tools once `openlore mcp` is running.
 
@@ -331,7 +331,7 @@ Compares git changes against spec mappings in milliseconds. Detects: Gap (code c
 
 **MCP** (no API key)
 
-60 graph-native tools exposed over stdio. Together they act as a persistent architectural runtime for coding agents: orientation, graph traversal, semantic retrieval, drift awareness, decision context, and structural risk analysis.
+59 graph-native tools exposed over stdio. Together they act as a persistent architectural runtime for coding agents: orientation, graph traversal, semantic retrieval, drift awareness, decision context, and structural risk analysis.
 `orient()` is the main entry point — it collapses the discovery loop into one call (measured: **−26% round-trips** on deep traces; see the [Value Scorecard](#value-scorecard--does-it-pay-for-itself)). `detect_changes` risk-scores changed functions using call graph centrality × change type multiplier. Every tool call runs the same guards — input validation against its schema (bad args → JSON-RPC `-32602`), a per-tool timeout, a deterministic output-size cap, and normalized error codes — and the surface carries complete MCP `annotations`. See [docs/mcp-tools.md](docs/mcp-tools.md).
 
 `orient()` runs in **~430µs p50** against a 15k-node codebase (TypeScript compiler, ~79k edges). Full benchmark results: [scripts/BENCHMARKS.md](scripts/BENCHMARKS.md).
@@ -445,7 +445,7 @@ flowchart TD
     Iac --> DB
     Dec --> DB
 
-    DB --> MCP[60 MCP tools<br/>orient · BFS · search · analyze_impact]
+    DB --> MCP[59 MCP tools<br/>orient · BFS · search · analyze_impact]
     MCP --> Agent((Coding Agent))
 
     Code -. optional, API key .-> Gen[openlore generate]
