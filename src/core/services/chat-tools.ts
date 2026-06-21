@@ -33,7 +33,6 @@ import {
 import {
   handleGetArchitectureOverview,
   handleGetRefactorReport,
-  handleGetDecisions,
 } from './mcp-handlers/analysis.js';
 
 import { handleOrient } from './mcp-handlers/orient.js';

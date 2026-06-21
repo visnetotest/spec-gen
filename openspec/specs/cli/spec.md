@@ -441,7 +441,7 @@ openlore emits SCIP for interop with external indexers but never imports it; the
 
 **Consequences:** SCIP consumers get a snapshot; openlore never depends on SCIP being read back.
 
-### MCP exposes a curated navigation tool preset, not all 60 tools
+### MCP exposes a curated navigation tool preset, not all 59 tools
 
 **Status:** Approved
 **Date:** 2026-06-01

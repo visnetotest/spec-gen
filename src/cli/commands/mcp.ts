@@ -1727,7 +1727,7 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
 /**
  * Resolve which tools an MCP session exposes (Spec 14). `--preset` wins over the
  * legacy `--minimal` (= the 'minimal' preset); no selector = all tools. Throws on
- * an unknown preset so a typo fails loudly instead of silently exposing all 60.
+ * an unknown preset so a typo fails loudly instead of silently exposing all 59.
  * Pure + exported for unit testing.
  */
 export function selectActiveTools<T extends { name: string }>(
@@ -2098,5 +2098,5 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', 'Expose a named tool preset instead of all 60. "minimal" = orient+search+governance; "navigation" = graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) for low-overhead code navigation; "memory" = orient+remember+recall; "federation" = orient + federation_status + the four cross-repo conclusion tools. Takes precedence over --minimal.')
+  .option('--preset <name>', 'Expose a named tool preset instead of all 59. "minimal" = orient+search+governance; "navigation" = graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) for low-overhead code navigation; "memory" = orient+remember+recall; "federation" = orient + federation_status + the four cross-repo conclusion tools. Takes precedence over --minimal.')
   .action((options: McpServerOptions) => startMcpServer(options));

@@ -71,7 +71,6 @@ import {
   handleCheckSpecDrift,
   handleGetFunctionSkeleton,
   handleGetFunctionBody,
-  handleGetDecisions,
   handleGetRouteInventory,
   handleGetMiddlewareInventory,
   handleGetSchemaInventory,
