@@ -3,8 +3,17 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { computeBehavioralHotspots, HOTSPOT } from './behavioral-hotspots.js';
-import type { LeaseHotspotEvent } from './behavioral-hotspots.js';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import {
+  computeBehavioralHotspots,
+  readHotspotArtifact,
+  hotspotsForModules,
+  HOTSPOT,
+  HOTSPOT_ARTIFACT_FILE,
+} from './behavioral-hotspots.js';
+import type { LeaseHotspotEvent, BehavioralHotspotReport } from './behavioral-hotspots.js';
 
 const ev = (over: Partial<LeaseHotspotEvent>): LeaseHotspotEvent =>
   ({ ts: '2026-06-21T10:00:00Z', event: 'degraded', ...over });
@@ -83,5 +92,61 @@ describe('computeBehavioralHotspots', () => {
     const r = computeBehavioralHotspots(events, 2);
     expect(r.hotspots).toHaveLength(2);
     expect(r.modules_observed).toBe(4); // total still reported
+  });
+});
+
+describe('readHotspotArtifact', () => {
+  it('returns null when the artifact is absent', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hs-art-'));
+    try {
+      expect(readHotspotArtifact(dir)).toBeNull();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('returns null on corrupt JSON (fail-open)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hs-art-'));
+    try {
+      writeFileSync(join(dir, HOTSPOT_ARTIFACT_FILE), 'not json {{{');
+      expect(readHotspotArtifact(dir)).toBeNull();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('returns null when hotspots is not an array (wrong shape)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hs-art-'));
+    try {
+      writeFileSync(join(dir, HOTSPOT_ARTIFACT_FILE), JSON.stringify({ hotspots: 'nope' }));
+      expect(readHotspotArtifact(dir)).toBeNull();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('reads a well-formed artifact', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hs-art-'));
+    try {
+      const report = computeBehavioralHotspots([
+        { ts: '2026-06-21T10:00:00Z', event: 'depth_escalate', module: 'auth', to_depth: 3, density: 0.9, oscillation: 0.8 },
+      ]);
+      writeFileSync(join(dir, HOTSPOT_ARTIFACT_FILE), JSON.stringify(report));
+      const read = readHotspotArtifact(dir);
+      expect(read?.hotspots[0].module).toBe('auth');
+      expect(read?.hotspots[0].labels).toContain('deep-stale');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('hotspotsForModules', () => {
+  const report: BehavioralHotspotReport = {
+    generated_from_events: 3, modules_observed: 3,
+    hotspots: [
+      { module: 'auth', events: 5, max_depth: 3, avg_density: 0.8, avg_oscillation: 0.7, tools: [], labels: ['deep-stale'] },
+      { module: 'billing', events: 1, max_depth: 1, avg_density: 0.2, avg_oscillation: 0.1, tools: [], labels: [] },
+      { module: 'payments', events: 2, max_depth: 2, avg_density: 0.3, avg_oscillation: 0.2, tools: [], labels: [] },
+    ],
+  };
+  it('filters to hotspots whose module is in the set', () => {
+    const hits = hotspotsForModules(report, new Set(['auth', 'payments']));
+    expect(hits.map((h) => h.module)).toEqual(['auth', 'payments']);
+  });
+  it('returns empty when no module matches', () => {
+    expect(hotspotsForModules(report, new Set(['unknown']))).toEqual([]);
   });
 });

@@ -11,6 +11,9 @@
  * episode count. The memory/orient layer decides what to do with it.
  */
 
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 /** An epistemic-lease.jsonl record (subset this analysis reads). */
 export interface LeaseHotspotEvent {
   ts: string;
@@ -41,6 +44,34 @@ export interface BehavioralHotspotReport {
   generated_from_events: number;
   modules_observed: number;
   hotspots: BehavioralHotspot[];
+}
+
+/** Filename of the persisted artifact, relative to the analysis dir. */
+export const HOTSPOT_ARTIFACT_FILE = 'behavioral-hotspots.json';
+
+/**
+ * Read the persisted hotspot artifact (written by `openlore panic-hotspots --write`) from an
+ * analysis directory. Fail-open: returns null on any error (missing/corrupt/wrong-shape).
+ */
+export function readHotspotArtifact(analysisDir: string): BehavioralHotspotReport | null {
+  try {
+    const path = join(analysisDir, HOTSPOT_ARTIFACT_FILE);
+    if (!existsSync(path)) return null;
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Partial<BehavioralHotspotReport>;
+    if (!Array.isArray(parsed.hotspots)) return null;
+    return {
+      generated_from_events: parsed.generated_from_events ?? 0,
+      modules_observed: parsed.modules_observed ?? 0,
+      hotspots: parsed.hotspots,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Hotspots whose module is in `modules` (contextual filtering for orient). */
+export function hotspotsForModules(report: BehavioralHotspotReport, modules: Set<string>): BehavioralHotspot[] {
+  return report.hotspots.filter((h) => modules.has(h.module));
 }
 
 /** Thresholds for the labeled signals — referenced by tests. */

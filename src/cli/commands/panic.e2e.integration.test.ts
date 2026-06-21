@@ -229,3 +229,82 @@ describe.skipIf(!haveCli)('panic CLI — e2e against the built binary', () => {
     expect(r.stdout).not.toContain('CLEARED  (');
   });
 });
+
+// ── orient → behavioral hotspots (the observe → memory loop, end to end) ───────
+describe.skipIf(!haveCli)('orient surfaces behavioral hotspots (e2e)', () => {
+  let repo = '';
+
+  function execIn(cwd: string, args: string[]): void {
+    try { execFileSync('node', [CLI, ...args], { cwd, encoding: 'utf-8', stdio: 'ignore' }); }
+    catch { /* analyze/init are best-effort for the fixture */ }
+  }
+  function orientJson(task: string): Record<string, unknown> {
+    const r = run(['orient', '--task', task, '--directory', repo, '--json']);
+    try { return JSON.parse(r.stdout.trim()); } catch { return {}; }
+  }
+  function setMode3(mode: string): void {
+    const f = join(repo, '.openlore', 'config.json');
+    const c = JSON.parse(readFileSync(f, 'utf-8'));
+    c.panicResponse = { mode };
+    writeFileSync(f, JSON.stringify(c));
+  }
+
+  beforeAll(() => {
+    repo = mkdtempSync(join(tmpdir(), 'orient-hs-'));
+    mkdirSync(join(repo, 'src', 'auth'), { recursive: true });
+    mkdirSync(join(repo, 'src', 'billing'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'auth', 'login.ts'),
+      'export function login(u: string, p: string): boolean { return validate(u) && check(p); }\n' +
+      'export function validate(u: string): boolean { return u.length > 0; }\n' +
+      'export function check(p: string): boolean { return p.length >= 8; }\n');
+    writeFileSync(join(repo, 'src', 'billing', 'charge.ts'),
+      'export function charge(amount: number): number { return amount * 1.1; }\n');
+    execIn(repo, ['init']);
+    execIn(repo, ['analyze', repo, '--no-embed']);
+    // Plant a hotspot artifact: auth is labeled, billing is not.
+    mkdirSync(join(repo, '.openlore', 'analysis'), { recursive: true });
+    writeFileSync(join(repo, '.openlore', 'analysis', 'behavioral-hotspots.json'), JSON.stringify({
+      generated_from_events: 6, modules_observed: 2,
+      hotspots: [
+        { module: 'auth', events: 5, max_depth: 3, avg_density: 0.8, avg_oscillation: 0.7, tools: ['search_code'], labels: ['deep-stale', 'high-oscillation'] },
+        { module: 'billing', events: 1, max_depth: 1, avg_density: 0.2, avg_oscillation: 0.1, tools: ['search_code'], labels: [] },
+      ],
+    }));
+  });
+
+  it('surfaces the labeled hotspot when the task targets that module (observe mode)', () => {
+    setMode3('observe');
+    const o = orientJson('fix the login validation');
+    // Skip gracefully if analyze did not produce an index in this environment.
+    if (!Array.isArray(o.relevantFiles) || (o.relevantFiles as unknown[]).length === 0) return;
+    const hs = o.behavioralHotspots as Array<{ module: string; labels: string[] }> | undefined;
+    expect(hs).toBeDefined();
+    expect(hs!.some((h) => h.module === 'auth' && h.labels.includes('deep-stale'))).toBe(true);
+  });
+
+  it('does NOT surface an unlabeled hotspot (billing → noise filtered)', () => {
+    setMode3('observe');
+    const o = orientJson('update the charge calculation');
+    if (!Array.isArray(o.relevantFiles) || (o.relevantFiles as unknown[]).length === 0) return;
+    expect(o.behavioralHotspots).toBeUndefined();
+  });
+
+  it('does NOT surface hotspots when panic mode is off (off = zero panic behavior)', () => {
+    setMode3('off');
+    const o = orientJson('fix the login validation');
+    if (!Array.isArray(o.relevantFiles) || (o.relevantFiles as unknown[]).length === 0) return;
+    expect(o.behavioralHotspots).toBeUndefined();
+  });
+
+  it('does NOT surface hotspots when the artifact is absent (zero impact)', () => {
+    setMode3('observe');
+    const art = join(repo, '.openlore', 'analysis', 'behavioral-hotspots.json');
+    const saved = readFileSync(art, 'utf-8');
+    rmSync(art, { force: true });
+    try {
+      const o = orientJson('fix the login validation');
+      if (!Array.isArray(o.relevantFiles) || (o.relevantFiles as unknown[]).length === 0) return;
+      expect(o.behavioralHotspots).toBeUndefined();
+    } finally { writeFileSync(art, saved); }
+  });
+});

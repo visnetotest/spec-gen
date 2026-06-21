@@ -371,7 +371,7 @@ export function getSourceRoots(directory: string): string[] {
   }
 }
 
-function moduleFromPath(filePath: string, sourceRoots: string[]): string | null {
+export function moduleFromPath(filePath: string, sourceRoots: string[]): string | null {
   const parts = filePath.split(/[/\\]/);
   for (const root of sourceRoots) {
     const idx = parts.indexOf(root);
