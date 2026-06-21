@@ -55,6 +55,20 @@ import {
 } from './panic-constants.js';
 
 // ============================================================================
+// CLOCK (injectable for deterministic replay/calibration)
+// Defaults to Date.now() — production behavior is identical. Replay tooling sets
+// a virtual clock so the time-based signals (decay, refractory, staleness) can be
+// reproduced faithfully from a recorded trace. Reset to null to restore real time.
+// ============================================================================
+
+let _clock: () => number = () => Date.now();
+
+/** Override the engine clock (replay/calibration only). Pass null to restore Date.now(). */
+export function _setEngineClock(fn: (() => number) | null): void {
+  _clock = fn ?? (() => Date.now());
+}
+
+// ============================================================================
 // TYPES
 // ============================================================================
 
@@ -223,7 +237,7 @@ export function updatePanic(
   opts: { density: number; oscillation: number; weight: number; staleDepth: number; directory?: string; tool?: string },
 ): void {
   const { density, oscillation, staleDepth, directory = '', tool = '' } = opts;
-  const now = Date.now();
+  const now = _clock();
   const inRefractory = tracker.panicRecoverySuppressionUntil > now;
 
   // Passive wall-clock decay: -5 per minute elapsed since last update
@@ -449,13 +463,13 @@ function computeStaleDepth(load: number): StaleDepth {
 
 export function createTracker(directory: string): EpistemicTracker {
   return {
-    lastOrientAt: new Date(),
+    lastOrientAt: new Date(_clock()),
     graphVersionAtOrient: getGitHash(directory),
     cognitiveLoad: 0,
     modulesVisited: new Set(),
     freshnessState: 'fresh',
     staleDepth: 0,
-    lastGitCheckAt: Date.now(),
+    lastGitCheckAt: _clock(),
     sourceRoots: getSourceRoots(directory),
     lastModule: null,
     moduleAccessWindow: [],
@@ -484,7 +498,7 @@ export function createTracker(directory: string): EpistemicTracker {
  * resetTracker() (freshness reset, which always runs) so freshness and panic stay decoupled.
  */
 export function resetPanicOnOrient(tracker: EpistemicTracker, directory: string): void {
-  const now = Date.now();
+  const now = _clock();
 
   // Orient spam protection — diminishing recovery bonus on rapid reuse
   const timeSinceLastOrient = now - tracker.lastOrientResetAt;
@@ -535,11 +549,11 @@ export function resetPanicOnOrient(tracker: EpistemicTracker, directory: string)
 }
 
 function resetTracker(tracker: EpistemicTracker, directory: string): void {
-  const now = Date.now();
+  const now = _clock();
   // Freshness reset only. Panic recovery is handled separately by resetPanicOnOrient(),
   // which the MCP path calls only when panic mode != 'off' — so the default (off) path
   // performs no panic scoring and emits no panic telemetry on orient().
-  tracker.lastOrientAt = new Date();
+  tracker.lastOrientAt = new Date(_clock());
   tracker.graphVersionAtOrient = getGitHash(directory);
   tracker.cognitiveLoad = 0;
   tracker.modulesVisited = new Set();
@@ -574,14 +588,14 @@ export function updateTracker(
         prior_load: tracker.cognitiveLoad,
         prior_depth: tracker.staleDepth,
         tool: 'orient', module: null, cognitive_load: tracker.cognitiveLoad, density: 0,
-        oscillation: tracker.oscillation, age_min: Math.floor((Date.now() - tracker.lastOrientAt.getTime()) / 60_000),
+        oscillation: tracker.oscillation, age_min: Math.floor((_clock() - tracker.lastOrientAt.getTime()) / 60_000),
       });
     }
     resetTracker(tracker, directory);
     return;
   }
 
-  const now = Date.now();
+  const now = _clock();
   const ageMs = now - tracker.lastOrientAt.getTime();
   const weight = TOOL_WEIGHTS[toolName] ?? 1;
 
@@ -754,7 +768,7 @@ export function getFreshnessSignal(
 ): { text: string; prepend: boolean } | null {
   if (tracker.freshnessState === 'fresh') return null;
 
-  const ageMin = Math.floor((Date.now() - tracker.lastOrientAt.getTime()) / 60_000);
+  const ageMin = Math.floor((_clock() - tracker.lastOrientAt.getTime()) / 60_000);
 
   if (tracker.freshnessState === 'stale') {
     // staleDepth is always ≥1 when freshnessState === 'stale' — invariant enforced by transitionToStale.
@@ -781,13 +795,13 @@ export function trackerToPanicState(tracker: EpistemicTracker, agentId?: string,
     schemaVersion: 1,
     panicScore: tracker.panicScore,
     panicLevel: tracker.panicLevel,
-    updatedAt: new Date().toISOString(),
+    updatedAt: new Date(_clock()).toISOString(),
     lastOrientAt: tracker.lastOrientAt.toISOString(),
     recentOrientCount: tracker.recentOrientCount,
     localityConfidence: tracker.localityConfidence,
     interventionCountSinceStable: tracker.interventionCountSinceStable,
     triggers: [...tracker.panicTriggers],
-    panicRecoverySuppressionUntil: tracker.panicRecoverySuppressionUntil > Date.now()
+    panicRecoverySuppressionUntil: tracker.panicRecoverySuppressionUntil > _clock()
       ? new Date(tracker.panicRecoverySuppressionUntil).toISOString()
       : undefined,
     agentId,

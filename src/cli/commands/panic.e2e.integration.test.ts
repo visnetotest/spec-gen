@@ -161,6 +161,38 @@ describe.skipIf(!haveCli)('panic CLI — e2e against the built binary', () => {
     expect(run(['panic-validate', '--directory', dir]).code).toBe(0); // report mode always 0
   });
 
+  it('panic-calibrate reports 0% false positives / 100% sensitivity on the labeled corpus', () => {
+    const json = run(['panic-calibrate', '--json']);
+    expect(json.code).toBe(0);
+    const report = JSON.parse(json.stdout.trim());
+    expect(report.false_positive_rate).toBe(0);
+    expect(report.true_positive_rate).toBe(1);
+    expect(report.accuracy).toBe(1);
+    // documents the known over-sensitivity, honestly
+    expect(report.known_sensitivities.length).toBeGreaterThanOrEqual(1);
+    // --strict passes when discrimination holds
+    expect(run(['panic-calibrate', '--strict']).code).toBe(0);
+  });
+
+  it('panic-replay scores a confused trace as tripped and a focused one as calm', () => {
+    const tdir = join(dir, 'traces');
+    mkdirSync(tdir, { recursive: true });
+    const confused = Array.from({ length: 14 }, (_, i) => ({ tool: 'search_code', filePath: `src/${i % 2 ? 'auth' : 'billing'}/f${i}.ts`, gapMs: 2000 }));
+    const focused = Array.from({ length: 15 }, (_, i) => ({ tool: 'search_code', filePath: `src/auth/f${i % 3}.ts`, gapMs: 20000 }));
+    writeFileSync(join(tdir, 'confused.jsonl'), confused.map((s) => JSON.stringify(s)).join('\n') + '\n');
+    writeFileSync(join(tdir, 'focused.jsonl'), focused.map((s) => JSON.stringify(s)).join('\n') + '\n');
+
+    const c = JSON.parse(run(['panic-replay', join(tdir, 'confused.jsonl'), '--json']).stdout.trim());
+    expect(c.trippedL2).toBe(true);
+    const fcs = JSON.parse(run(['panic-replay', join(tdir, 'focused.jsonl'), '--json']).stdout.trim());
+    expect(fcs.trippedL2).toBe(false);
+    expect(fcs.peakLevel).toBe(0);
+  });
+
+  it('panic-replay errors (exit 1) on a missing trace file', () => {
+    expect(run(['panic-replay', join(dir, 'does-not-exist.jsonl')]).code).toBe(1);
+  });
+
   it('gryph-watch exits cleanly and writes no PID file when mode is off (safe default)', () => {
     setMode(dir, 'off');
     rmSync(join(dir, '.openlore', 'gryph-watch.pid'), { force: true });
