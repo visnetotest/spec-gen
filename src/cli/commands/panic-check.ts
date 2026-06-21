@@ -11,6 +11,7 @@
 
 import { Command } from 'commander';
 import { readPanicState, writePanicState, buildPanicCheckOutput } from '../../core/services/mcp-handlers/panic-response.js';
+import { queryGryphSignals, applyGryphDelta } from '../../core/services/mcp-handlers/gryph-bridge.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { emit } from '../../core/services/telemetry.js';
 
@@ -34,11 +35,21 @@ export const panicCheckCommand = new Command('panic-check')
         process.exit(0);
       }
 
-      const state = readPanicState(dir);
+      let state = readPanicState(dir);
 
-      // NOTE: Gryph runtime enrichment is deferred (see adopt-agent-behavioral-
-      // governance proposal). The panic-check hook consumes MCP-path panic state
-      // only; the Gryph background observer lands as a separate change.
+      // Gryph runtime enrichment (fail-open). queryGryphSignals returns null when the
+      // `gryph` binary is absent — the common case — so this is a no-op for users who
+      // have not installed it. Query only the window since the last intervention
+      // (gryphWindowStart), with a 2-min fallback to avoid replaying hours of history.
+      const since = state.gryphWindowStart ?? new Date(Date.now() - 2 * 60 * 1000).toISOString();
+      const gryphSignals = queryGryphSignals(since);
+      if (gryphSignals) {
+        const enrichedTriggers = [...state.triggers];
+        const enrichedScore = applyGryphDelta(state.panicScore, gryphSignals, state.panicLevel >= 2, enrichedTriggers);
+        if (enrichedScore !== state.panicScore) {
+          state = { ...state, panicScore: enrichedScore, triggers: enrichedTriggers };
+        }
+      }
 
       const output = buildPanicCheckOutput(state);
 
@@ -59,6 +70,7 @@ export const panicCheckCommand = new Command('panic-check')
           severity: output.severity,
           directive_mode: newCount >= 3,
           intervention_count: newCount,
+          gryph_enriched: gryphSignals !== null,
         });
       }
 

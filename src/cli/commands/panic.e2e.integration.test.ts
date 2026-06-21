@@ -101,6 +101,15 @@ describe.skipIf(!haveCli)('panic CLI — e2e against the built binary', () => {
     expect(run(['panic-level', '--directory', dir]).stdout.trim()).toBe('');
   });
 
+  it('gryph-watch exits cleanly and writes no PID file when mode is off (safe default)', () => {
+    setMode(dir, 'off');
+    rmSync(join(dir, '.openlore', 'gryph-watch.pid'), { force: true });
+    // mode:off → the observer must exit immediately (it does not block), writing nothing.
+    const r = run(['gryph-watch', dir]);
+    expect(r.code).toBe(0);
+    expect(existsSync(join(dir, '.openlore', 'gryph-watch.pid'))).toBe(false);
+  });
+
   it('panic-validate reports the gate (human + JSON) from real panic.jsonl', () => {
     const tel = join(dir, '.openlore', 'telemetry');
     mkdirSync(tel, { recursive: true });
