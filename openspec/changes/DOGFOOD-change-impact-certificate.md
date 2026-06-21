@@ -101,3 +101,51 @@ call edge can only originate from a changed file, so re-parsing only the changed
 tree and adjusting the canonical adjacency both ways (post = canonical + added − removed, pre = canonical
 − added + removed) detects every newly-opened path without that dependency. Mechanism substitution only;
 all spec requirements hold, as verified above.
+
+---
+
+## Round 2 — adversarial hardening (2026-06-21, PR #181 review)
+
+Two independent adversarial reviewers + real-input e2e probes found two correctness bugs in the
+changed-file plumbing (both stemming from `computeEdgeDelta` diverging from the sibling
+`structural_diff`, which gets these right) and one no-throw gap. All three are fixed and regression-tested.
+
+### BUG 1 — renamed files reported FALSE newly-opened paths (HIGH) — FIXED
+
+`computeImpactCertificate` dropped `getChangedFiles`' `oldPath`, so for a rename `old.ts → new.ts`,
+`computeEdgeDelta` read base-ref content via `git show <base>:new.ts` (which fails — the file lived at
+`old.ts`). With no old snapshot, **every** pre-existing call in the renamed file looked *added*, so any
+call it already made into a surface was falsely reported as newly-opened.
+
+Reproduced e2e: a pure `git mv` of a file that already called `validateSpecStoreConfig` (a `critical`
+surface) reported `newlyOpenedPaths: 1` — and under `block: ["critical"]` would have **wrongly blocked an
+innocent rename commit**. Fix: thread `oldPath`/`status` through `ChangedFileEntry` and read old content
+from `oldPath ?? path`. After: `newlyOpenedPaths: 0`.
+
+### BUG 2 — brand-new untracked files were silently ignored (MEDIUM) — FIXED
+
+`getChangedFiles` excludes untracked files (`git diff` does), so a brand-new file (not yet `git add`ed)
+whose function opened a path into a surface was never parsed: `changed.files: 0`, `newlyOpenedPaths: 0` —
+the certificate certified "no new reach" while a real critical opening existed. This is the exact mistake
+the tool exists to prevent. Fix: fold in `git ls-files --others --exclude-standard` (as `structural_diff`
+does). After: the untracked file's opening is detected (`newlyOpenedPaths: 1`, critical).
+
+### BUG 3 — decay re-check could throw out of the no-throw health check (MEDIUM) — FIXED
+
+`recheckCertificate` / `recheckPersistedCertificates` could throw (a corrupt anchor graph in a *target*
+repo, or a wrong-typed persisted `lease.anchors`) out of `handleSpecStoreStatus`, which contractually
+never throws. Fix: `recheckCertificate` now catches `AnchorContext.open`/view failures and a non-array
+lease, returning a conservative `stale`; the spec-store call site wraps the re-check in try/catch as a
+hard boundary.
+
+### Regression tests added
+
+`impact-certificate.test.ts` grew from 17 → 21 tests. Four new cases pin these against a **real temp git
+repo** + the real `CallGraphBuilder` snapshot: a pure rename opens nothing (old content read from
+`oldPath`); an untracked file's opening is detected (folded in via `ls-files`); an in-place new caller is
+detected; and a corrupt/wrong-typed persisted certificate never throws. Full CI-equivalent suite:
+**4,380 passed / 2 skipped**.
+
+> Method note: an early e2e cleanup used `git reset --hard`, which silently reverted the in-progress
+> source fixes while the already-built `dist/` kept passing — a reminder that CLI e2e runs the *built*
+> artifact, so source-level verification (typecheck + unit tests against source) must gate the commit.

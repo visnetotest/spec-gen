@@ -9,13 +9,16 @@
  * exercised through the actual anchor engine, not a mock. Plain .test.ts so CI runs it.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, renameSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   resolveSurfaces,
   surfacesFromConfig,
   detectNewlyOpenedPaths,
+  computeEdgeDelta,
+  collectChangedFiles,
   persistCertificate,
   recheckCertificate,
   recheckPersistedCertificates,
@@ -324,5 +327,93 @@ describe('certificate decay (freshness lease)', () => {
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
+  });
+
+  it('a corrupt persisted certificate / wrong-typed lease never throws (no-throw contract)', () => {
+    // recheckCertificate must be conservative-but-safe even on a malformed cert.
+    const bad = { ...makeBareCert('add-z'), lease: { anchors: 'not-an-array' as unknown as [] } } as ImpactCertificate;
+    expect(() => recheckCertificate(root, bad)).not.toThrow();
+    expect(recheckCertificate(root, bad).change).toBe('add-z');
+
+    // A non-JSON file in the certs dir is skipped, not thrown on.
+    const dir = join(root, OPENLORE_DIR, 'impact-certificates');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'garbage.json'), '{ not valid json', 'utf-8');
+    expect(() => recheckPersistedCertificates(root)).not.toThrow();
+    expect(recheckPersistedCertificates(root)).toEqual([]);
+  });
+});
+
+// ── 7. diff plumbing — renames + untracked files (regression: PR #181 review) ──
+// Both bugs were reproduced e2e: a pure rename reported a false newly-opened path,
+// and a brand-new untracked file opening a surface was missed entirely. These pin
+// the fix against a REAL temp git repo + the real CallGraphBuilder snapshot.
+describe('changed-file plumbing (rename + untracked)', () => {
+  let repo: string;
+  const SURFACE = 'src/lib.ts::surfaceFn';
+  const CALLER = 'src/caller.ts::caller';
+
+  function git(...args: string[]): void {
+    execFileSync('git', args, { cwd: repo, stdio: 'pipe' });
+  }
+  function write(rel: string, content: string): void {
+    mkdirSync(join(repo, rel, '..'), { recursive: true });
+    writeFileSync(join(repo, rel), content, 'utf-8');
+  }
+  // Synthetic canonical graph: caller → surfaceFn already exists at HEAD.
+  const cg = graph([node(SURFACE), node(CALLER)], [edge(CALLER, SURFACE, 'surfaceFn')]);
+  const surfaces = [{ name: 'lib', severity: 'critical' as const, ids: new Set([SURFACE]) }];
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), 'impactcert-git-'));
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    git('init', '-q');
+    git('config', 'user.email', 't@t.t');
+    git('config', 'user.name', 't');
+    git('config', 'commit.gpgsign', 'false');
+    write('src/lib.ts', 'export function surfaceFn() { return 1; }\n');
+    write('src/caller.ts', 'export function caller() { return surfaceFn(); }\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'base');
+  });
+  afterEach(() => { rmSync(repo, { recursive: true, force: true }); });
+
+  it('a pure rename (calls unchanged) opens NO new path — old content read from oldPath', async () => {
+    git('mv', 'src/caller.ts', 'src/caller_renamed.ts');
+    const entries = await collectChangedFiles(repo, 'HEAD');
+    const renamed = entries.find(e => e.path === 'src/caller_renamed.ts');
+    expect(renamed?.status).toBe('renamed');
+    expect(renamed?.oldPath).toBe('src/caller.ts');
+
+    const delta = await computeEdgeDelta(repo, 'HEAD', entries, cg);
+    // caller → surfaceFn existed before and after the rename → NOT an added edge.
+    expect(delta.added).toEqual([]);
+    expect(detectNewlyOpenedPaths(cg, surfaces, delta)).toEqual([]);
+  });
+
+  it('a brand-new UNTRACKED file that opens a surface is detected (folded in via ls-files)', async () => {
+    write('src/newcaller.ts', 'export function newCaller() { return surfaceFn(); }\n');
+    // Deliberately NOT git-added — it is untracked.
+    const entries = await collectChangedFiles(repo, 'HEAD');
+    const untracked = entries.find(e => e.path === 'src/newcaller.ts');
+    expect(untracked?.status).toBe('added');
+
+    const delta = await computeEdgeDelta(repo, 'HEAD', entries, cg);
+    expect(delta.added).toContainEqual({ from: 'src/newcaller.ts::newCaller', to: SURFACE });
+    const opened = detectNewlyOpenedPaths(cg, surfaces, delta);
+    expect(opened).toHaveLength(1);
+    expect(opened[0].openingEdge).toEqual({ from: 'newCaller', to: 'surfaceFn' });
+    expect(opened[0].surfaceSeverity).toBe('critical');
+  });
+
+  it('an in-place edit that adds a call into the surface is detected; one that does not opens nothing', async () => {
+    // Add a NEW caller in an existing tracked file → newly-opened.
+    write('src/lib.ts', 'export function surfaceFn() { return 1; }\nexport function sneaky() { return surfaceFn(); }\n');
+    const entries = await collectChangedFiles(repo, 'HEAD');
+    const delta = await computeEdgeDelta(repo, 'HEAD', entries, cg);
+    // sneaky → surfaceFn is a new edge; sneaky is not in the canonical cg, so it
+    // resolves to its snapshot id. surfaceFn resolves to the canonical surface id.
+    expect(delta.added.some(e => e.to === SURFACE)).toBe(true);
+    expect(detectNewlyOpenedPaths(cg, surfaces, delta).length).toBeGreaterThanOrEqual(1);
   });
 });

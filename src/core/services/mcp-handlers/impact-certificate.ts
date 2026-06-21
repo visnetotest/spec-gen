@@ -239,6 +239,42 @@ async function fileAtRef(rootPath: string, ref: string, path: string): Promise<s
   }
 }
 
+/** The ref git actually diffs against once `baseRef` is resolved (main → master → HEAD~1 fallback). */
+async function resolveDiffBase(rootPath: string, baseRef: string): Promise<string | undefined> {
+  const { resolveBaseRef } = await import('../../drift/git-diff.js');
+  try { return await resolveBaseRef(rootPath, baseRef); } catch { return undefined; }
+}
+
+/**
+ * The changed files for the diff vs `baseRef`, each carrying its git status and (for
+ * a rename) the base-ref `oldPath`. Folds in UNTRACKED files — `git diff` excludes
+ * them, but a brand-new file's functions are all genuine additions and may open a
+ * path into a surface, so they must be assessed (mirrors `structural_diff`). The
+ * differential and lease both consume this; missing either class is a silent
+ * false-"no new reach", which is the exact mistake this tool exists to prevent.
+ */
+export async function collectChangedFiles(rootPath: string, baseRef: string): Promise<ChangedFileEntry[]> {
+  const { getChangedFiles } = await import('../../drift/git-diff.js');
+  const diff = await getChangedFiles({ rootPath, baseRef, includeUnstaged: true });
+  const out: ChangedFileEntry[] = diff.files.map(f => ({
+    path: f.path,
+    status: f.status as ChangedFileEntry['status'],
+    ...(f.oldPath ? { oldPath: f.oldPath } : {}),
+  }));
+  const seen = new Set(out.map(c => c.path));
+  // Untracked files (git ls-files --others) are absent from `git diff`; fold them in
+  // as additions so a new-file opening is never missed (best-effort enumeration).
+  try {
+    const { stdout } = await execFileAsync('git', ['ls-files', '--others', '--exclude-standard'], {
+      cwd: rootPath, maxBuffer: 16 * 1024 * 1024,
+    });
+    for (const path of stdout.split('\n').map(s => s.trim()).filter(Boolean)) {
+      if (!seen.has(path)) { seen.add(path); out.push({ path, status: 'added' }); }
+    }
+  } catch { /* untracked enumeration is best-effort */ }
+  return out;
+}
+
 function isCallEdge(e: Pick<CallEdge, 'kind' | 'calleeId'>): boolean {
   return (!e.kind || e.kind === 'calls') && !!e.calleeId;
 }
@@ -278,29 +314,50 @@ interface EdgeDelta {
   unresolved: Array<{ caller: string; name: string }>;
 }
 
+/** A changed file with its git status + (for renames) the path it lived at in the base ref. */
+export interface ChangedFileEntry {
+  path: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed';
+  /** For a rename, the file's path at the base ref (where its old content lives). */
+  oldPath?: string;
+}
+
 /**
  * Compute the added/removed call edges introduced by the changed files, resolved
  * to canonical node ids. Re-parses ONLY the changed files (bounded). A callee name
  * resolves only when it maps to exactly one internal symbol in the post-change
  * universe (canonical ∪ new snapshot) — ambiguous names are reported, never guessed.
+ *
+ * The old snapshot is read from each file's BASE-REF path (`oldPath ?? path`), so a
+ * renamed file's pre-existing calls pair correctly across versions instead of
+ * looking like a flood of additions; a new/untracked file has no old content (every
+ * edge is genuinely added) and a deleted file has no new content (every edge removed).
  */
 export async function computeEdgeDelta(
   absDir: string,
   resolvedBaseRef: string,
-  changedFiles: readonly string[],
+  changedFiles: readonly ChangedFileEntry[],
   cg: SerializedCallGraph,
 ): Promise<EdgeDelta> {
-  const codeChanged = changedFiles.filter(p => {
-    const lang = detectLanguage(p);
+  const codeChanged = changedFiles.filter(c => {
+    const lang = detectLanguage(c.path);
     return lang && lang !== 'Unknown' && lang !== 'unknown';
   });
   const oldFiles: InFile[] = [];
   const newFiles: InFile[] = [];
-  for (const p of codeChanged) {
+  for (const c of codeChanged) {
+    const p = c.path;
     const lang = detectLanguage(p)!;
-    const oldContent = await fileAtRef(absDir, resolvedBaseRef, p);
+    // Old content lives at the base-ref path: `oldPath` for a rename, `path` otherwise.
+    // A genuinely new (added/untracked) file has no base-ref content, so skip the git
+    // show (it would just fail) and let every one of its edges count as added.
+    const oldContent = c.status === 'added' ? '' : await fileAtRef(absDir, resolvedBaseRef, c.oldPath ?? p);
     let newContent = '';
-    try { newContent = readFileSync(safeJoin(absDir, p), 'utf-8'); } catch { newContent = ''; }
+    if (c.status !== 'deleted') {
+      try { newContent = readFileSync(safeJoin(absDir, p), 'utf-8'); } catch { newContent = ''; }
+    }
+    // Pair the rename across versions under the NEW logical path so unchanged calls
+    // match (a moved file is not remove+add at the function level).
     if (oldContent) oldFiles.push({ path: p, content: oldContent, language: lang });
     if (newContent) newFiles.push({ path: p, content: newContent, language: lang });
   }
@@ -518,20 +575,26 @@ export interface CertificateLeaseStatus {
  * be treated as silently still-true (mcp-handlers: ImpactCertificateDecaysWithLease).
  */
 export function recheckCertificate(absDir: string, cert: ImpactCertificate): CertificateLeaseStatus {
-  const anchorCtx = AnchorContext.open(absDir);
+  let anchorCtx: ReturnType<typeof AnchorContext.open> = null;
+  try { anchorCtx = AnchorContext.open(absDir); } catch { anchorCtx = null; }
   if (!anchorCtx) {
     // No graph to check against → cannot prove fresh; treat as stale (never silently current).
     return { change: cert.change, status: 'stale', movedAnchors: [] };
   }
   try {
     const view = anchorCtx.freshnessView();
-    const { verdicts } = memoryFreshness(cert.lease.anchors, view);
+    const anchors = Array.isArray(cert.lease?.anchors) ? cert.lease.anchors : [];
+    const { verdicts } = memoryFreshness(anchors, view);
     const moved = verdicts
       .filter(v => v.freshness !== 'fresh')
       .map(v => ({ subject: v.anchor.symbolName ?? v.anchor.filePath, verdict: v.freshness as 'drifted' | 'orphaned' }));
     return { change: cert.change, status: moved.length > 0 ? 'stale' : 'fresh', movedAnchors: moved };
+  } catch {
+    // A corrupt anchor graph in the target repo must NOT throw out of the no-throw
+    // spec-store health check; an unverifiable certificate is conservatively stale.
+    return { change: cert.change, status: 'stale', movedAnchors: [] };
   } finally {
-    anchorCtx.close();
+    try { anchorCtx.close(); } catch { /* ignore */ }
   }
 }
 
@@ -627,23 +690,24 @@ export async function computeImpactCertificate(
   const blast = await computeBlastRadius({ directory: absDir, baseRef });
 
   // ── 3. Changed files → edge delta → newly-opened paths (the differential) ────
-  let changedFiles: string[] = [];
+  let changedEntries: ChangedFileEntry[] = [];
   let resolvedBaseRef = baseRef;
   let diffError: string | null = null;
   try {
-    const { getChangedFiles } = await import('../../drift/git-diff.js');
-    const diff = await getChangedFiles({ rootPath: absDir, baseRef, includeUnstaged: true });
-    changedFiles = diff.files.map(f => f.path);
-    resolvedBaseRef = diff.resolvedBase ?? baseRef;
+    changedEntries = await collectChangedFiles(absDir, baseRef);
+    resolvedBaseRef = (await resolveDiffBase(absDir, baseRef)) ?? baseRef;
   } catch (err) {
     diffError = err instanceof Error ? err.message : String(err);
   }
+  // Repo-relative paths of every changed file (incl. untracked); drives the lease
+  // anchors and the headline count. The differential reads from `changedEntries`.
+  const changedFiles = changedEntries.map(c => c.path);
 
   let newlyOpenedPaths: NewlyOpenedPath[] = [];
   let unresolvedAdded: EdgeDelta['unresolved'] = [];
-  if (!diffError && changedFiles.length > 0 && surfaces.some(s => s.ids.size > 0)) {
+  if (!diffError && changedEntries.length > 0 && surfaces.some(s => s.ids.size > 0)) {
     try {
-      const delta = await computeEdgeDelta(absDir, resolvedBaseRef, changedFiles, cg);
+      const delta = await computeEdgeDelta(absDir, resolvedBaseRef, changedEntries, cg);
       unresolvedAdded = delta.unresolved;
       newlyOpenedPaths = detectNewlyOpenedPaths(cg, surfaces, delta);
     } catch { /* differential is best-effort; absence is reported as zero paths + caveat */ }

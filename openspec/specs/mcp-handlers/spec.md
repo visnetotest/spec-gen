@@ -894,7 +894,10 @@ SHALL be deterministic, with no LLM.
 > removed), NOT the incremental dependency graph (`add-watch-incremental-dependency-graph`), which is
 > still unbuilt. A new call edge can only originate from a changed file, so this detects every
 > newly-opened path without a full rebuild. Added callee names that resolve ambiguously are reported as
-> `unresolved-added-call`, never guessed. Decision: `187224b0`.
+> `unresolved-added-call`, never guessed. The changed-file set is complete: renamed files read their old
+> content from the base-ref `oldPath` (a pure rename opens nothing), and brand-new UNTRACKED files are
+> folded in (a new file's opening is never missed) — both regression-tested against a real git repo.
+> Decision: `187224b0`.
 
 #### Scenario: A change opens a new transitive path into a surface
 
