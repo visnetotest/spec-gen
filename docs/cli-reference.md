@@ -238,6 +238,7 @@ openlore impact-certificate                       # human-readable certificate f
 openlore impact-certificate --base main --json    # documented JSON (stable surface + path codes) for an orchestrator
 openlore impact-certificate --change <id> --save  # record the change id + persist for later decay re-checks
 openlore impact-certificate --install-hook        # install the ADVISORY pre-commit hook (never blocks by default)
+openlore impact-certificate --uninstall-hook      # remove the pre-commit hook block (coexists with other openlore hooks)
 ```
 
 Advisory by default — it emits the certificate and exits 0; an infrastructure failure (no index, not a repo) never blocks. A repository MAY opt into blocking specific surface severities with `impactCertificate.block: ["critical"]`, in which case the `--hook` exits non-zero only when the diff opens a new path into a surface of that severity. Newly-opened-path detection is differential and deterministic (no LLM): only the changed files are re-parsed, renamed files read their base-ref content, untracked files are folded in, and an ambiguous added callee is reported, never guessed. The certificate decays via the freshness lease — when an anchored symbol later moves, `openlore spec-store status` re-fires it as a `certificate-stale` finding. The matching MCP tool `change_impact_certificate` is exposed under `openlore mcp --preset federation`.

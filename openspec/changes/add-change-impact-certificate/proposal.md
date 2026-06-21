@@ -51,8 +51,9 @@ LLM and no new infrastructure — the lease already exists.
    is a declared boundary, not a directory glob, and it is the unit a change is assessed against.
 
 2. **Newly-opened-path detection.** Given a proposed change, OpenLore computes reachability to each
-   declared surface in the pre-change graph and in the post-change graph (the latter derived by applying
-   the diff via the incremental dependency graph), and reports the paths that exist only after the
+   declared surface in the pre-change graph and in the post-change graph (the latter derived by a
+   bounded differential edge-delta over the changed files — see the header deviation; the originally
+   proposed incremental dependency graph is unbuilt), and reports the paths that exist only after the
    change — the paths the change *opens* into the surface. This is distinct from, and additive to, the
    surface's existing callers.
 
@@ -100,8 +101,9 @@ as a decaying certificate — none of which the file-ownership or existing-calle
 
 - **Blast radius / tests / drift** reuse `blast_radius` (`add-preflight-blast-radius-guard`), which
   already composes `analyze_impact`, `select_tests`, and `check_spec_drift`.
-- **Reachability** reuses `analyze_impact` / `find_path` / `get_subgraph`; the **post-change graph**
-  reuses the incremental dependency graph (`add-watch-incremental-dependency-graph`) to apply the diff.
+- **Reachability** reuses `analyze_impact` / `find_path` / `get_subgraph`; the **post-change graph** is
+  derived by a bounded differential edge-delta over the changed files (the incremental dependency graph
+  `add-watch-incremental-dependency-graph` named in the original draft is unbuilt — see header deviation).
 - **Cross-target surfaces** reuse the binding's federation set (`add-spec-store-binding`) and
   published-interface consumer resolution (`add-multi-repo-federation`).
 - **Decay** reuses the freshness lease (`add-code-anchored-memory-staleness`,

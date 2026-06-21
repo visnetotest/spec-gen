@@ -17,7 +17,8 @@
 
 ## 2. Newly-opened-path detection (the differentiated core)
 - [x] Compute reachability to each declared surface in the pre-change graph; derive the post-change
-      graph by applying the diff via the incremental dependency graph; report paths present only after.
+      graph by a bounded differential edge-delta over the changed files (the incremental dependency graph
+      in the original draft is unbuilt — see header); report paths present only after.
       → new handler `src/core/services/mcp-handlers/impact-certificate.ts` (reachability diff over
       `analyze_impact` / `find_path`).
 - [x] Name the shortest opening path per newly-opened surface (e.g. `A → B → surface`).

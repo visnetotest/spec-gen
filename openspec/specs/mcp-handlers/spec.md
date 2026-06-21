@@ -882,8 +882,8 @@ proposed change is assessed against.
 ### Requirement: NewlyOpenedPathDetection
 
 The system SHALL, given a proposed change, compute reachability to each declared covering surface in the
-pre-change graph and in the post-change graph — the latter derived by applying the change's diff via the
-incremental dependency graph — and SHALL report the paths into each surface that exist only in the
+pre-change graph and in the post-change graph — the latter derived by applying the change's diff to the
+call graph — and SHALL report the paths into each surface that exist only in the
 post-change graph. These newly-opened paths SHALL be reported distinctly from the surface's existing
 callers. For each newly-opened path the system SHALL name the shortest opening path. The computation
 SHALL be deterministic, with no LLM.
@@ -894,10 +894,12 @@ SHALL be deterministic, with no LLM.
 > removed), NOT the incremental dependency graph (`add-watch-incremental-dependency-graph`), which is
 > still unbuilt. A new call edge can only originate from a changed file, so this detects every
 > newly-opened path without a full rebuild. Added callee names that resolve ambiguously are reported as
-> `unresolved-added-call`, never guessed. The changed-file set is complete: renamed files read their old
-> content from the base-ref `oldPath` (a pure rename opens nothing), and brand-new UNTRACKED files are
-> folded in (a new file's opening is never missed) — both regression-tested against a real git repo.
-> Decision: `187224b0`.
+> `unresolved-added-call`, never guessed; a call resolved to a same-diff local definition binds to that
+> local (no homonym phantom opening). The changed-file set is complete: old content is read from the
+> MERGE-BASE (the same baseline `getChangedFiles` diffs against, so the certificate's blast-radius and
+> path halves never disagree), renamed files read their old content from the base-ref `oldPath` (a pure
+> rename opens nothing), and brand-new UNTRACKED files are folded in (a new file's opening is never
+> missed) — all regression-tested against a real git repo. Decisions: `187224b0`, `97c22605`, `c2fbacf9`.
 
 #### Scenario: A change opens a new transitive path into a surface
 
@@ -943,11 +945,13 @@ still-true. The spec-store health check SHALL surface a stale certificate as a f
 re-fired against current state.
 
 > Implemented by `add-change-impact-certificate` (2026-06-21). A persisted certificate carries
-> `StructuralAnchor`s over the touched symbols under `.openlore/impact-certificates/`;
-> `recheckCertificate` recomputes freshness via `memoryFreshness` against the current edge store (no
-> graph to verify against → treated stale, never silently current). `handleSpecStoreStatus` re-checks
-> each resolved+indexed target's persisted certificates (cheap-gated on the certs dir) and emits a
-> `certificate-stale` finding. Decision: `187224b0`.
+> `StructuralAnchor`s over the touched symbols under `.openlore/impact-certificates/`; a changed file
+> with no indexed symbol — a brand-new/untracked file the differential just assessed — is anchored at the
+> FILE level instead, so the certificate still decays for the new code it certified rather than silently
+> omitting it. `recheckCertificate` recomputes freshness via `memoryFreshness` against the current edge
+> store (no graph to verify against → treated stale, never silently current). `handleSpecStoreStatus`
+> re-checks each resolved+indexed target's persisted certificates (cheap-gated on the certs dir) and emits
+> a `certificate-stale` finding. Decisions: `187224b0`, `c2fbacf9`.
 
 #### Scenario: Editing an anchored symbol expires the certificate
 

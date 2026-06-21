@@ -240,3 +240,48 @@ lookup. After e2e: severity coerced to `warn`, `highestSurfaceSeverity: "warn"`.
 - Regression tests added: merge-base baseline (real temp git repo), severity coercion / duplicate /
   empty-name (`surfacesFromConfig`), both-member resolution, and file-level-anchor decay.
   Full CI-equivalent suite: **4,405 passed / 2 skipped**.
+
+
+---
+
+## Round 5 - documentation accuracy + MCP-server integration (2026-06-21, PR #181 review)
+
+A fourth adversarial pass (spec/doc-accuracy + integration-coverage reviewer + a real large-diff
+performance probe) found no new runtime bugs - the differential, decay, config hardening, and finding
+codes were all confirmed accurate - but surfaced 5 documentation inaccuracies and one integration gap.
+
+### Doc inaccuracy: "incremental dependency graph" survived in normative spec/proposal bodies - FIXED
+
+Three rounds of fixes settled the implementation on a differential edge-delta over changed files, and the
+proposal header + canonical-spec NOTES recorded that deviation - but five requirement/claim BODIES still
+asserted the un-shipped "incremental dependency graph" as the mechanism, contradicting the code (and their
+own notes). Fixed all five: the canonical `mcp-handlers` NewlyOpenedPathDetection requirement text, the
+change-delta spec (which had no correcting note - added one), the proposal "What changes" item 2 and
+"Application to OpenLore", and tasks.md item 2. The requirement text is now mechanism-neutral ("applying
+the change's diff to the call graph") with the differential edge-delta described in the note. Also extended
+the canonical lease/decay note to record that new/untracked files get a FILE-level anchor (the decay
+guarantee is now stronger than the prose said).
+
+### Integration gap: the tool was only unit-dispatch-tested, never through the live MCP server - FIXED
+
+The spec-12 conformance integration test exercised the real stdio MCP server but its ListTools check was
+one-directional (every ADVERTISED tool is known) - it would not catch a tool defined in TOOL_DEFINITIONS
+but never exposed on the wire, and it positively asserted only `orient`. Strengthened it to BIDIRECTIONAL
+(every DEFINED tool is advertised) and added a positive assertion that `change_impact_certificate` is
+advertised. Verified against the live server: 7/7 conformance tests pass, so the new tool is now confirmed
+reachable end-to-end through the actual MCP stdio server (not just the unit-level dispatchTool path). The
+bidirectional check protects every tool, not just this one.
+
+### Performance probe (real input): a 300-file diff
+
+Measured `computeEdgeDelta` + `detectNewlyOpenedPaths` on a synthetic 300-file diff where every file newly
+calls a critical surface symbol: collectChangedFiles 62ms, computeEdgeDelta ~8.8s (300 sequential
+`git show` + two tree-sitter builds), detect 1ms; 300/300 openings correctly detected, no hang. This
+validates the round-4 design call: the >200-file caveat fires, and capping the parse is correctly avoided
+(it would miss openings) - only the cost is disclosed. The cost is inherent and bounded to changed files.
+
+### Confirmed accurate (no change)
+
+Finding codes (8) match `docs/mcp-tools.md` exactly; all documented CLI flags exist (added the
+`--uninstall-hook` example for symmetry); no CHANGELOG file exists, so no release-notes omission. Full
+CI-equivalent suite: **4,405 passed / 2 skipped**; conformance integration: **7 passed**.
