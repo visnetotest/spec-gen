@@ -58,3 +58,26 @@ scoring machinery does NOT satisfy this gate. Until it is cleared, the only sanc
 - **GIVEN** a corrupt or missing `panic-state.json`
 - **WHEN** `openlore panic-check` runs as a PreToolUse hook
 - **THEN** it resolves to a stable state and exits 0, never blocking the tool call
+
+### Requirement: BehavioralObservabilityToMemory
+
+The system SHALL provide a deterministic observe→memory feedback loop that turns behavioral telemetry
+into a durable, code-anchored signal about where agents destabilize. `openlore panic-hotspots` SHALL
+aggregate epistemic-lease telemetry per module into labeled hotspots (deep-stale / high-oscillation /
+cross-module-drift), with no LLM and no composite score, and `--write` SHALL persist them to
+`.openlore/analysis/behavioral-hotspots.json`. `orient()` SHALL consume that artifact and surface a
+contextual `behavioralHotspots` block when the task's files intersect a labeled hotspot module. The
+surfacing SHALL be fail-open, omitted in lean mode, and gated on `panicResponse.mode != 'off'` so a
+pre-existing artifact never leaks when the panic subsystem is disabled.
+
+The accuracy gate (`openlore panic-validate`) SHALL report deterministic evidence — false-positive
+proxy with per-trigger attribution, peak-level histogram, intervention follow-through, and pass/fail
+criteria — with a verdict of `INSUFFICIENT_DATA` or `REVIEW_REQUIRED`, never auto-`CLEARED`. A
+`--strict` flag MAY exit non-zero for automation when the criteria are not met.
+
+#### Scenario: orient surfaces a hotspot only when contextual, labeled, and panic is enabled
+
+- **GIVEN** a persisted `behavioral-hotspots.json` with a labeled `auth` hotspot and `mode: 'observe'`
+- **WHEN** `orient()` runs for a task whose files are in the `auth` module
+- **THEN** the result includes a `behavioralHotspots` entry for `auth`; and the same call with
+  `mode: 'off'`, a missing artifact, an unlabeled module, or `lean` mode SHALL omit it

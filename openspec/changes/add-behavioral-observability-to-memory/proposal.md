@@ -1,8 +1,10 @@
 # Behavioral observability → memory (the north-star follow-up)
 
-> **UPDATE (2026-06-21): BUILT (substrate) in PR #175** — `openlore panic-hotspots` aggregates
-> per-module destabilization and `--write` persists `behavioral-hotspots.json`. Wiring `orient()` to
-> consume the artifact is the one remaining small follow-up.
+> **UPDATE (2026-06-21): BUILT (end-to-end) in PR #175** — `openlore panic-hotspots` aggregates
+> per-module destabilization and `--write` persists `behavioral-hotspots.json`; `orient()` now
+> consumes it, surfacing a contextual `behavioralHotspots` block when the task targets a labeled
+> hotspot module (fail-open, gated on mode != off, omitted in lean mode). The observe→memory loop
+> runs end to end. History below.
 >
 > Status: PROPOSED (not yet built) — the piece of the behavioral-governance work that most directly
 > serves OpenLore's north star. Build after `adopt-agent-behavioral-governance` has gathered

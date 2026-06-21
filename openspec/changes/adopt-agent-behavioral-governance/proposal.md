@@ -84,7 +84,7 @@ is tracked by its own change proposal (now marked BUILT) so the design + gates s
 | **`experimental_blocking` mode** | `defer-panic-blocking-enforcement` | BUILT — opt-in only; ladder is `off\|observe\|advisory\|experimental_blocking`. At L4 emits `{decision:block, advisory:true}`; never default. Hard-gated on the accuracy gate. |
 | **Gryph integration** (`gryph-bridge`, `gryph-watch`, CAS) | `defer-gryph-runtime-observability` | BUILT — fail-open (no-op when the `gryph` binary is absent); `gryph-watch` exits silently on `off`. |
 | **`setup --hooks` / `--panic` installers** | `defer-panic-setup-hooks` | BUILT — opt-in flags; never installed by a default `setup`. Enabling an interventional mode prints an accuracy-validation warning. |
-| **observe → memory feedback loop** | `add-behavioral-observability-to-memory` | BUILT (substrate) — `openlore panic-hotspots` aggregates per-module destabilization and `--write` persists `behavioral-hotspots.json`. Wiring `orient()` to consume it is the one remaining small follow-up. |
+| **observe → memory feedback loop** | `add-behavioral-observability-to-memory` | BUILT (end-to-end) — `openlore panic-hotspots --write` persists `behavioral-hotspots.json`; `orient()` consumes it and surfaces a contextual `behavioralHotspots` block (fail-open, gated on mode != off, labeled-only, lean-omitted). |
 
 The expanded **observe-mode validation gate** (`openlore panic-validate`) also landed here — per-trigger
 false-positive attribution, peak-level histogram, follow-through, and a `REVIEW_REQUIRED` /

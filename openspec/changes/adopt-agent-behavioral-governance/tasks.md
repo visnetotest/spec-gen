@@ -58,13 +58,15 @@
       plumbing now live.
 - [x] **`setup --hooks` / `--panic`** — opt-in installers; never installed by a default `setup`;
       reconciled with `--global`; no `installClaudeHook` dependency; interventional modes warn to validate.
-- [x] **observe → memory feedback loop** — `openlore panic-hotspots` (+ `--write`): per-module
-      destabilization hotspots with labeled signals, persisted to `behavioral-hotspots.json`.
+- [x] **observe → memory feedback loop (end-to-end)** — `openlore panic-hotspots` (+ `--write`)
+      persists `behavioral-hotspots.json`; `orient()` consumes it and surfaces a contextual
+      `behavioralHotspots` block (fail-open, gated on mode != off, labeled-only, omitted in lean mode).
+- [x] **`panic-validate --strict`** — opt-in non-zero exit for CI/automation (gate as an actual gate).
 
 ## 6. Still gated / remaining
 - [ ] **Validate accuracy (the gate).** The machinery is built but does NOT prove the signal is accurate.
       No interventional posture ships **enabled-by-default** until `observe`-mode telemetry shows: (a) a
       low false-positive rate (focused deep work must not trip L2+), (b) `panic_intervention_outcome`
-      trending positive, (c) episodes resolve rather than oscillate. Measure with `openlore panic-validate`.
-- [ ] **Wire `orient()` to consume `behavioral-hotspots.json`** — the last small step of the observe→memory
-      loop. Left separate to keep `orient`'s blast radius out of this PR.
+      trending positive, (c) episodes resolve rather than oscillate. Measure with `openlore panic-validate`
+      (use `--strict` to gate automation). This is a DATA/operations step, not a code stub — the feature
+      is fully built; what remains is running observe mode on real sessions and a maintainer's decision.
