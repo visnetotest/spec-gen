@@ -321,7 +321,9 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
       const [exitCode, errText] = await new Promise<[number, string]>((resolve) => {
         const trySpawn = (cmd: string, args: string[]) => new Promise<[number, string] | null>((res) => {
           const chunks: Buffer[] = [];
-          const proc = spawn(cmd, args, { cwd: ctx.cwd, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, ...(process.platform === 'win32' ? { shell: true } : {}) });
+          const proc = process.platform === 'win32'
+            ? spawn('cmd.exe', ['/c', cmd, ...args], { cwd: ctx.cwd, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+            : spawn(cmd, args, { cwd: ctx.cwd, stdio: ['ignore', 'ignore', 'pipe'] });
           proc.stderr?.on('data', (d: Buffer) => chunks.push(d));
           proc.on('close', (code) => res([code ?? 1, Buffer.concat(chunks).toString().trim()]));
           proc.on('error', () => res(null));
@@ -379,12 +381,17 @@ async function ensureDaemon(cwd: string): Promise<Daemon | null> {
   if (existing && (await healthy(existing))) return { baseUrl: `http://${existing.host}:${existing.port}`, token: existing.token };
   try {
     if (process.platform === 'win32') {
-      // shell:true + detached:true applies windowsHide only to cmd.exe, not the
-      // node child it spawns. `start /b` runs without a new console window and
-      // inherits the PATH, so openlore.cmd resolves correctly.
-      spawn('cmd.exe', ['/c', 'start', '/b', 'openlore', 'serve', '--directory', cwd], { stdio: 'ignore', windowsHide: true }).unref();
+      // shell:true + detached:true applies windowsHide only to cmd.exe, not the node child.
+      // Pass the full command as a single /c string so cmd.exe quotes cwd correctly,
+      // handling both spaces and metacharacters (&|><^) in the project path.
+      // Empty title "" prevents start from consuming the quoted cwd as a window title.
+      const child = spawn('cmd.exe', ['/c', `start "" /b openlore serve --directory "${cwd}"`], { stdio: 'ignore', windowsHide: true });
+      child.on('error', () => { /* daemon not found — polling loop will time out cleanly */ });
+      child.unref();
     } else {
-      spawn('openlore', ['serve', '--directory', cwd], { detached: true, stdio: 'ignore' }).unref();
+      const child = spawn('openlore', ['serve', '--directory', cwd], { detached: true, stdio: 'ignore' });
+      child.on('error', () => { /* daemon not found — polling loop will time out cleanly */ });
+      child.unref();
     }
   } catch { return null; }
   const deadline = Date.now() + HEALTH_TIMEOUT_MS;
@@ -667,7 +674,7 @@ const TITLE_KEYS = ['name', 'title', 'label', 'function', 'symbol', 'id', 'file'
 const BASE_SKIP = new Set([
   // input echoes
   'task', 'query', 'description', 'symbol', 'functionName', 'direction',
-  'maxDepth', 'depth', 'entryFunction', 'targetFunction', 'filePath', 'limit',
+  'maxDepth', 'depth', 'entryFunction', 'targetFunction', 'filePath', 'limit', 'domain',
   // prose / meta
   'guidance', 'note', 'graphIndexNote', 'searchMode', 'count',
 ]);
