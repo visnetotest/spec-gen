@@ -28,7 +28,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { validateDirectory, readCachedContext, safeJoin } from './utils.js';
@@ -869,7 +869,7 @@ export async function computeImpactCertificate(
   }
   if (surfaceCfg.length === 0) {
     findings.push({
-      code: 'no-surfaces-declared', severity: 'info', subject: absDir,
+      code: 'no-surfaces-declared', severity: 'info', subject: basename(absDir),
       message: 'No covering surfaces are declared; the certificate reports blast radius, tests, and drift only.',
       remediation: 'Declare surfaces under "impactCertificate.surfaces" in .openlore/config.json to assess cross-boundary reach.',
     });
