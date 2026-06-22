@@ -430,6 +430,24 @@ The system SHALL provide a declarative spec-store binding that resolves named ta
 
 > Decision recorded: c6e36101
 > Date: 2026-06-21
+### Requirement: SerializeTheProveScorecardAsVersionedStablekeyedJson
+
+The system SHALL serialize the prove scorecard as a versioned JSON object with a stable key set so that external tooling and CI pipelines can consume and gate on it.
+
+> Decision recorded: 581a90bf
+> Date: 2026-06-22
+### Requirement: PersistProveScorecardsAsDatedNonclobberingFilesUnderOpenloreprove
+
+The system SHALL persist prove scorecards as dated, non-clobbering JSON files under .openlore/prove/ when invoked with --save.
+
+> Decision recorded: 670b5f0b
+> Date: 2026-06-22
+### Requirement: ComputeTheProveEstimateArmAsADeterministicGraphderivedProxyLabeledNevermeasured
+
+The system SHALL compute a deterministic, graph-derived estimate scorecard when invoked with prove --estimate, clearly labeled as never-measured.
+
+> Decision recorded: 66feae62
+> Date: 2026-06-22
 
 ## Technical Notes
 
@@ -697,3 +715,33 @@ infrastructure failure (no graph, no binding) SHALL never block.
   critical
 - **WHEN** a change opens a new path into a critical surface
 - **THEN** the hook blocks; and for a newly-opened path into any non-critical surface it remains advisory
+
+### Serialize the prove scorecard as versioned, stable-keyed JSON
+
+**Status:** Approved
+**Date:** 2026-06-22
+**ID:** 581a90bf
+
+`openlore prove --json` is an external/CI contract; a schemaVersion + fixed key set lets tooling consume and gate on it, and a guard test keeps the keys from drifting. Reuses the existing Scorecard object from computeScorecard rather than a parallel shape.
+
+**Consequences:** Adds a SerializedScorecard type + serializeScorecard() in scorecard.ts; the key set is asserted in tests; future fields append without breaking the version.
+
+### Persist prove scorecards as dated, non-clobbering files under .openlore/prove/
+
+**Status:** Approved
+**Date:** 2026-06-22
+**ID:** 670b5f0b
+
+The honesty contract is "date-stamped and re-measured after each optimization phase"; persisting under .openlore/prove/prove-<ISO>.json makes results keepable and diffable on the user's own repo without clobbering prior runs.
+
+**Consequences:** prove --save writes serialized scorecard + raw metrics; repeated saves on the same day get a uniqueness suffix; .openlore/prove/ is a new output dir under the existing .openlore root.
+
+### Compute the prove --estimate arm as a deterministic graph-derived proxy, labeled never-measured
+
+**Status:** Approved
+**Date:** 2026-06-22
+**ID:** 66feae62
+
+An API-key-less first-touch user needs a real, honest signal. The estimate counts the distinct answer-bearing files the auto-derived orientation tasks span (from-scratch reads) versus one orient call, with a few named, documented assumption constants. It must never be presented as a measured agent run.
+
+**Consequences:** Adds estimate.ts (pure, deterministic) producing WITH/WITHOUT Cells fed to computeScorecard with mode=estimate; renderers carry an unmistakable estimate label; assumptions are named constants, not hidden tuning.
