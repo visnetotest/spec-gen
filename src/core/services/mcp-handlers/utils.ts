@@ -263,15 +263,21 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
         return null;
       }
       const ctx = parsed as CachedContext;
-      // A present-but-malformed callGraph (a truncated or hand-edited artifact, e.g.
-      // `{"callGraph": {}}`) would pass each graph handler's `!ctx.callGraph` guard and
-      // then throw on `cg.nodes.map(...)`. Normalize it away so those handlers return
-      // their friendly "re-run analyze_codebase" instead, while signature-only tools
-      // (which don't touch callGraph) keep working — parity with the inventory-artifact
-      // shape guards.
-      const cg = ctx.callGraph as { nodes?: unknown; edges?: unknown } | undefined;
-      if (cg !== undefined && (typeof cg !== 'object' || cg === null || !Array.isArray(cg.nodes) || !Array.isArray(cg.edges))) {
-        ctx.callGraph = undefined;
+      // Normalize a present callGraph so `nodes`/`edges` are always arrays. A truncated
+      // or hand-edited artifact (`{"callGraph": {}}`) — or a minimal one carrying only
+      // entryPoints/hubFunctions — would otherwise throw when a handler does
+      // `cg.nodes.map(...)`. Coerce the missing/invalid arrays to [] (graceful empty)
+      // rather than dropping the whole graph: other handlers (architecture overview)
+      // legitimately read entryPoints/hubFunctions without touching nodes/edges. A
+      // callGraph that isn't even an object is unusable, so drop that.
+      if (ctx.callGraph !== undefined) {
+        if (typeof ctx.callGraph === 'object' && ctx.callGraph !== null) {
+          const cg = ctx.callGraph as { nodes?: unknown; edges?: unknown };
+          if (!Array.isArray(cg.nodes)) cg.nodes = [];
+          if (!Array.isArray(cg.edges)) cg.edges = [];
+        } else {
+          ctx.callGraph = undefined;
+        }
       }
       if (EdgeStore.exists(analysisDir)) {
         const es = EdgeStore.open(EdgeStore.dbPath(analysisDir));
