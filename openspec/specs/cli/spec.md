@@ -734,11 +734,12 @@ that invokes it can never break the user's turn.
 ### Requirement: OrientationRelevanceGate
 
 The `--inject` mode SHALL compute a deterministic, local orientation-relevance signal from the
-orientation result and the call graph (such as matched-function count, fan-in of matches, match
-score, and graph size/density) and SHALL compare it to a documented threshold. When the signal is at
-or above the threshold, `--inject` SHALL emit the full orientation block; when below it, `--inject`
-SHALL emit only a single pointer line. The threshold and its inputs SHALL be documented and
-overridable in repository configuration, and SHALL never be learned or LLM-derived.
+orientation result — the matched-function count, the fan-in / hub centrality of the matches, and
+(only on the bounded semantic/hybrid score scale) the top match score — and SHALL compare it to a
+documented threshold. When the signal is at or above the threshold, `--inject` SHALL emit the full
+orientation block; when below it, `--inject` SHALL emit only a single pointer line. The threshold and
+its inputs SHALL be documented and overridable in repository configuration, and SHALL never be
+learned or LLM-derived.
 
 > Implemented by `add-task-scoped-context-injection` (2026-06-22). The gate passes when matched-count
 > ≥ `relevanceMinMatches` (default 2) AND there is structural centrality (a match with fan-in ≥
@@ -764,12 +765,15 @@ overridable in repository configuration, and SHALL never be learned or LLM-deriv
 `openlore install` SHALL wire, in addition to the existing whole-repo `SessionStart` orientation hook,
 a task-scoped first-prompt injection hook for each agent adapter that exposes a pre-turn hook
 mechanism (for Claude Code, a `UserPromptSubmit` hook running `openlore orient --inject`). The wired
-group SHALL be marker-identified so re-running install replaces only the OpenLore group, hand-edits in
-managed paths are detected and refused without `--force`, and `--uninstall` removes it cleanly,
-deleting now-empty parent objects and the file when it was OpenLore-only. `--dry-run` SHALL preview
-the change. Adapters with no pre-turn hook mechanism SHALL fall back to the existing instruction block
-without error. The wiring SHALL preserve the user's other configuration byte-for-byte (merge-not-
-clobber, decision `df27e8ef`).
+group SHALL be marker-identified (`_openlore: true`) so re-running install replaces only the OpenLore
+group in place — a stale OpenLore group self-heals to the current command and re-install never
+duplicates it — while user-authored sibling hooks are left byte-identical. (Unlike the fingerprinted
+managed paths in `CLAUDE.md` and `.mcp.json`, the marker-identified hook group carries no fingerprint
+and is not hand-edit-protected: edits inside the OpenLore group are overwritten on the next install by
+design.) `--uninstall` SHALL remove the group cleanly, deleting now-empty parent objects and the file
+when it was OpenLore-only. `--dry-run` SHALL preview the change. Adapters with no pre-turn hook
+mechanism SHALL fall back to the existing instruction block without error. The wiring SHALL preserve
+the user's other configuration byte-for-byte (merge-not-clobber, decision `df27e8ef`).
 
 > Implemented by `add-task-scoped-context-injection` (2026-06-22). The claude-code adapter generalizes
 > its SessionStart merge/strip helpers over both hook keys (`SessionStart`, `UserPromptSubmit`).

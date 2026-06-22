@@ -20,9 +20,10 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, existsSync: vi.fn().mockReturnValue(false) };
 });
 
-import { orientCommand } from './orient.js';
+import { orientCommand, readStdin } from './orient.js';
 import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { existsSync } from 'node:fs';
+import { PassThrough } from 'node:stream';
 
 const mockHandleOrient = vi.mocked(handleOrient);
 const mockExistsSync = vi.mocked(existsSync);
@@ -210,6 +211,41 @@ describe('orient command', () => {
       const stderrText = stderrSpy.mock.calls.map(c => String(c[0])).join('');
       expect(stderrText).not.toContain('[orient:metrics]');
       stderrSpy.mockRestore();
+    });
+  });
+
+  // readStdin underlies --inject's stdin path. The load-bearing property is that
+  // it never keeps the process alive: a writer that opens the pipe but never
+  // closes it must not stall the user's turn (regression: the fallback timer
+  // resolved the promise but left stdin referenced, so the process hung at EOF).
+  describe('readStdin (hook stdin, fail-open)', () => {
+    function fakeStream(): PassThrough & { isTTY?: boolean } {
+      return new PassThrough() as PassThrough & { isTTY?: boolean };
+    }
+
+    it('resolves with the piped payload when the stream ends', async () => {
+      const s = fakeStream();
+      const p = readStdin(s as unknown as NodeJS.ReadStream, 1000);
+      s.write('{"prompt":"hi"}');
+      s.end();
+      expect(await p).toBe('{"prompt":"hi"}');
+    });
+
+    it('resolves via the fallback (and detaches) when stdin stays open past EOF', async () => {
+      const s = fakeStream();
+      const p = readStdin(s as unknown as NodeJS.ReadStream, 30);
+      s.write('partial');
+      // deliberately never call s.end() — simulate a writer holding the pipe open
+      expect(await p).toBe('partial');
+      // The stream must be torn down so it can't keep the event loop alive.
+      expect(s.isPaused()).toBe(true);
+      expect(s.listenerCount('data')).toBe(0);
+    });
+
+    it('resolves empty immediately for a TTY (nothing piped)', async () => {
+      const s = fakeStream();
+      s.isTTY = true;
+      expect(await readStdin(s as unknown as NodeJS.ReadStream, 1000)).toBe('');
     });
   });
 });

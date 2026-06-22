@@ -61,9 +61,13 @@ The injected block:
   never dominate the context it economizes;
 - is **clearly attributed to OpenLore** and opens with a one-line "informational; act on it or
   ignore it" framing — facts, not instructions;
-- is **gated**: a deterministic graph-relevance signal (matched-function count, fan-in, match
-  score) decides whether the task warrants a full block; below the threshold it degrades to a
-  single pointer line, so injection stays out of the small/familiar arena it would otherwise tax;
+- is **gated**: a deterministic graph-relevance signal (matched-function count, fan-in / hub
+  centrality, and — only with embeddings — match score) decides whether the task warrants a full
+  block; below the threshold it degrades to a single pointer line, so injection stays out of the
+  small/familiar arena it would otherwise tax. (Without embeddings — the default keyword/BM25 index —
+  the gate is *structural only*: it can occasionally emit a block for an off-topic prompt that
+  spuriously matches a central function. Run `openlore analyze --embed` to add the semantic-score
+  path, which discriminates relevance far better.)
 - **never breaks your turn**: any failure (no graph, parse error, empty/weak match) degrades to the
   pointer line and exits 0.
 

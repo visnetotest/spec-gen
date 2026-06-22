@@ -64,8 +64,11 @@ the injected block degrades to a one-line pointer instead of a full briefing.
 
 4. **Idempotent, marker-identified, reversible wiring.** The `UserPromptSubmit` group is marked with
    `_openlore: true` exactly like the existing `SessionStart` group, so re-running install replaces
-   only our group, hand-edits are detected, and `--uninstall` removes it cleanly. `--dry-run`
-   previews it. No change to the merge-not-clobber install contract.
+   only our group in place (a stale OpenLore group self-heals; it is never duplicated), user-authored
+   sibling hooks are left byte-identical, and `--uninstall` removes it cleanly. `--dry-run` previews
+   it. No change to the merge-not-clobber install contract. (As with `SessionStart`, the
+   marker-identified hook group is not fingerprint-protected: hand-edit refusal applies to the
+   `CLAUDE.md` block and `.mcp.json`, not to the hook group, whose contents are OpenLore-owned.)
 
 5. **Opt-out, and bounded.** Injection is on by the same default as the rest of `openlore install`,
    but a single config switch (`.openlore/config.json`) disables task-scoped injection while leaving

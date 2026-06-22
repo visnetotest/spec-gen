@@ -9,7 +9,7 @@
 - [x] The block reuses `orient --lean` (Spec 27) output, is capped by a documented token budget
       (default ~600 tokens, configurable), is clearly attributed to OpenLore, and opens with a
       one-line "informational; you may ignore this" framing (Epistemic Lease posture, decision
-      `8e95746d`). On stdin with an empty/whitespace prompt it degrades to the existing primer.
+      `8e95746d`). On stdin with an empty/whitespace prompt it degrades to the single pointer line.
 - [x] Errors never propagate to the harness: a missing graph, parse failure, or empty match emits the
       pointer-line fallback and exits 0 (a hook must never break the user's turn).
 - [x] Test: `--inject --task "<x>"` on an analyzed repo emits a budgeted, attributed, ignorable block;
@@ -17,7 +17,8 @@
 
 ## 2. Deterministic orientation-relevance gate
 - [x] Compute a local, no-LLM relevance signal from the orient result + EdgeStore (matched-function
-      count, max/median fan-in of matches, match score, graph node count/density). Define the
+      count, max fan-in / hub centrality of matches, and the top match score on the bounded
+      semantic/hybrid scale). Define the
       documented threshold below which orientation is judged unlikely to pay (the small/familiar/
       shallow arena the scorecard says OpenLore should not tax).
       → reuse fields already on the orient result; no new analysis pass.
@@ -30,15 +31,17 @@
 ## 3. `UserPromptSubmit` install wiring (claude-code adapter)
 - [x] In `src/cli/install/adapters/claude-code.ts`, add a marker-identified (`_openlore: true`)
       `UserPromptSubmit` hook group that runs `npx --yes openlore orient --inject`, mirroring the
-      existing `SessionStart` group (`isOurSessionEntry` / `mergeSessionStart` / `stripOurSessionStart`
-      generalized to both hook keys). Re-running install replaces only our group; hand-edits are
-      detected; format is preserved byte-for-byte.
+      existing `SessionStart` group (`isOurHookEntry` / `mergeOurHook` / `stripOurHook`
+      generalized over both hook keys). Re-running install replaces only our marker-identified group
+      (a stale OpenLore group self-heals; never duplicated); user-authored sibling hooks and the
+      file's format are preserved byte-for-byte.
 - [x] `--uninstall` strips the `UserPromptSubmit` group exactly as it strips `SessionStart`, deleting
       now-empty parents and the file if it was OpenLore-only.
 - [x] `--dry-run` previews the added group.
 - [x] Test: apply adds both `SessionStart` and `UserPromptSubmit` OpenLore groups idempotently;
-      uninstall removes both and leaves any user-authored hooks byte-identical; a hand-edited group is
-      refused without `--force`.
+      uninstall removes both and leaves any user-authored hooks byte-identical; a stale OpenLore group
+      is replaced in place (self-heal), not duplicated. (The marker-identified hook group is not
+      fingerprint-protected — hand-edit refusal applies only to the `CLAUDE.md` block and `.mcp.json`.)
 
 ## 4. Per-adapter coverage + graceful fallback
 - [x] For each non-Claude adapter (`cursor.ts`, `cline.ts`, `continue.ts`, `agents-md.ts`), wire the
