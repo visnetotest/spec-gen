@@ -95,7 +95,7 @@ describe('MCP tool presets', () => {
   it('federation_status is gated to the federation preset, never in default/minimal', () => {
     const fed = selectActiveTools(TOOL_DEFINITIONS, { preset: 'federation' }).map(t => t.name);
     expect(fed).toContain('federation_status');
-    expect(new Set(fed)).toEqual(new Set(['orient', 'federation_status', 'spec_store_status', 'analyze_impact', 'find_dead_code', 'select_tests', 'find_path']));
+    expect(new Set(fed)).toEqual(new Set(['orient', 'federation_status', 'spec_store_status', 'working_set_context', 'analyze_impact', 'find_dead_code', 'select_tests', 'find_path']));
 
     expect(selectActiveTools(TOOL_DEFINITIONS, { minimal: true }).map(t => t.name)).not.toContain('federation_status');
     // Default surface DOES list the four federation-aware tools, but federation_status
@@ -234,8 +234,11 @@ describe('tools/list payload budget (spec-28)', () => {
   // Bumped 61_000 → 62_000 when the `spec_store_status` tool was added to the full surface
   // (spec: add-spec-store-binding) — a read-only binding-health tool. It stays OUT of the
   // minimal/navigation/memory presets; only the full surface widens. Conscious decision.
+  // Bumped 62_000 → 63_000 when the `working_set_context` tool was added to the full surface
+  // (spec: add-working-set-context-briefing) — a read-only working-set briefing tool. It joins
+  // the opt-in federation preset only; it stays OUT of minimal/navigation/memory. Conscious decision.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({})).toBeLessThan(62_000);
+    expect(payloadBytes({})).toBeLessThan(63_000);
   });
 
   it('navigation preset stays lean (the low-overhead surface that wins the benchmark)', () => {

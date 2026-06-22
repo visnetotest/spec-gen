@@ -21,6 +21,7 @@
 | `openlore setup` | Install workflow skills into the project (Vibe, Cline, GSD, BMAD, Pi) | No |
 | `openlore federation add\|remove\|list` | Manage the multi-repo federation registry (index-of-indexes) | No |
 | `openlore spec-store status` | Report the health of the spec-store binding (read-only, advisory) | No |
+| `openlore working-set context` | Assemble the working-set briefing for an active change across its targets (read-only, advisory) | Targets indexed |
 | `openlore mcp` | Start MCP server (stdio, for Cline / Claude Code) | No |
 | `openlore serve` | Start a warm local HTTP daemon exposing tools (loopback, for Pi / editors) | No |
 | `openlore doctor` | Check environment and configuration for common issues | No |
@@ -215,6 +216,18 @@ openlore spec-store status --json     # stable finding codes for an orchestrator
 
 Read-only and advisory — it reports binding health and always exits 0; it never blocks. Findings carry stable codes (`target-unresolved`, `index-stale`, `reference-missing`, `registry-unreadable`, …) each with a pasteable remediation. The matching MCP tool `spec_store_status` is exposed under `openlore mcp --preset federation`.
 
+#### Working-set context
+
+Once a binding is sound, assemble the structural briefing an active change actually needs — `orient`, generalized from one repo to the change's targets:
+
+```bash
+openlore working-set context --change <id>                  # human-readable: per-target items, callers, anchored intent
+openlore working-set context --change <id> --json           # documented JSON for an orchestrator to splice into its agent brief
+openlore working-set context --change <id> --token-budget 4000   # cap the merged briefing
+```
+
+It reads the change's proposal under the bound store, orients each resolved+indexed target on that intent, and returns one budgeted, per-target-attributed briefing plus fresh in-scope anchored intent (orphaned withheld, drifted flagged). Read-only and advisory — always exits 0, never blocks. Findings carry stable codes (`change-not-found`, `target-not-briefable`, `no-briefable-targets`, …). The matching MCP tool `working_set_context` is exposed under `openlore mcp --preset federation`.
+
 ---
 
 ## Serve (warm daemon)
@@ -228,7 +241,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 
 ```bash
 openlore serve                          # navigation preset, ephemeral port, watch on
-openlore serve --preset all --port 7077 # all 60 tools on a fixed port
+openlore serve --preset all --port 7077 # all 61 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
 ```

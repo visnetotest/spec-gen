@@ -1429,6 +1429,25 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'working_set_context',
+    description:
+      'Assemble the working-set structural briefing for an active change in a spec-store binding: ' +
+      'orient, generalized from one repo to the change\'s target repositories. Reads the change\'s ' +
+      'proposal under the bound store, orients each resolved+indexed target on that intent, and returns ' +
+      'ONE deterministic, token-budgeted briefing whose items are attributed per target (symbol, callers, ' +
+      'spec domains, insertion points) plus fresh in-scope anchored intent. Conclusion-shaped, read-only, ' +
+      'never blocks; orphaned intent is withheld and drifted intent is flagged. No LLM.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        change: { type: 'string', description: 'The active change id to brief (its proposal lives under the bound store).' },
+        tokenBudget: { type: 'number', description: 'Cap the merged briefing to ~this many tokens (default 8000).' },
+      },
+      required: ['directory'],
+    },
+  },
+  {
     name: 'detect_changes',
     description:
       'Detect recently changed functions and rank them by blast radius. ' +
@@ -1734,7 +1753,7 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
   // `minimal` surfaces register no federation capability (change:
   // add-multi-repo-federation; architecture: FederationScopedConclusions opt-in).
   federation: new Set([
-    'orient', 'federation_status', 'spec_store_status',
+    'orient', 'federation_status', 'spec_store_status', 'working_set_context',
     'analyze_impact', 'find_dead_code', 'select_tests', 'find_path',
   ]),
 };
@@ -1742,7 +1761,7 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
 /**
  * Resolve which tools an MCP session exposes (Spec 14). `--preset` wins over the
  * legacy `--minimal` (= the 'minimal' preset); no selector = all tools. Throws on
- * an unknown preset so a typo fails loudly instead of silently exposing all 60.
+ * an unknown preset so a typo fails loudly instead of silently exposing all 61.
  * Pure + exported for unit testing.
  */
 export function selectActiveTools<T extends { name: string }>(
@@ -2113,5 +2132,5 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', 'Expose a named tool preset instead of all 60. "minimal" = orient+search+governance; "navigation" = graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) for low-overhead code navigation; "memory" = orient+remember+recall; "federation" = orient + federation_status + spec_store_status + the four cross-repo conclusion tools. Takes precedence over --minimal.')
+  .option('--preset <name>', 'Expose a named tool preset instead of all 61. "minimal" = orient+search+governance; "navigation" = graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) for low-overhead code navigation; "memory" = orient+remember+recall; "federation" = orient + federation_status + spec_store_status + working_set_context + the four cross-repo conclusion tools. Takes precedence over --minimal.')
   .action((options: McpServerOptions) => startMcpServer(options));

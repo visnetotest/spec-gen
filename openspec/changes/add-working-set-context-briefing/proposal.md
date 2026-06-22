@@ -1,8 +1,10 @@
 # Working-set context briefing: assemble the structural context a change actually needs
 
-> Status: PROPOSED (2026-06-21). Second of three in `SPEC-STORE-INTEGRATION.md`. Builds on
-> `add-spec-store-binding` (the targets), `orient`, and `add-trust-calibrated-context-economy`
-> (token budgeting). Prerequisite for `add-change-impact-certificate`.
+> Status: IMPLEMENTED (2026-06-21) — shipped on branch `feat/working-set-context-briefing`. Decision
+> `e7c73f5d`. Second of three in `SPEC-STORE-INTEGRATION.md`. Builds on `add-spec-store-binding` (the
+> targets), `orient`, and `add-trust-calibrated-context-economy` (token budgeting). Prerequisite for
+> `add-change-impact-certificate`. See `tasks.md` → "Implementation status" and
+> `DOGFOOD-working-set-context.md` for the real-index e2e.
 
 ## Why
 

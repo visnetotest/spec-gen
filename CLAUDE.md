@@ -27,6 +27,7 @@
 | Recalling what's known about code you're touching | `recall` (opt-in `memory` preset) — returns memories with a freshness verdict; never serves orphaned ones as authoritative |
 | About to assert a structural fact to a user ("X is dead", "Y calls Z", "this is safe to change") | `verify_claim` (opt-in `verify` preset) — verify the claim against the graph, then cite the receipt to the human; an `unverifiable` verdict means hedge or read the source |
 | "Is my external spec store's binding to its code repos healthy?" | `spec_store_status` (opt-in `federation` preset) — read-only health of the `.openlore/config.json` `specStore` binding: per-target resolution + index freshness, reference presence, conclusion-shaped findings with stable codes; never blocks |
+| "Assemble the structural context an active change needs across its target repos" | `working_set_context` (opt-in `federation` preset) — `orient` generalized from one repo to a change's spec-store targets: reads the change's proposal, orients each indexed target on that intent, returns ONE token-budgeted, per-target-attributed briefing (symbols, callers, spec domains, insertion points) + fresh in-scope anchored intent (orphaned withheld, drifted flagged); read-only, never blocks |
 
 For all other cases (reading a file, grepping, listing files) use native tools directly.
 

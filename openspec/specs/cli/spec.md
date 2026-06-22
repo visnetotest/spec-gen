@@ -447,7 +447,7 @@ openlore emits SCIP for interop with external indexers but never imports it; the
 
 **Consequences:** SCIP consumers get a snapshot; openlore never depends on SCIP being read back.
 
-### MCP exposes a curated navigation tool preset, not all 60 tools
+### MCP exposes a curated navigation tool preset, not all 61 tools
 
 **Status:** Approved
 **Date:** 2026-06-01
@@ -645,3 +645,26 @@ findings are present; it SHALL NOT block any workflow.
 A spec-store binding adds an optional OpenLoreConfig.specStore block { name, path, targets[], references? } where targets/references are NAMES that must match entries already in the federation registry (.openlore/federation.json). Resolution and index-state reuse the federation registry verbatim (loadRegistry/listRepos/evaluateRepoState), so the binding adds no new index machinery — it is a thin declarative layer over the shipped index-of-indexes. The health check is read-only and returns conclusion-shaped findings with stable codes (store-path-missing, target-unresolved, target-missing, index-missing, index-stale, reference-missing); it never throws and never blocks. The MCP tool spec_store_status follows the federation_status precedent: present in the full TOOL_DEFINITIONS surface and additionally in the opt-in federation preset, kept out of minimal/navigation/memory.
 
 **Consequences:** Using a spec-store binding requires the target repos to also be registered via `openlore federation add`; a declared name with no registry entry surfaces as a target-unresolved finding with a pasteable remediation rather than an error. Tool count rises 60→61, requiring updates to the count-guarded docs and the --preset help string. Future working-set and impact-certificate tools will extend this binding.
+
+### Requirement: WorkingSetContextCommand
+
+The system SHALL provide a CLI command `openlore working-set context` that assembles and emits the
+working-set structural briefing for an active change in a configured spec-store binding. The command
+SHALL accept the change to brief (`--change <id>`) and SHALL support a `--json` flag whose output is
+documented in the agent-facing contract, so an external orchestrator can request the briefing and splice
+it into the context it hands its agent. The command MAY accept an optional token budget (`--token-budget
+<n>`) bounding the merged briefing. The command SHALL be read-only and SHALL exit zero whether or not
+the change is briefable; it SHALL NOT block any workflow.
+
+#### Scenario: Briefing emitted as machine-readable context
+
+- **GIVEN** a bound store with an active change targeting at least one resolved, indexed repository
+- **WHEN** `openlore working-set context --change <id> --json` is run
+- **THEN** the command emits one budgeted briefing whose items are attributed to each target repository,
+  in the documented JSON shape, and exits zero
+
+#### Scenario: No change specified
+
+- **GIVEN** a configured spec-store binding and no `--change` argument
+- **WHEN** `openlore working-set context` is run
+- **THEN** the command reports a `change-unspecified` finding and exits zero without briefing

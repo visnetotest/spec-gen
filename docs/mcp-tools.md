@@ -34,11 +34,11 @@ or for local development:
 
 ### Recommended lean surface (cost, Spec 25 P1 · Spec 28)
 
-MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **60 tools / ~58 KB / ~15k tokens** of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
+MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **61 tools / ~58 KB / ~15k tokens** of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
 
 **Spec 28 measured how far the *server* can shrink that prefix, honestly:** MCP has no server-driven lazy-schema mechanism (`tools/list` always returns full schemas), and the lossless server-side byte-lever is only ~2% — the payload is dominated by irreducible per-tool schema structure plus the selection text an agent needs to pick a tool. So the real lever is the *client* (deferred schemas, below) and *tool count* (`--preset`), not byte-shaving. The surface has been trimmed losslessly anyway (shared param descriptions, no boilerplate) and is now **bounded by a regression guard** so it can't silently bloat. Two ways to get the lean surface, in order of preference:
 
-1. **Deferred schemas (best — keeps every tool available).** If your client supports it (Claude Code: `alwaysLoad: false`), advertise tool *names* cheaply and load a tool's schema only when it's used. See the [two-server setup](agent-setup.md) — you keep all 60 tools without paying their schema cost up front.
+1. **Deferred schemas (best — keeps every tool available).** If your client supports it (Claude Code: `alwaysLoad: false`), advertise tool *names* cheaply and load a tool's schema only when it's used. See the [two-server setup](agent-setup.md) — you keep all 61 tools without paying their schema cost up front.
 2. **`--preset navigation` (server-side, navigation-only).** Add `"args": ["mcp", "--preset", "navigation"]` for a 7-tool graph-traversal surface (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton). This is exactly the configuration the benchmark measured (−7%→−21% cost, −26% round-trips on deep traces). Note it omits the governance tools (`record_decision`, `check_architecture`, inventories), so prefer option 1 if you use the decision gate or architecture checks during a session.
 
 The tool list and schemas are emitted in a fixed, deterministic order with no per-request variation, so the provider KV-cache holds the surface and its cost drops sharply after the first call (guarded by a regression test).
@@ -208,6 +208,7 @@ Registered only under `openlore mcp --preset federation`. Federation is an index
 |------|-------------|:---:|
 | `federation_status` | Report the federation registry and each registered repo's live index state (`indexed` / `stale` / `unindexed` / `missing`), with registered-vs-live fingerprints. Read-only. | No |
 | `spec_store_status` | Report the health of a spec-store binding (`.openlore/config.json` `specStore`): per-target resolution + live index state, reference presence, and store-path presence. Declared target/reference **names** resolve against the federation registry. Read-only; never throws, never blocks. | No |
+| `working_set_context` | Assemble the working-set structural briefing for an active change in a spec-store binding: `orient`, generalized from one repo to the change's targets. Reads the change's proposal under the bound store, orients each resolved+indexed target on that intent, and returns ONE deterministic, token-budgeted, per-target-attributed briefing (symbol, callers, spec domains, insertion points) plus fresh in-scope anchored intent (orphaned withheld, drifted flagged). Read-only; never throws, never blocks. | Targets indexed |
 
 When a registry exists, `analyze_impact`, `find_dead_code`, `select_tests`, and `find_path` accept opt-in `federation` (boolean) and `federationRepos` (name list) params: cross-repo consumers, live-via-federation exports, cross-repo test selection, and cross-repo producer/bridge location respectively. Each response names `reposConsulted` / `reposSkipped` — unindexed/stale repos are reported, never guessed.
 
@@ -226,6 +227,8 @@ A **spec-store binding** declares the code repositories an external spec reposit
 | `reference-missing` | warn | a declared reference is unresolved or its path is gone |
 
 The report is `sound` when it carries no error-severity finding. Every finding includes a pasteable `remediation`. Exposed only under `openlore mcp --preset federation`.
+
+`working_set_context` builds on the binding: given `--change <id>`, it reads that change's proposal under the bound store, extracts a concise intent, and runs task-scoped `orient` against each resolved+indexed target. The merged briefing is ranked by structural relevance and bounded by a token budget (`tokenBudget`, default 8000); when truncated it carries an `omissionNote`. Every item is attributed to its target repository (`target`, `name`, `callers`, `specDomains`, `expand`). Fresh in-scope decisions appear under each target's `anchoredIntent` with `verdict: "current"`; drifted anchors appear as `verdict: "drifted"`; orphaned anchors are withheld entirely (orient never serves them as authoritative). Its `findings[]` carry stable codes (`no-binding`, `binding-unsound`, `change-unspecified`, `change-not-found`, `no-briefable-targets`, `target-not-briefable`, `orient-unavailable`); `ready` is true when the binding is sound and at least one target was briefed. Read-only, never blocks. Also exposed only under `openlore mcp --preset federation`.
 
 **Story Management**
 
@@ -247,9 +250,32 @@ lean         boolean  Optional: return only the navigation core (relevantFunctio
                       specDomains + suggestedTools), dropping enrichment (Spec 27). See below.
 ```
 
-Response includes `suggestedTools: string[]` — a ranked list of openlore tool names relevant to the task, derived from hub presence, spec domains, and task keywords. No extra I/O. Use this on clients without Tool Search (Cline, Cursor, OpenCode) to know which tools to call next without enumerating all 59.
+Response includes `suggestedTools: string[]` — a ranked list of openlore tool names relevant to the task, derived from hub presence, spec domains, and task keywords. No extra I/O. Use this on clients without Tool Search (Cline, Cursor, OpenCode) to know which tools to call next without enumerating all 61.
 
 **Lean mode (Spec 27).** `lean: true` (CLI: `orient --lean`) returns only the navigation core for shallow "who calls X / where is Y" lookups — ~40% smaller than the rich default on this repo. Everything dropped (insertion points, provenance, change-coupling, inline specs, matching specs, decisions, architecture violations) is one `expand` handle or one dedicated tool call away, so it trims bytes per turn without forcing a follow-up round-trip. Lean is also **compute-lean** (Spec 27 P5): it skips the work behind those blocks — the extra spec-embedding search, manifest/spec-file reads, the decision-store load, and the git-derived joins — so the shallow path is faster, not only smaller. The rich default is unchanged; omit `lean` when you need specs, decisions, or insertion points.
+
+**`working_set_context`**
+```
+directory    string   Absolute path to the home project directory (holds the specStore binding)
+change       string   The change id to brief; its proposal.md lives under the bound store at
+                      <store>/openspec/changes/<change>/. Confined to the store (traversal is rejected).
+tokenBudget  number   Optional: cap the merged briefing to ~this many tokens (default: 8000)
+```
+
+Response (`WorkingSetContextReport`) — the stable JSON shape an orchestrator can rely on:
+```
+bound        boolean   whether a specStore binding is configured
+store        { name, path }                       present when bound
+change       { id, intent, declaredScope? }        intent = the ≤1000-char task oriented on; declaredScope = the change's spec-delta domains
+targets      [ { target, briefed, reason?, insertionPoints[], specDomains[],
+                 anchoredIntent[ { id, title, status, verdict: "current"|"drifted" } ] } ]
+items        [ { target, name, filePath, score, expand, signature?, callers[], specDomains[] } ]   merged, ranked, budgeted
+omissionNote string    present only when the budget dropped items
+findings     [ { code, severity, subject, message, remediation } ]   stable codes (see below)
+ready        boolean   true when the binding is sound AND ≥1 target was briefed
+summary      string    conclusion-shaped headline
+```
+Finding codes: `no-binding`, `binding-unsound`, `change-unspecified`, `change-not-found`, `no-briefable-targets`, `target-not-briefable`, `orient-unavailable`. Read-only; always succeeds (every problem is a finding), never blocks.
 
 **`analyze_codebase`**
 ```
