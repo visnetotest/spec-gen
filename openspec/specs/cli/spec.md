@@ -430,6 +430,30 @@ The system SHALL provide a declarative spec-store binding that resolves named ta
 
 > Decision recorded: c6e36101
 > Date: 2026-06-21
+### Requirement: SerializeTheProveScorecardAsVersionedStablekeyedJson
+
+The system SHALL serialize the prove scorecard as a versioned JSON object with a stable key set so that external tooling and CI pipelines can consume and gate on it.
+
+> Decision recorded: 581a90bf
+> Date: 2026-06-22
+### Requirement: PersistProveScorecardsAsDatedNonclobberingFilesUnderOpenloreprove
+
+The system SHALL persist prove scorecards as dated, non-clobbering JSON files under .openlore/prove/ when invoked with --save.
+
+> Decision recorded: 670b5f0b
+> Date: 2026-06-22
+### Requirement: ComputeTheProveEstimateArmAsADeterministicGraphderivedProxyLabeledNevermeasured
+
+The system SHALL compute a deterministic, graph-derived estimate scorecard when invoked with prove --estimate, clearly labeled as never-measured.
+
+> Decision recorded: 66feae62
+> Date: 2026-06-22
+### Requirement: ProveSavescorecardWritesAtomicallyWxAndDegradesFsErrorsInsteadOfCrashing
+
+The system SHALL write prove scorecards atomically with O_CREAT|O_EXCL and degrade filesystem errors to stderr + exit 1 without discarding the printed scorecard.
+
+> Decision recorded: dfe33d94
+> Date: 2026-06-23
 
 ## Technical Notes
 
@@ -815,3 +839,43 @@ and the task line, which must always be present for the block to be safely attri
 - **GIVEN** a repository configured with context injection disabled
 - **WHEN** `openlore orient --inject` runs
 - **THEN** it emits nothing and exits 0, while the MCP server and SessionStart primer remain wired
+
+### Serialize the prove scorecard as versioned, stable-keyed JSON
+
+**Status:** Approved
+**Date:** 2026-06-22
+**ID:** 581a90bf
+
+`openlore prove --json` is an external/CI contract; a schemaVersion + fixed key set lets tooling consume and gate on it, and a guard test keeps the keys from drifting. Reuses the existing Scorecard object from computeScorecard rather than a parallel shape.
+
+**Consequences:** Adds a SerializedScorecard type + serializeScorecard() in scorecard.ts; the key set is asserted in tests; future fields append without breaking the version.
+
+### Persist prove scorecards as dated, non-clobbering files under .openlore/prove/
+
+**Status:** Approved
+**Date:** 2026-06-22
+**ID:** 670b5f0b
+
+The honesty contract is "date-stamped and re-measured after each optimization phase"; persisting under .openlore/prove/prove-<ISO>.json makes results keepable and diffable on the user's own repo without clobbering prior runs.
+
+**Consequences:** prove --save writes serialized scorecard + raw metrics; repeated saves on the same day get a uniqueness suffix; .openlore/prove/ is a new output dir under the existing .openlore root.
+
+### Compute the prove --estimate arm as a deterministic graph-derived proxy, labeled never-measured
+
+**Status:** Approved
+**Date:** 2026-06-22
+**ID:** 66feae62
+
+An API-key-less first-touch user needs a real, honest signal. The estimate counts the distinct answer-bearing files the auto-derived orientation tasks span (from-scratch reads) versus one orient call, with a few named, documented assumption constants. It must never be presented as a measured agent run.
+
+**Consequences:** Adds estimate.ts (pure, deterministic) producing WITH/WITHOUT Cells fed to computeScorecard with mode=estimate; renderers carry an unmistakable estimate label; assumptions are named constants, not hidden tuning.
+
+### prove saveScorecard writes atomically (wx) and degrades fs errors instead of crashing
+
+**Status:** Approved
+**Date:** 2026-06-23
+**ID:** dfe33d94
+
+Round-3 adversarial QA found two saveScorecard defects: an existsSync-then-write loop raced under concurrency and silently overwrote a prior run (violating the documented non-clobber guarantee), and .openlore/prove existing as a file made mkdirSync throw an unhandled stack-trace crash that discarded the computed scorecard. Fix: pick the non-clobbering name atomically via O_CREAT|O_EXCL (writeFileSync flag wx), advancing the suffix on EEXIST; and wrap the save call so any filesystem error degrades to a clear stderr message + exit 1 while the scorecard is still printed.
+
+**Consequences:** Concurrent --save calls never clobber; a filesystem failure never crashes the process. Docs (cli-reference, AGENT-BENCHMARKS, --json schema) aligned with shipped behavior. Refines the prove persistence decision (670b5f0b).

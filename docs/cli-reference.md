@@ -14,6 +14,9 @@
 | `openlore test` | Generate spec-driven tests (Vitest / Playwright / pytest / GTest / Catch2) | No |
 | `openlore test --coverage` | Report which spec scenarios have corresponding tests | No |
 | `openlore digest` | Plain-English summary of all specs for human review | No |
+| `openlore prove` | Measure OpenLore's token value on your repo (WITH vs WITHOUT agent pass) | Yes |
+| `openlore prove --estimate` | Deterministic, graph-derived projection of the orientation tax — no agent, no key | No |
+| `openlore prove --json\|--markdown\|--save` | CI-consumable scorecard / paste-ready block + badge / dated record under `.openlore/prove/` | Matches arm |
 | `openlore decisions` | Manage architectural decisions: list, approve, reject, sync to specs and ADRs | No |
 | `openlore decisions --install-hook` | Install the pre-commit hook that gates commits until decisions are reviewed | No |
 | `openlore run` | Full pipeline: init, analyze, generate | Yes |
@@ -106,6 +109,25 @@ openlore analyze [options]
   --no-embed             # Skip building the semantic vector index (index is built by default when embedding is configured)
   --reindex-specs        # Re-index OpenSpec specs into the vector index without re-running full analysis
 ```
+
+### Prove Options
+
+```bash
+openlore prove [options]
+  --directory <path>     # Repo to measure (default: current directory)
+  --runs <n>             # Runs per arm per task (default: 2; non-numeric is rejected)
+  --model <name>         # Agent model (default: sonnet)
+  --max-budget-usd <n>   # Per-agent-call USD ceiling (default: 0.5; non-numeric is rejected)
+  --estimate             # Deterministic, no-agent, no-API projection of the orientation tax
+  --dry-run              # Synthetic numbers (no agent, no API key)
+  --json                 # Stable schemaVersion:1 scorecard on stdout (mutually exclusive with --markdown)
+  --markdown             # Paste-ready scorecard block + shields.io badge (mutually exclusive with --json)
+  --save                 # Persist a dated, non-clobbering scorecard under .openlore/prove/
+```
+
+The measured arm needs `claude` + an API key; `--estimate` and `--dry-run` need neither. A measured
+run whose agent calls all fail **exits non-zero** rather than emitting a verdict over no data. The
+`--json` shape is documented in [AGENT-BENCHMARKS.md](AGENT-BENCHMARKS.md#json-output-schema-for-ci).
 
 ### Setup Options
 
