@@ -57,6 +57,14 @@
 > a `staleRegion` flag so an agent can tell "not yet reconciled" from "the code changed". All have
 > regression tests and were dogfooded.
 >
+> **Review hardening (fourth adversarial pass).** The third round's `staleRegion` labeling reached
+> `recall` but not `orient`, which surfaced a byte-identical stale-region decision as plain
+> `drifted`/`verify` with no marker — a less-honest, inconsistent signal. (10) `orient` now carries the
+> same `staleRegion` marker for decisions (via `isStaleRegionOnly`), matching `recall`. The fourth round
+> otherwise confirmed the round-3 fixes sound (exhaustive `isStaleRegionOnly` coverage; drift suppression
+> never swallows a real drift/orphan; the index survives schema-reset + additive migration; `busy_timeout`
+> holds under aggressive cross-process contention). Has a regression test.
+>
 > **Accepted, documented behavior (sound over-approximation).** A budget-exceeded edit marks the
 > un-recomputed files stale, which (a) downgrades memories/decisions anchored to those files in `recall`
 > to `drifted` + `staleRegion` even though their content is byte-identical, and (b) excludes any

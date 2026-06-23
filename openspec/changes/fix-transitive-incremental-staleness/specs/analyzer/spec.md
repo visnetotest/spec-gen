@@ -55,19 +55,19 @@ stale-region downgrade as drift (it is not a code change and it self-heals).
 - **GIVEN** a memory anchored to `A`, where `A`'s file has been marked `stale` by a
   budget-exceeded incremental update
 - **WHEN** the memory's freshness is evaluated
-- **THEN** the verdict is not `fresh`; it reflects that `A`'s topology is stale
+- **THEN** the verdict is not `fresh`; it reflects that `A`'s topology is stale, and it is marked as a
+  stale-region downgrade (not a code change)
 
 ### Requirement: StaleRegionsAreReconciledWithoutAManualFullAnalyze
 
 An explicitly-marked stale region SHALL be reconciled over time — opportunistically as later edits
-touch it and/or by a background reconciliation pass — so the stale region shrinks toward empty without
-requiring the user to run `analyze --force` manually. A full `analyze --force` SHALL clear all stale
-markings and SHALL remain the authoritative ground truth against which incremental convergence is
-defined and tested.
+touch it — so the stale region shrinks toward empty without requiring the user to run `analyze --force`
+manually. A full `analyze --force` SHALL clear all stale markings and SHALL remain the authoritative
+ground truth against which incremental convergence is defined and tested.
 
 #### Scenario: A stale region clears without manual intervention
 
 - **GIVEN** a region marked `stale` by a budget-exceeded incremental update
-- **WHEN** subsequent edits touch parts of that region (or a background reconciliation pass runs)
+- **WHEN** subsequent edits touch parts of that region
 - **THEN** the reconciled parts are recomputed to match `analyze --force` and dropped from the stale
   region, which shrinks toward empty
