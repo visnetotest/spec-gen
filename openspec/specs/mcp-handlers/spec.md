@@ -1037,11 +1037,28 @@ that has been **superseded** or otherwise retired, and SHALL emit it as a findin
 anchored memory, or a spec requirement that names the retired decision. The finding SHALL name both the
 referencing artifact and the retired target decision, and SHALL report the superseding decision when one
 exists. The supersession edge that performed the retirement SHALL be exempt — a decision that supersedes
-another is expected to reference the retired one and SHALL NOT itself produce this finding. The detection
-SHALL be a pure walk of the decision graph and anchored references, with no LLM.
+another is expected to reference the retired one and SHALL NOT itself produce this finding. Equivalently,
+the synced ADR/spec block that *documents* a supersession (the block contains an immediate superseder of
+the cited retired id) SHALL be exempt; a separate requirement that cites a retired decision it did not
+retire SHALL still be flagged. When the supersession forms a chain (A←B←C), the reported superseding
+decision SHALL be the live terminal (C), not a retired intermediate (B). The detection SHALL be a pure
+walk of the decision graph and anchored references, with no LLM, and SHALL be deterministic — when two
+decisions supersede the same target, the canonical superseder is the lexicographically smallest id, and
+output is sorted with a locale-independent key.
 
 > Implemented in `stale-decision-reference.ts` (`findStaleDecisionReferences`). Shares the supersession
 > predicate (`isEffectiveSuperseder`) with the reversal/authoritative surfaces so the two never disagree.
+> Hardened post-review (PR #190): the spec scan is block-based (the retirement record is exempt),
+> supersession chains resolve to the live terminal, multi-superseder ties break deterministically, and the
+> sort is locale-independent.
+
+#### Scenario: The retirement record itself is not flagged
+
+- **GIVEN** a synced ADR block for decision C that names the id of decision B (which C superseded), and a
+  separate requirement block that still rests on B
+- **WHEN** the stale-decision-reference check runs
+- **THEN** the ADR block for C produces no finding, and the separate requirement block is flagged as a
+  `stale-decision-reference`
 
 #### Scenario: A live decision still cites a superseded decision
 

@@ -7,6 +7,20 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Added
 
+- **Unified finding-enforcement policy** — a single `enforcement.policy` block in
+  `.openlore/config.json` maps a stable governance finding `code` to one enforcement
+  class (`blocking | advisory | off`), decoupling a finding's intrinsic severity
+  (owned by its source) from the repository's risk posture. The new `openlore enforce`
+  gate collects findings from every in-scope source, resolves each through the single
+  policy, and in `--hook` mode blocks the commit only on a `blocking`-classed finding
+  (advisory by default; `off` findings stay visible, never invisible). The legacy
+  `blastRadius.block` / `impactCertificate.block` configs lower onto it (a direct
+  policy entry wins). Adds the deterministic `stale-decision-reference` finding — a
+  live, authoritative artifact (approved decision / non-orphaned anchored memory /
+  spec requirement) that still cites a superseded decision — also surfaced as a
+  `staleDecisionRef` signal on the `recall` MCP tool's output. No new MCP tool;
+  deterministic, no LLM. Flags: `--hook`, `--install-hook`, `--uninstall-hook`,
+  `--json`, `--base`.
 - **OpenSpec plugin manifest (marketplace Phase 1)** — OpenLore is the inaugural
   OpenSpec marketplace plugin. It now ships a declarative plugin manifest (the
   `"openspec"` key in `package.json`, vendored schema
