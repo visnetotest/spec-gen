@@ -16,6 +16,7 @@ import { applyMarkdownBlock, uninstallMarkdownBlock, hasManagedBlock } from './m
 import { mergeEntries, readMeta, removeManaged, isHandEdited, editJsonPreservingFormat, type JsonPathEdit } from '../json-managed.js';
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
+import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
 
 const MD_FILE = 'CLAUDE.md';
 const SETTINGS_PATH = '.claude/settings.json';
@@ -26,13 +27,16 @@ const MCP_PATH = '.mcp.json';
 const OPENLORE_PERMISSION = 'Bash(openlore:*)';
 
 /**
- * MCP server registration. When a preset is given, wire `openlore mcp --preset
- * <name>` so the agent sees that curated surface; otherwise the full tool set.
+ * MCP server registration. Wires `openlore mcp --preset <name>`: the caller's
+ * preset when given, else the lean default surface (the benchmark-winning
+ * navigation core). The preset is always emitted explicitly so the wired surface
+ * is visible in `.mcp.json` and never relies on the bare-command default
+ * (change: default-to-lean-tool-surface).
  */
 function mcpEntry(preset?: string): { command: string; args: string[] } {
   return {
     command: 'npx',
-    args: ['--yes', 'openlore', 'mcp', ...(preset ? ['--preset', preset] : [])],
+    args: ['--yes', 'openlore', 'mcp', '--preset', preset ?? LEAN_DEFAULT_PRESET],
   };
 }
 
@@ -126,7 +130,20 @@ function serializeManaged(
   nextObject: Record<string, unknown>,
   edits: JsonPathEdit[],
 ): string {
-  if (isJsonObjectText(rawOriginal)) return editJsonPreservingFormat(rawOriginal as string, edits);
+  if (isJsonObjectText(rawOriginal)) {
+    try {
+      return editJsonPreservingFormat(rawOriginal as string, edits);
+    } catch {
+      // The format-preserving editor (jsonc-parser `modify`) throws when a managed
+      // PARENT path resolves to a non-container — e.g. a hostile `.mcp.json` of
+      // `{"mcpServers":"oops"}`: the top level is an object (so isJsonObjectText is
+      // true) but `mcpServers` is a string, so `modify([...,'mcpServers','openlore'])`
+      // can't index into it. `nextObject` is already the safely-merged result (the
+      // in-memory merge coerces non-objects to {}), so fall back to a fresh write
+      // rather than crashing mid-install with a partial state.
+      return JSON.stringify(nextObject, null, 2) + '\n';
+    }
+  }
   return JSON.stringify(nextObject, null, 2) + '\n';
 }
 

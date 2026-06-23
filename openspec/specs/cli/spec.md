@@ -430,6 +430,12 @@ The system SHALL provide a declarative spec-store binding that resolves named ta
 
 > Decision recorded: c6e36101
 > Date: 2026-06-21
+### Requirement: LeanDefaultMcpSurfaceNavigationPresetFull62toolSurfaceIsOptinViaPresetFullAlltools
+
+The system SHALL expose the navigation preset as the default MCP tool surface and require an explicit selector (--preset full or --all-tools) to activate the complete tool registry.
+
+> Decision recorded: a6c916ed
+> Date: 2026-06-22
 ### Requirement: SerializeTheProveScorecardAsVersionedStablekeyedJson
 
 The system SHALL serialize the prove scorecard as a versioned JSON object with a stable key set so that external tooling and CI pipelines can consume and gate on it.
@@ -721,6 +727,36 @@ infrastructure failure (no graph, no binding) SHALL never block.
   critical
 - **WHEN** a change opens a new path into a critical surface
 - **THEN** the hook blocks; and for a newly-opened path into any non-critical surface it remains advisory
+
+### Lean default MCP surface = navigation preset; full 62-tool surface is opt-in via --preset full / --all-tools
+
+**Status:** Approved
+**Date:** 2026-06-22
+**ID:** a6c916ed
+
+OpenLore exposed all 62 MCP tools by default (selectActiveTools with no selector returned allTools; install wired `openlore mcp` with no preset), contradicting both the Spec 14 agent-benchmark result (the net win comes specifically from `--preset navigation`, a ~10-tool graph-traversal surface) and the mcp-quality MinimizeToolSurface rule (schemas for uncalled tools are pure per-request overhead and degrade tool-selection accuracy). Invert the default: no selector now resolves to the lean default = the existing `navigation` preset verbatim (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path). The full TOOL_DEFINITIONS surface stays reachable via `--preset full` (alias `all`) or `--all-tools`. Governance/memory/verify/federation remain opt-in named presets, unchanged. Shared default/full preset names live in src/constants.ts so install adapters need not import the heavy MCP module.
+
+**Consequences:** No tool is removed; --preset full restores prior behavior exactly. The default-installed surface no longer includes governance tools (record_decision, check_spec_drift, detect_changes) — agents relying on the decisions pre-commit-gate workflow should install with --preset full or governance preset; documented with a migration note. The tool-count doc guard asserts the documented default count against the lean preset and the full count against TOOL_DEFINITIONS.length. New tools added to the registry default to opt-in (absent from the lean default) unless an evidence-backed decision adds them.
+
+### Harden lean-default selector contract: unified resolution, pointer parity, canonical normalization, clean error exit
+
+**Status:** Approved
+**Date:** 2026-06-22
+**ID:** 5fdc9da7
+
+Adversarial e2e on the default-to-lean-tool-surface change (a6c916ed) found four contract gaps: (1) The breadth pointer was gated on 'no selector at all', so `openlore install` (which wires `--preset navigation` explicitly) suppressed the pointer — installed agents got the lean surface but were never told breadth exists. Now both selectActiveTools and leanDefaultActive resolve through a single resolvePresetName() helper, and the pointer fires whenever the resolved surface is the lean default regardless of how it was reached. (2) `openlore mcp --preset <bad>` threw uncaught (exit 1 + stack trace); now exits 2 with a clean stderr message. (3) The cursor install adapter early-returned when its preset-independent .mdc was unchanged, skipping MCP wiring and silently ignoring preset switches on re-install; now falls through to MCP registration. (4) Selector vocabulary parity: serve accepts `full` as alias of `all`; install/connect accept `--all-tools`; the `all` alias normalizes to canonical `full` in wired args so .mcp.json never stores two strings for one surface.
+
+**Consequences:** Single source of truth (resolvePresetName) means the active tool set and the breadth pointer can never disagree. Installed agents on the lean default reliably see the breadth pointer. Bad presets fail as CLI usage errors (exit 2, no stack). Cursor users can switch presets on re-install. `full`/`all`/`--all-tools` are interchangeable across mcp/serve/install/connect, always wired as canonical `full`.
+
+### Install JSON format-preserving editor falls back to clean merged write on non-container managed parent
+
+**Status:** Approved
+**Date:** 2026-06-23
+**ID:** 96f55beb
+
+jsonc-parser modify() throws when indexing into a non-container parent (e.g. mcpServers is a string/number/null/array instead of an object). Since mergeEntries already coerces the non-object value to {} and produces the correct nextObject, serializeManaged wraps the format-preserving path in try/catch and falls back to JSON.stringify(nextObject) — the same fresh-write path used for unparseable files. This trades formatting preservation (only in the hostile case) for never crashing or half-installing.
+
+**Consequences:** A malformed/hostile .mcp.json no longer crashes install mid-flight; the OpenLore server is wired correctly (exit 0) and existing content is reconstructed from the merged object. Formatting is preserved in every normal case; only the previously-crashing non-container-parent case loses byte-exact formatting.
 
 ### Requirement: OrientInjectMode
 

@@ -157,7 +157,10 @@ class McpClient {
 // ============================================================================
 
 function spawnServer(): McpClient {
-  const proc = spawn('node', [MCP_BIN, 'mcp'], {
+  // change: default-to-lean-tool-surface — no-preset is now the lean navigation
+  // surface (10 tools). This e2e exercises the full surface (asserts tools like
+  // get_critical_hubs/get_spec and a ≥20 count), so it opts into `--preset full`.
+  const proc = spawn('node', [MCP_BIN, 'mcp', '--preset', 'full'], {
     cwd:   REPO_ROOT,
     stdio: ['pipe', 'pipe', 'inherit'],   // inherit stderr so test logs show server errors
     env:   { ...process.env },

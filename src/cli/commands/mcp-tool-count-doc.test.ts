@@ -24,10 +24,16 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { TOOL_DEFINITIONS, toolAnnotations } from './mcp.js';
+import { TOOL_DEFINITIONS, toolAnnotations, TOOL_PRESETS } from './mcp.js';
+import { LEAN_DEFAULT_PRESET } from '../../constants.js';
 
 // src/cli/commands/<this> → repo root is three levels up.
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+
+// change: default-to-lean-tool-surface — the documented DEFAULT surface count must
+// track the lean default preset (the navigation surface), exactly as the full-surface
+// count tracks TOOL_DEFINITIONS.length. Sourced from the preset so it can't drift.
+const LEAN_DEFAULT_COUNT = TOOL_PRESETS[LEAN_DEFAULT_PRESET].size;
 
 // Files whose every "<N> tools" mention the regex catches is the live full surface.
 // cli-reference.md: its sole match ("all <count> tools on a fixed port") is the full
@@ -40,14 +46,21 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 // visible preset ("6 tools"), so that known preset size is allowlisted there — the file is
 // still guarded for its full-surface claims (it drifted to "61" while the surface was 62
 // precisely because nothing tied it to the code).
+// The lean default count (navigation size) is allowlisted in the docs that now state
+// it alongside the full surface (change: default-to-lean-tool-surface); a dedicated
+// guard below asserts those docs cite exactly LEAN_DEFAULT_COUNT so it can't drift either.
 const GUARDED_DOCS: Array<{ rel: string; allowPresetCounts?: number[] }> = [
-  { rel: 'README.md' },
-  { rel: 'docs/mcp-tools.md' },
+  { rel: 'README.md', allowPresetCounts: [LEAN_DEFAULT_COUNT] },
+  { rel: 'docs/mcp-tools.md', allowPresetCounts: [LEAN_DEFAULT_COUNT] },
   { rel: 'docs/cli-reference.md' },
   { rel: 'docs/governance-dogfooding.md' },
   { rel: 'docs/agent-setup.md', allowPresetCounts: [6] },
   { rel: 'openspec/specs/cli/spec.md' },
 ];
+
+// Docs that document the lean DEFAULT surface must cite exactly its preset size, so the
+// default figure is guarded against drift the same way the full count is.
+const LEAN_DEFAULT_DOCS = ['README.md', 'docs/mcp-tools.md'];
 
 describe('documented MCP tool count', () => {
   const expected = TOOL_DEFINITIONS.length;
@@ -67,6 +80,19 @@ describe('documented MCP tool count', () => {
     // The full surface must actually be stated — guard against a file that only ever
     // mentions preset sizes (which would let the full-surface count vanish unnoticed).
     expect(counts.includes(expected), `${rel} never states the full surface of ${expected} tools`).toBe(true);
+  });
+});
+
+// change: default-to-lean-tool-surface — the documented lean DEFAULT count must equal
+// the navigation preset size, so neither the default nor the full figure can drift.
+describe('documented lean default tool count', () => {
+  it.each(LEAN_DEFAULT_DOCS)('%s cites the lean default surface as the navigation preset size', (rel) => {
+    const text = readFileSync(join(repoRoot, rel), 'utf8');
+    const counts = [...text.matchAll(/(\d+)\s+(?:[A-Za-z][\w-]*\s+)?tools?\b/g)].map(m => Number(m[1]));
+    expect(
+      counts.includes(LEAN_DEFAULT_COUNT),
+      `${rel} should state the lean default surface of ${LEAN_DEFAULT_COUNT} tools (the ${LEAN_DEFAULT_PRESET} preset size); update it if the preset membership changed`,
+    ).toBe(true);
   });
 });
 

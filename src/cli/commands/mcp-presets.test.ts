@@ -7,7 +7,8 @@
  * surface), and the selector's precedence/error behaviour must hold.
  */
 import { describe, it, expect } from 'vitest';
-import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS, mcpCommand } from './mcp.js';
+import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS, mcpCommand, BREADTH_POINTER, leanDefaultActive, resolvePresetName } from './mcp.js';
+import { LEAN_DEFAULT_PRESET } from '../../constants.js';
 
 const NAV = [
   'orient', 'search_code', 'get_subgraph', 'trace_execution_path',
@@ -73,9 +74,30 @@ describe('MCP tool presets', () => {
     }
   });
 
-  it('no selector exposes the full tool set', () => {
-    expect(selectActiveTools(TOOL_DEFINITIONS, {})).toHaveLength(TOOL_DEFINITIONS.length);
+  // change: default-to-lean-tool-surface — the default was inverted. No selector
+  // now resolves to the lean default surface (the navigation preset), NOT the full
+  // registry. The full surface is opt-in via --preset full / --all-tools.
+  it('no selector exposes the LEAN DEFAULT surface (navigation), not the full set', () => {
+    const tools = selectActiveTools(TOOL_DEFINITIONS, {}).map(t => t.name);
+    expect(new Set(tools)).toEqual(new Set(NAV));
+    expect(tools.length).toBeLessThan(TOOL_DEFINITIONS.length); // strictly smaller than full
+    expect(LEAN_DEFAULT_PRESET).toBe('navigation'); // the lean default IS the navigation preset
+  });
+
+  it('--preset full / --all-tools / --preset all expose the full TOOL_DEFINITIONS surface', () => {
+    expect(selectActiveTools(TOOL_DEFINITIONS, { preset: 'full' })).toHaveLength(TOOL_DEFINITIONS.length);
+    expect(selectActiveTools(TOOL_DEFINITIONS, { preset: 'all' })).toHaveLength(TOOL_DEFINITIONS.length);
+    expect(selectActiveTools(TOOL_DEFINITIONS, { allTools: true })).toHaveLength(TOOL_DEFINITIONS.length);
     expect(TOOL_DEFINITIONS.length).toBeGreaterThan(NAV.length); // full surface really is larger
+  });
+
+  it('--all-tools / --preset full win over --preset and --minimal (full is the explicit escape hatch)', () => {
+    expect(selectActiveTools(TOOL_DEFINITIONS, { allTools: true, preset: 'navigation' })).toHaveLength(TOOL_DEFINITIONS.length);
+    expect(selectActiveTools(TOOL_DEFINITIONS, { allTools: true, minimal: true })).toHaveLength(TOOL_DEFINITIONS.length);
+  });
+
+  it('an unknown preset error now lists "full" as a known selector', () => {
+    expect(() => selectActiveTools(TOOL_DEFINITIONS, { preset: 'nope' })).toThrow(/full/);
   });
 
   it('--preset takes precedence over --minimal', () => {
@@ -100,6 +122,75 @@ describe('MCP tool presets', () => {
     expect(selectActiveTools(TOOL_DEFINITIONS, { minimal: true }).map(t => t.name)).not.toContain('federation_status');
     // Default surface DOES list the four federation-aware tools, but federation_status
     // — the registry-backed capability — is the opt-in marker and rides only the preset.
+  });
+});
+
+// ============================================================================
+// change: default-to-lean-tool-surface — selector → canonical preset resolution.
+// One source of truth (resolvePresetName) drives both the active tool set and the
+// breadth-pointer decision, so they can never disagree.
+// ============================================================================
+describe('resolvePresetName (canonical selector resolution)', () => {
+  it('no selector resolves to the lean default (navigation)', () => {
+    expect(resolvePresetName({})).toBe('navigation');
+    expect(resolvePresetName({})).toBe(LEAN_DEFAULT_PRESET);
+  });
+  it('full-surface selectors all resolve to "full"', () => {
+    expect(resolvePresetName({ allTools: true })).toBe('full');
+    expect(resolvePresetName({ preset: 'full' })).toBe('full');
+    expect(resolvePresetName({ preset: 'all' })).toBe('full'); // alias normalizes
+  });
+  it('--minimal resolves to "minimal"; a named preset resolves to itself', () => {
+    expect(resolvePresetName({ minimal: true })).toBe('minimal');
+    expect(resolvePresetName({ preset: 'memory' })).toBe('memory');
+    expect(resolvePresetName({ preset: 'navigation' })).toBe('navigation');
+  });
+  it('full-surface selectors win over --preset and --minimal', () => {
+    expect(resolvePresetName({ allTools: true, preset: 'navigation' })).toBe('full');
+    expect(resolvePresetName({ allTools: true, minimal: true })).toBe('full');
+  });
+});
+
+// ============================================================================
+// change: default-to-lean-tool-surface — breadth discoverability. The pointer
+// fires when the ACTIVE surface IS the lean default (navigation) — whether reached
+// by no selector OR by an explicit `--preset navigation` (how `openlore install`
+// wires the default). Any other surface is a deliberate different choice → no
+// pointer. It rides the MCP instructions channel and adds zero tool schemas.
+// ============================================================================
+describe('breadth discoverability on the lean default surface', () => {
+  it('the pointer fires for the lean default surface, however it was selected', () => {
+    expect(leanDefaultActive({})).toBe(true);                       // bare `openlore mcp`
+    expect(leanDefaultActive({ preset: 'navigation' })).toBe(true); // how install wires it
+  });
+
+  it('the pointer is suppressed on every other (deliberately chosen) surface', () => {
+    expect(leanDefaultActive({ minimal: true })).toBe(false);
+    expect(leanDefaultActive({ preset: 'memory' })).toBe(false);
+    expect(leanDefaultActive({ preset: 'verify' })).toBe(false);
+    expect(leanDefaultActive({ preset: 'federation' })).toBe(false);
+    expect(leanDefaultActive({ preset: 'full' })).toBe(false);
+    expect(leanDefaultActive({ preset: 'all' })).toBe(false);
+    expect(leanDefaultActive({ allTools: true })).toBe(false);
+  });
+
+  it('the pointer names how to opt into breadth, every option in copy-pasteable --preset form', () => {
+    expect(BREADTH_POINTER).toMatch(/--preset full/);
+    expect(BREADTH_POINTER).toMatch(/--preset memory/);
+    expect(BREADTH_POINTER).toMatch(/--preset minimal/); // governance, not the bare --minimal flag
+    expect(BREADTH_POINTER).toMatch(/openlore install --preset/);
+    // Every `--preset <name>` the pointer advertises must resolve to a real surface.
+    for (const m of BREADTH_POINTER.matchAll(/--preset (\w+)/g)) {
+      expect(() => selectActiveTools(TOOL_DEFINITIONS, { preset: m[1] })).not.toThrow();
+    }
+  });
+
+  it('the pointer adds no tool schemas — the lean default surface size is unchanged by it', () => {
+    // The pointer rides the instructions channel; the active tool set is exactly
+    // the navigation preset regardless.
+    expect(selectActiveTools(TOOL_DEFINITIONS, {}).map(t => t.name)).toEqual(
+      selectActiveTools(TOOL_DEFINITIONS, { preset: 'navigation' }).map(t => t.name),
+    );
   });
 });
 
@@ -240,8 +331,19 @@ describe('tools/list payload budget (spec-28)', () => {
   // Bumped 63_000 → 64_000 when the `change_impact_certificate` tool was added to the full surface
   // (spec: add-change-impact-certificate) — a read-only change-impact certificate tool. It joins
   // the opt-in federation preset only; it stays OUT of minimal/navigation/memory. Conscious decision.
+  // change: default-to-lean-tool-surface — the full surface is now opt-in, so the
+  // full-budget assertion uses the explicit full selector (no-selector `{}` resolves
+  // to the lean navigation default and is asserted separately below).
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({})).toBeLessThan(64_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(64_000);
+  });
+
+  it('the lean DEFAULT surface (no selector) is the lean navigation payload, not the full one', () => {
+    // No selector now pays the navigation budget, not the ~46 KB full prefix —
+    // this is the per-session byte win the change ships.
+    expect(payloadBytes({})).toBe(payloadBytes({ preset: 'navigation' }));
+    expect(payloadBytes({})).toBeLessThan(13_300);
+    expect(payloadBytes({})).toBeLessThan(payloadBytes({ preset: 'full' }));
   });
 
   it('navigation preset stays lean (the low-overhead surface that wins the benchmark)', () => {

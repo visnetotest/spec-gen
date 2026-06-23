@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Command } from 'commander';
 import { logger } from '../../utils/logger.js';
+import { FULL_PRESET, FULL_PRESET_ALIAS } from '../../constants.js';
 import { detect, ALL_AGENTS, type AgentName, type DetectedSurface } from './detect.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './adapters/types.js';
 import { agentsMdAdapter } from './adapters/agents-md.js';
@@ -57,6 +58,8 @@ export interface InstallOptions {
   agents?: AgentName[];
   /** MCP tool preset wired into the registered server (validated against TOOL_PRESETS). */
   preset?: string;
+  /** Convenience full-surface selector (alias of `--preset full`), matching `openlore mcp --all-tools`. */
+  allTools?: boolean;
   dryRun?: boolean;
   force?: boolean;
   uninstall?: boolean;
@@ -146,13 +149,26 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   const cwd = opts.cwd ?? process.cwd();
   const template = await loadTemplate();
 
+  // Resolve the effective preset wired into the MCP server. `--all-tools` is the
+  // convenience full-surface selector (matching `openlore mcp --all-tools`), and
+  // the `all` alias is normalized to the canonical `full` so the wired arg in
+  // .mcp.json is always the documented name — never two strings for one surface
+  // (change: default-to-lean-tool-surface).
+  const effectivePreset = opts.allTools
+    ? FULL_PRESET
+    : opts.preset === FULL_PRESET_ALIAS
+      ? FULL_PRESET
+      : opts.preset;
+
   // Validate the preset (only when given) against the real registry, without
-  // pulling the heavy MCP module onto the common path.
-  if (opts.preset) {
+  // pulling the heavy MCP module onto the common path. `full` is the opt-in
+  // full-surface selector and is not an entry in TOOL_PRESETS (the full surface
+  // is the registry itself), so accept it explicitly.
+  if (effectivePreset && effectivePreset !== FULL_PRESET) {
     const { TOOL_PRESETS } = await import('../commands/mcp.js');
-    if (!TOOL_PRESETS[opts.preset]) {
+    if (!TOOL_PRESETS[effectivePreset]) {
       logger.error(
-        `Unknown --preset "${opts.preset}". Known presets: ${Object.keys(TOOL_PRESETS).join(', ')}.`
+        `Unknown --preset "${opts.preset}". Known presets: ${[...Object.keys(TOOL_PRESETS), FULL_PRESET].join(', ')}.`
       );
       return 2;
     }
@@ -193,7 +209,7 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
       instructionTemplate: template,
       dryRun: !!opts.dryRun,
       force: !!opts.force,
-      preset: opts.preset,
+      preset: effectivePreset,
     };
     const result: ApplyResult = opts.uninstall
       ? await adapter.uninstall(ctx)
@@ -270,7 +286,8 @@ export const installCommand = new Command('install')
     'to call orient(), then build the index so orient works on your first session.'
   )
   .option('--agent <name>', 'Install only for a specific surface (claude-code, cursor, cline, continue, agents-md)')
-  .option('--preset <name>', 'Wire the registered MCP server to a tool preset (minimal, navigation, memory) instead of the full surface')
+  .option('--preset <name>', 'Wire the registered MCP server to a tool preset (minimal, navigation, memory, verify, federation, or full). Default (no preset) wires the lean navigation surface; pass "full" to wire all 62 tools (the prior default).')
+  .option('--all-tools', 'Wire the full surface (alias of --preset full). Matches `openlore mcp --all-tools`.')
   .option('--dry-run', 'Print the planned changes without writing any files', false)
   .option('--force', 'Overwrite OpenLore-managed blocks even if hand-edited', false)
   .option('--uninstall', 'Remove OpenLore-managed blocks and entries', false)

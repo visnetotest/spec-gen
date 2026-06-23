@@ -40,7 +40,10 @@ beforeAll(async () => {
     console.warn('spec-12 conformance: SKIP — needs `npm run build` + an analyzed repo (.openlore/analysis).');
     return;
   }
-  transport = new StdioClientTransport({ command: 'node', args: [MCP_BIN, 'mcp'], cwd: REPO_ROOT });
+  // change: default-to-lean-tool-surface — no-preset is now the LEAN navigation
+  // surface, so this full-surface conformance run opts into `--preset full`
+  // explicitly (the lean default + breadth pointer are asserted separately below).
+  transport = new StdioClientTransport({ command: 'node', args: [MCP_BIN, 'mcp', '--preset', 'full'], cwd: REPO_ROOT });
   client = new Client({ name: 'spec-12-conformance', version: '1.0.0' });
   // connect() performs the initialize handshake and (per the SDK) rejects if the
   // server answers with a protocolVersion the client does not support — so a
@@ -92,7 +95,7 @@ describe('spec-12 MCP protocol conformance (via SDK Client over stdio)', () => {
     // Every advertised tool is a real, known tool.
     for (const t of res.tools) expect(TOOL_NAMES.has(t.name), t.name).toBe(true);
     // Bidirectional: every DEFINED tool is actually advertised on the wire. The
-    // conformance server runs the full surface (no --preset), so the listing must
+    // conformance server runs the full surface (`--preset full`), so the listing must
     // equal TOOL_DEFINITIONS — this catches a tool registered in TOOL_DEFINITIONS but
     // never exposed (which the advertised⊆known check above would silently miss).
     const advertised = new Set(res.tools.map((t) => t.name));
@@ -132,4 +135,30 @@ describe('spec-12 MCP protocol conformance (via SDK Client over stdio)', () => {
     const content = res.content as Array<{ type: string; text?: string }>;
     expect(content[0]?.text).toMatch(/unknown tool/i);
   });
+});
+
+// change: default-to-lean-tool-surface — verify on the real wire that a bare
+// `openlore mcp` (no preset) serves the LEAN default surface and advertises the
+// breadth pointer via the initialize `instructions` channel, while the full
+// surface does not. A separate short-lived client so the shared full-surface
+// client above is untouched.
+describe('spec — lean default surface + breadth pointer (via SDK Client over stdio)', () => {
+  it('a bare `openlore mcp` serves the navigation surface and advertises breadth once', async () => {
+    if (!existsSync(MCP_BIN) || !existsSync(CACHE_FILE)) return;
+    const t = new StdioClientTransport({ command: 'node', args: [MCP_BIN, 'mcp'], cwd: REPO_ROOT });
+    const c = new Client({ name: 'lean-default-probe', version: '1.0.0' });
+    await c.connect(t);
+    try {
+      const tools = (await c.listTools()).tools;
+      expect(tools.length).toBeLessThan(TOOL_DEFINITIONS.length); // strictly leaner than full
+      expect(tools.some((x) => x.name === 'orient')).toBe(true);
+      expect(tools.some((x) => x.name === 'get_subgraph')).toBe(true);
+      // The breadth pointer rides the initialize `instructions` channel, no tool schema.
+      const instructions = c.getInstructions();
+      expect(typeof instructions).toBe('string');
+      expect(instructions).toMatch(/--preset full/);
+    } finally {
+      await c.close();
+    }
+  }, 60_000);
 });

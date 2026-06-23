@@ -199,6 +199,20 @@ export const MCP_TOOL_TIMEOUT_OVERRIDES: Record<string, number> = {
 /** Byte budget for a single MCP tool result before deterministic truncation. */
 export const MCP_TOOL_MAX_BYTES = 256 * 1024;
 
+// ── MCP tool-surface defaults (change: default-to-lean-tool-surface) ─────────────
+/**
+ * The lean default MCP surface wired when no `--preset` is given: the Spec 14
+ * benchmark-winning `navigation` preset (graph-traversal core). Exposing the full
+ * registry by default contradicts both that result and the mcp-quality
+ * minimize-tool-surface rule, so breadth is opt-in. Defined here — not in mcp.ts —
+ * so the lightweight install adapters can name the default without importing the
+ * heavy MCP module. Single source of truth for the preset name.
+ */
+export const LEAN_DEFAULT_PRESET = 'navigation';
+/** Explicit selector that restores the full `TOOL_DEFINITIONS` surface (and its alias). */
+export const FULL_PRESET = 'full';
+export const FULL_PRESET_ALIAS = 'all';
+
 /** Maximum search query length (characters) */
 export const MAX_QUERY_LENGTH = 1_000;
 

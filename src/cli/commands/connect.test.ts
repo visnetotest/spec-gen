@@ -38,11 +38,32 @@ describe('install --preset (PresetAwareConnect)', () => {
     ]);
   });
 
-  it('registers the plain server (full surface) when no preset is given', async () => {
+  // change: default-to-lean-tool-surface — no preset now wires the lean navigation
+  // default surface explicitly, not the bare (formerly full) server.
+  it('wires the lean navigation default when no preset is given', async () => {
     await runInstall({ agent: 'claude-code', analyze: false, cwd: dir });
     const mcp = await readJson('.mcp.json');
     expect((mcp.mcpServers as Record<string, { args: string[] }>).openlore.args).toEqual([
-      '--yes', 'openlore', 'mcp',
+      '--yes', 'openlore', 'mcp', '--preset', 'navigation',
+    ]);
+  });
+
+  it('wires the full surface on explicit --preset full', async () => {
+    await runInstall({ agent: 'claude-code', preset: 'full', analyze: false, cwd: dir });
+    const mcp = await readJson('.mcp.json');
+    expect((mcp.mcpServers as Record<string, { args: string[] }>).openlore.args).toEqual([
+      '--yes', 'openlore', 'mcp', '--preset', 'full',
+    ]);
+  });
+
+  // change: default-to-lean-tool-surface — connect accepts --all-tools (alias of
+  // --preset full), matching `openlore mcp --all-tools`; it was previously an
+  // unknown-option error on connect/install while mcp accepted it.
+  it('wires the full surface on --all-tools (alias of --preset full)', async () => {
+    await runInstall({ agent: 'claude-code', allTools: true, analyze: false, cwd: dir });
+    const mcp = await readJson('.mcp.json');
+    expect((mcp.mcpServers as Record<string, { args: string[] }>).openlore.args).toEqual([
+      '--yes', 'openlore', 'mcp', '--preset', 'full',
     ]);
   });
 

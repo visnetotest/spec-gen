@@ -47,7 +47,7 @@ import type { PanicResponseMode } from '../../types/index.js';
 import { readPanicState, mutatePanicStateLocked, getPanicSignalText } from '../../core/services/mcp-handlers/panic-response.js';
 import { emit } from '../../core/services/telemetry.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
-import { MCP_TOOL_MAX_BYTES } from '../../constants.js';
+import { MCP_TOOL_MAX_BYTES, LEAN_DEFAULT_PRESET, FULL_PRESET, FULL_PRESET_ALIAS } from '../../constants.js';
 import {
   handleGetCallGraph,
   handleGetSubgraph,
@@ -1778,20 +1778,43 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
 };
 
 /**
- * Resolve which tools an MCP session exposes (Spec 14). `--preset` wins over the
- * legacy `--minimal` (= the 'minimal' preset); no selector = all tools. Throws on
- * an unknown preset so a typo fails loudly instead of silently exposing all 62.
- * Pure + exported for unit testing.
+ * Resolve a tool-selector option set to its canonical preset name (change:
+ * default-to-lean-tool-surface). Precedence: `--all-tools`/`--preset full`/`all`
+ * → `full`; `--preset <name>` → that name; legacy `--minimal` → `minimal`; no
+ * selector → the lean default (`navigation`). Pure; the single source of truth
+ * both `selectActiveTools` and `leanDefaultActive` resolve through, so the active
+ * surface and the breadth-pointer decision can never disagree.
+ */
+export function resolvePresetName(opts: { minimal?: boolean; preset?: string; allTools?: boolean }): string {
+  if (opts.allTools) return FULL_PRESET;
+  if (opts.preset) return opts.preset === FULL_PRESET_ALIAS ? FULL_PRESET : opts.preset;
+  if (opts.minimal) return 'minimal';
+  return LEAN_DEFAULT_PRESET;
+}
+
+/**
+ * Resolve which tools an MCP session exposes (Spec 14; change:
+ * default-to-lean-tool-surface). `--all-tools`/`--preset full` → the full
+ * registry; `--preset <name>` → that preset; legacy `--minimal` → the 'minimal'
+ * preset; **no selector → the lean default surface** (the benchmark-winning
+ * `navigation` preset), NOT the full registry. Breadth is opt-in because schemas
+ * for tools the agent never calls are pure per-request overhead (mcp-quality:
+ * MinimizeToolSurface). An unknown preset throws so a typo fails loudly instead of
+ * silently exposing all tools. Pure + exported for unit testing.
  */
 export function selectActiveTools<T extends { name: string }>(
   allTools: T[],
-  opts: { minimal?: boolean; preset?: string },
+  opts: { minimal?: boolean; preset?: string; allTools?: boolean },
 ): T[] {
-  const presetName = opts.preset ?? (opts.minimal ? 'minimal' : undefined);
-  if (!presetName) return allTools;
+  const presetName = resolvePresetName(opts);
+  // The full surface is the registry itself — no Set to maintain, so adding a
+  // tool never needs a `full` membership edit (and it can't drift out of sync).
+  if (presetName === FULL_PRESET) return allTools;
   const preset = TOOL_PRESETS[presetName];
   if (!preset) {
-    throw new Error(`Unknown --preset "${presetName}". Known presets: ${Object.keys(TOOL_PRESETS).join(', ')}.`);
+    // Echo the raw user input (untrimmed/cased) so a near-miss like "Full" or
+    // "full " is legible; the caller catches this and exits cleanly (no stack).
+    throw new Error(`Unknown --preset "${opts.preset ?? presetName}". Known presets: ${[...Object.keys(TOOL_PRESETS), FULL_PRESET].join(', ')}.`);
   }
   return allTools.filter(t => preset.has(t.name));
 }
@@ -1806,6 +1829,36 @@ interface McpServerOptions {
   watchNoEmbed?: boolean;
   minimal?: boolean;
   preset?: string;
+  allTools?: boolean;
+}
+
+/**
+ * One-line breadth pointer emitted via the MCP `instructions` channel (server
+ * info, NOT a tool schema) when the lean default surface is active, so an agent
+ * that needs governance/memory/verify/federation tools learns the opt-in exists
+ * rather than concluding the capability is absent. Every opt-in is named in the
+ * `--preset <name>` form so it is copy-pasteable into both `openlore mcp` and
+ * `openlore install`. Adds zero tool schemas (change: default-to-lean-tool-surface).
+ */
+export const BREADTH_POINTER =
+  'OpenLore is running its lean default tool surface (the navigation core). ' +
+  'More tools are available behind named presets — governance (`--preset minimal`), ' +
+  'memory (`--preset memory`), claim verification (`--preset verify`), ' +
+  'multi-repo federation (`--preset federation`), or the full surface ' +
+  '(`--preset full`). Re-wire with `openlore install --preset <name>`.';
+
+/**
+ * True when the active surface IS the lean default (the `navigation` preset) —
+ * whether reached by no selector at all OR by an explicit `--preset navigation`
+ * (which is how `openlore install` wires the default). The server cannot tell the
+ * two apart and shouldn't: an agent on the lean surface should learn breadth
+ * exists regardless of how it got there. Any OTHER surface (`minimal`, `memory`,
+ * `verify`, `federation`, or `full`) is a deliberate different choice, so the
+ * pointer would be noise and is suppressed. Resolves through resolvePresetName so
+ * it can never disagree with the active tool set. Exported + pure for unit testing.
+ */
+export function leanDefaultActive(opts: { minimal?: boolean; preset?: string; allTools?: boolean }): boolean {
+  return resolvePresetName(opts) === LEAN_DEFAULT_PRESET;
 }
 
 async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
@@ -1824,7 +1877,22 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   console.warn = toStderr;
   console.debug = toStderr;
 
-  const activeTools = selectActiveTools(TOOL_DEFINITIONS, { minimal: options.minimal, preset: options.preset });
+  const selectorOpts = { minimal: options.minimal, preset: options.preset, allTools: options.allTools };
+  // A bad `--preset` must fail like a CLI usage error (clean message, exit 2),
+  // not an uncaught throw that dumps a Node stack trace — mirroring how
+  // `openlore install` validates its preset (install/index.ts). stdout is the
+  // JSON-RPC channel, so the message goes to stderr.
+  let activeTools: typeof TOOL_DEFINITIONS;
+  try {
+    activeTools = selectActiveTools(TOOL_DEFINITIONS, selectorOpts);
+  } catch (e) {
+    process.stderr.write(`${(e as Error).message}\n`);
+    process.exit(2);
+  }
+  // Advertise breadth once via server instructions only when the active surface
+  // IS the lean default (navigation) — whether reached by no selector or an
+  // explicit `--preset navigation` (how install wires it). This adds no tool schemas.
+  const instructions = leanDefaultActive(selectorOpts) ? BREADTH_POINTER : undefined;
 
   // Report the real package version in the MCP initialize handshake rather
   // than a stale hardcoded string.
@@ -1890,6 +1958,11 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       // static per session, so we don't advertise a capability we don't implement.
       capabilities: { tools: {} },
       serverInfo: { name: 'openlore', version: _pkgVersion },
+      // Breadth pointer on the lean default surface only (change:
+      // default-to-lean-tool-surface). This custom initialize handler overrides
+      // the SDK default, so the pointer must be attached here, not via the Server
+      // constructor's `instructions` option (which this handler shadows).
+      ...(instructions ? { instructions } : {}),
     };
   });
 
@@ -2167,5 +2240,6 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', 'Expose a named tool preset instead of all 62. "minimal" = orient+search+governance; "navigation" = graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) for low-overhead code navigation; "memory" = orient+remember+recall; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + the four cross-repo conclusion tools. Takes precedence over --minimal.')
+  .option('--preset <name>', 'Expose a named tool preset. Default (no preset) is the lean "navigation" surface — the benchmark-winning graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) — NOT the full registry. "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + the four cross-repo conclusion tools; "full" = all 62 tools (the prior default). Takes precedence over --minimal.')
+  .option('--all-tools', 'Expose the full surface — all 62 tools (alias for --preset full). Opt-in breadth; the lean navigation default is recommended.')
   .action((options: McpServerOptions) => startMcpServer(options));

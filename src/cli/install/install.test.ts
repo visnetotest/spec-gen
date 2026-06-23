@@ -66,10 +66,12 @@ describe('openlore install (end-to-end)', () => {
     expect(code).toBe(0);
 
     // MCP server goes in .mcp.json — the file Claude Code actually reads.
+    // change: default-to-lean-tool-surface — a default install (no --preset) now
+    // wires the lean navigation surface explicitly, not the bare full surface.
     const mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
     expect(mcp.mcpServers.openlore).toEqual({
       command: 'npx',
-      args: ['--yes', 'openlore', 'mcp'],
+      args: ['--yes', 'openlore', 'mcp', '--preset', 'navigation'],
     });
     expect(mcp._openlore.managed).toBe(true);
 
@@ -99,6 +101,66 @@ describe('openlore install (end-to-end)', () => {
     expect(settings.hooks.SessionStart[0]._openlore).toBe(true);
     const mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
     expect(mcp.mcpServers.openlore.command).toBe('npx');
+  });
+
+  // change: default-to-lean-tool-surface — install wires the lean default by default
+  // and the full surface only on explicit --preset full.
+  it('default install wires --preset navigation; --preset full wires the full surface', async () => {
+    await writeFile(join(dir, 'CLAUDE.md'), '# project\n');
+
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false });
+    let mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
+    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'navigation']);
+
+    // Re-install with --preset full restores the prior all-tools surface (idempotent merge).
+    const code = await runInstall({ cwd: dir, agent: 'claude-code', preset: 'full', analyze: false, force: true });
+    expect(code).toBe(0);
+    mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
+    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'full']);
+  });
+
+  it('rejects an unknown --preset but accepts the full-surface selectors', async () => {
+    await writeFile(join(dir, 'CLAUDE.md'), '# project\n');
+    expect(await runInstall({ cwd: dir, agent: 'claude-code', preset: 'nope', analyze: false })).toBe(2);
+    expect(await runInstall({ cwd: dir, agent: 'claude-code', preset: 'full', analyze: false, force: true })).toBe(0);
+    expect(await runInstall({ cwd: dir, agent: 'claude-code', preset: 'navigation', analyze: false, force: true })).toBe(0);
+  });
+
+  // change: default-to-lean-tool-surface — --all-tools is the convenience full
+  // selector on install/connect (matching `openlore mcp --all-tools`), and the
+  // `all` alias normalizes to the canonical `full` so the wired arg is never two
+  // strings for one surface.
+  it('--all-tools and --preset all both wire the canonical --preset full', async () => {
+    await writeFile(join(dir, 'CLAUDE.md'), '# project\n');
+    await runInstall({ cwd: dir, agent: 'claude-code', allTools: true, analyze: false });
+    let mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
+    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'full']);
+
+    await runInstall({ cwd: dir, agent: 'claude-code', preset: 'all', analyze: false, force: true });
+    mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
+    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'full']); // 'all' normalized
+  });
+
+  // change: default-to-lean-tool-surface — REGRESSION: the cursor adapter
+  // early-returned when its .mdc was unchanged, skipping the .cursor/mcp.json
+  // registration and FREEZING the wired preset, so a re-install with a different
+  // --preset was silently ignored. A preset switch must now take effect on cursor.
+  it('cursor: switching --preset on re-install updates .cursor/mcp.json (not frozen by an unchanged .mdc)', async () => {
+    const mcpPath = join(dir, '.cursor/mcp.json');
+    await runInstall({ cwd: dir, agent: 'cursor', analyze: false });
+    let mcp = JSON.parse(await readFile(mcpPath, 'utf8'));
+    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'navigation']);
+
+    // The .mdc body is preset-independent → unchanged on this re-install. The MCP
+    // entry must STILL switch to full (the bug left it stale at navigation).
+    await runInstall({ cwd: dir, agent: 'cursor', preset: 'full', analyze: false });
+    mcp = JSON.parse(await readFile(mcpPath, 'utf8'));
+    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'full']);
+
+    // …and back to the lean default.
+    await runInstall({ cwd: dir, agent: 'cursor', analyze: false });
+    mcp = JSON.parse(await readFile(mcpPath, 'utf8'));
+    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'navigation']);
   });
 
   it('re-running install is a no-op (no writes, exit 0)', async () => {
@@ -248,9 +310,10 @@ describe('openlore install (end-to-end)', () => {
     const code = await runInstall({ cwd: dir, agent: 'cursor', analyze: false });
     expect(code).toBe(0);
     const mcp = JSON.parse(await readFile(join(dir, '.cursor/mcp.json'), 'utf8'));
+    // change: default-to-lean-tool-surface — default wires the lean navigation surface.
     expect(mcp.mcpServers.openlore).toEqual({
       command: 'npx',
-      args: ['--yes', 'openlore', 'mcp'],
+      args: ['--yes', 'openlore', 'mcp', '--preset', 'navigation'],
     });
     expect(mcp._openlore.managed).toBe(true);
 
@@ -273,6 +336,26 @@ describe('openlore install (end-to-end)', () => {
     const after = JSON.parse(await readFile(join(dir, '.cursor/mcp.json'), 'utf8'));
     expect(after.mcpServers.other).toEqual({ command: 'foo' });
     expect(after.mcpServers.openlore).toBeUndefined();
+  });
+
+  // change: default-to-lean-tool-surface (adversarial-review hardening) — a hostile
+  // `.mcp.json` whose `mcpServers` is a non-object (string/number/null/array) used to
+  // crash install: isJsonObjectText is true for the top-level object, so the
+  // format-preserving editor ran `modify([...,'mcpServers','openlore'])` and threw on
+  // the non-container parent, half-writing the install. Now it falls back to a clean
+  // merged write (the in-memory merge already coerced the bad value).
+  it.each([
+    ['string', '{"mcpServers":"oops"}'],
+    ['number', '{"mcpServers":123}'],
+    ['null', '{"mcpServers":null}'],
+    ['array', '{"mcpServers":["x"]}'],
+  ])('install does not crash when existing .mcp.json has a %s mcpServers value', async (_label, body) => {
+    await writeFile(join(dir, 'CLAUDE.md'), '# project\n');
+    await writeFile(join(dir, '.mcp.json'), body);
+    const code = await runInstall({ cwd: dir, agent: 'claude-code', analyze: false });
+    expect(code).toBe(0);
+    const mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
+    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'navigation']);
   });
 
   it('auto-detects multiple surfaces when no --agent passed', async () => {

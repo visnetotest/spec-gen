@@ -12,15 +12,23 @@ import { fingerprint } from '../block.js';
 import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-managed.js';
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
+import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
 
 const RULES_FILE = '.cursorrules';
 const MDC_FILE = '.cursor/rules/openlore.mdc';
 const MCP_FILE = '.cursor/mcp.json';
 
+/**
+ * MCP server registration. Wires `openlore mcp --preset <name>`: the caller's
+ * preset when given, else the lean default surface (the benchmark-winning
+ * navigation core). The preset is always emitted explicitly so the wired surface
+ * is visible in the config and never relies on the bare-command default
+ * (change: default-to-lean-tool-surface).
+ */
 function mcpEntry(preset?: string): { command: string; args: string[] } {
   return {
     command: 'npx',
-    args: ['--yes', 'openlore', 'mcp', ...(preset ? ['--preset', preset] : [])],
+    args: ['--yes', 'openlore', 'mcp', '--preset', preset ?? LEAN_DEFAULT_PRESET],
   };
 }
 
@@ -68,20 +76,18 @@ export const cursorAdapter: Adapter = {
       existing = null;
     }
 
-    if (existing === desired) {
-      rulesResult.changes.push({
-        path: mdcPath,
-        kind: 'noop',
-        summary: `${MDC_FILE}: already up to date`,
-      });
-      return rulesResult;
-    }
-
+    // The .mdc body is independent of --preset, so it is often unchanged on a
+    // re-install that only switches the tool preset. Earlier this short-circuited
+    // with `return`, which SKIPPED the .cursor/mcp.json registration below and
+    // froze the wired preset (a re-install with a new --preset was silently
+    // ignored). Record the .mdc outcome but always fall through to MCP wiring so a
+    // preset switch takes effect (change: default-to-lean-tool-surface).
+    const mdcUnchanged = existing === desired;
     const isOurs =
       existing === null ||
       /^openlore-fingerprint:/m.test(existing);
 
-    if (existing !== null && !isOurs && !ctx.force) {
+    if (!mdcUnchanged && existing !== null && !isOurs && !ctx.force) {
       rulesResult.changes.push({
         path: mdcPath,
         kind: 'noop',
@@ -92,20 +98,28 @@ export const cursorAdapter: Adapter = {
       return rulesResult;
     }
 
-    const change: PlannedChange = {
-      path: mdcPath,
-      kind: existing === null ? 'create' : 'update',
-      summary: existing === null ? `create ${MDC_FILE}` : `update ${MDC_FILE}`,
-      preview:
-        existing === null
-          ? previewCreate(mdcPath, desired)
-          : previewDiff(mdcPath, existing, desired),
-    };
-    if (!ctx.dryRun) {
-      await mkdir(dirname(mdcPath), { recursive: true });
-      await writeFile(mdcPath, desired, 'utf8');
+    if (mdcUnchanged) {
+      rulesResult.changes.push({
+        path: mdcPath,
+        kind: 'noop',
+        summary: `${MDC_FILE}: already up to date`,
+      });
+    } else {
+      const change: PlannedChange = {
+        path: mdcPath,
+        kind: existing === null ? 'create' : 'update',
+        summary: existing === null ? `create ${MDC_FILE}` : `update ${MDC_FILE}`,
+        preview:
+          existing === null
+            ? previewCreate(mdcPath, desired)
+            : previewDiff(mdcPath, existing, desired),
+      };
+      if (!ctx.dryRun) {
+        await mkdir(dirname(mdcPath), { recursive: true });
+        await writeFile(mdcPath, desired, 'utf8');
+      }
+      rulesResult.changes.push(change);
     }
-    rulesResult.changes.push(change);
 
     // MCP server registration via .cursor/mcp.json (standard Cursor path).
     const mcpPath = join(ctx.root, MCP_FILE);
