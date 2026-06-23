@@ -74,6 +74,24 @@ export function buildRetirementGraph(decisions: readonly PendingDecision[]): Ret
   return { supersededBy };
 }
 
+/** A single stale reference: the retired decision a text cites and its active superseder. */
+export interface StaleRef {
+  retired: string;
+  supersededBy: string;
+}
+
+/**
+ * The stale references in a piece of text against a retirement graph — the reusable
+ * core behind `recall`'s freshness signal. Returns one entry per distinct retired
+ * decision the text cites (excluding the `exempt` supersedes edge). Empty when the
+ * graph is empty or nothing is cited. Pure, no I/O.
+ */
+export function staleRefsInText(text: string, graph: RetirementGraph, exempt?: string): StaleRef[] {
+  if (graph.supersededBy.size === 0) return [];
+  const retired = new Set(graph.supersededBy.keys());
+  return retiredIdsIn(text, retired, exempt).map((id) => ({ retired: id, supersededBy: graph.supersededBy.get(id)! }));
+}
+
 /** The retired-decision ids a text references, excluding `exempt` (the supersedes edge). */
 function retiredIdsIn(text: string, retired: ReadonlySet<string>, exempt?: string): string[] {
   const found = new Set<string>();
