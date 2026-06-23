@@ -102,6 +102,12 @@ export function makeFreshnessView(
       const content = readFileCached(rootPath, filePath, cache);
       return content === null ? undefined : hashSpan(content);
     },
+    // A node lies in a stale region when its file was marked stale by a
+    // budget-exceeded incremental update (fix-transitive-incremental-staleness).
+    inStaleRegion: (nodeId: string): boolean => {
+      const node = store.getNode(nodeId);
+      return node ? store.isFileStale(node.filePath) : false;
+    },
     renameOf,
   };
 }

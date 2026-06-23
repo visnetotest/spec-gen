@@ -44,6 +44,7 @@ import {
   WATCH_BULK_THRESHOLD,
   WATCH_EMBED_FILE_CEILING,
   WATCH_VCS_SETTLE_MS,
+  INCREMENTAL_CLOSURE_BUDGET,
 } from '../../constants.js';
 
 // Languages the watcher incrementally re-graphs on edit. MUST include every
@@ -56,8 +57,13 @@ const CALL_GRAPH_LANGS = new Set([
   'Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Java', 'C++', 'Swift',
   'C', 'C#', 'PHP', 'Kotlin',
 ]);
-/** Max callerFiles to re-parse in a single watch event (guards against high-fanIn renames). */
-const CALLER_REPARSE_LIMIT = 10;
+/**
+ * Per-changed-file work budget for the incremental closure: how many OTHER files
+ * one save may re-parse before the watcher stops and marks the remainder stale.
+ * Replaces the old fixed depth-1 `CALLER_REPARSE_LIMIT` of 10 — see
+ * INCREMENTAL_CLOSURE_BUDGET (change: fix-transitive-incremental-staleness).
+ */
+const DEFAULT_CLOSURE_BUDGET = INCREMENTAL_CLOSURE_BUDGET;
 
 /**
  * Session-global latch: a SCHEMA_VERSION bump wipes the graph store, and an
@@ -85,6 +91,12 @@ export interface McpWatcherOptions {
   embed?: boolean;
   /** Above this many watched source files, auto-degrade to signatures-only */
   embedFileCeiling?: number;
+  /**
+   * Per-changed-file closure work budget (default DEFAULT_CLOSURE_BUDGET). The
+   * max number of other files one save re-resolves before the rest are marked
+   * explicitly stale. Exposed mainly so tests can force the budget-exceeded path.
+   */
+  closureBudget?: number;
   /** Extra glob patterns to ignore in addition to defaults */
   ignore?: string[];
   /**
@@ -176,6 +188,7 @@ export class McpWatcher {
   private readonly maxBatchMs: number;
   private readonly bulkThreshold: number;
   private readonly embedFileCeiling: number;
+  private readonly closureBudget: number;
   private readonly extraIgnore: string[];
   private readonly debug: boolean;
   private readonly onBatchFlushed?: (changedAbsPaths: string[]) => void;
@@ -209,6 +222,7 @@ export class McpWatcher {
     this.maxBatchMs  = options.maxBatchMs ?? WATCH_MAX_BATCH_MS;
     this.bulkThreshold = options.bulkThreshold ?? WATCH_BULK_THRESHOLD;
     this.embedFileCeiling = options.embedFileCeiling ?? WATCH_EMBED_FILE_CEILING;
+    this.closureBudget = options.closureBudget ?? DEFAULT_CLOSURE_BUDGET;
     this.embed       = options.embed ?? true;
     this.extraIgnore = options.ignore ?? [];
     this.debug       = !!process.env.OPENLORE_WATCH_DEBUG;
@@ -449,21 +463,55 @@ export class McpWatcher {
           const newHash = createHash('sha256').update(f.content).digest('hex');
           if (store.getFileHash(f.rel) === newHash) continue; // no-op autosave
 
-          // Reverse lookup BEFORE delete so we know which files call into this one.
-          const callerFiles = store.getCallerFiles(f.rel);
+          // Symbol names present BEFORE the edit — diffed against the re-parsed
+          // result to find names this edit ADDS (which may now bind prior
+          // `external::` call sites in non-caller files).
+          const oldNames = new Set(store.getNodesForFile(f.rel).map((n) => n.name));
           // Re-parse BEFORE mutating DB — graph stays readable (old state) during
           // parse. Seed resolution with all known nodes so re-parsed callers'
           // cross-file calls don't degrade to `external::`.
           const resolutionNodes = store.getAllInternalNodes();
-          const { edges: newEdges, nodes: newNodes, cfgs: newCfgs } =
-            await buildGraphSubset(f.rel, f.content, callerFiles, this.rootPath, resolutionNodes);
+
+          // ── Change-driven reverse-dependency closure ───────────────────────────
+          // Converge with `analyze --force`, or mark the remainder explicitly
+          // stale (fix-transitive-incremental-staleness). Direct callers first —
+          // the files whose edges point INTO this one — bounded by the work budget.
+          const directCallers = store.getCallerFiles(f.rel).filter((cf) => cf !== f.rel);
+          let recompute = directCallers.slice(0, this.closureBudget);
+          let dropped = directCallers.slice(this.closureBudget);
+
+          // Re-parse the changed file + the callers we can afford, as ONE build so
+          // cross-file calls resolve against each other (not to `external::`).
+          let sub = await buildGraphSubset(f.rel, f.content, recompute, this.rootPath, resolutionNodes);
+
+          // Class-P closure: a symbol this edit ADDED can newly bind a previously-
+          // `external` call site in a file that is NOT a caller of this one, so
+          // getCallerFiles misses it. Find those consumer files and, within the
+          // remaining budget, re-resolve them alongside the changed file so the
+          // new edge resolves internally — exactly as `analyze --force` would.
+          const addedNames = sub.nodes.map((n) => n.name).filter((n) => !oldNames.has(n));
+          if (addedNames.length > 0 && recompute.length < this.closureBudget) {
+            const extra = new Set<string>();
+            for (const name of addedNames) {
+              for (const cf of store.getExternalConsumerFiles(name)) {
+                if (cf !== f.rel && cf !== 'external' && !recompute.includes(cf)) extra.add(cf);
+              }
+            }
+            if (extra.size > 0) {
+              const room = this.closureBudget - recompute.length;
+              const extraList = [...extra];
+              recompute = [...recompute, ...extraList.slice(0, room)];
+              dropped = dropped.concat(extraList.slice(room));
+              sub = await buildGraphSubset(f.rel, f.content, recompute, this.rootPath, resolutionNodes);
+            }
+          }
+
+          const { edges: newEdges, nodes: newNodes, cfgs: newCfgs } = sub;
 
           // Atomic swap so concurrent MCP reads never see a torn graph.
           store.transaction(() => {
             store.deleteEdgesForFile(f.rel);
-            for (const cf of callerFiles.slice(0, CALLER_REPARSE_LIMIT)) {
-              store.deleteOutgoingEdgesForFile(cf);
-            }
+            for (const cf of recompute) store.deleteOutgoingEdgesForFile(cf);
             store.deleteNodesForFile(f.rel);
             // Recompute only THIS file's overlay records — intra-procedural, so
             // caller files' overlays stay valid (spec: add-intraprocedural-cfg-dataflow-overlay).
@@ -472,13 +520,20 @@ export class McpWatcher {
             store.insertEdges(newEdges);
             store.insertCfgs(newCfgs);
             store.setFileHash(f.rel, newHash);
+            // Self-heal: every file we just recomputed has converged, so it leaves
+            // the explicit stale region. Soundness fallback: files we could not
+            // afford to recompute are marked stale (over-approximate, never silent).
+            store.clearFilesStale([f.rel, ...recompute]);
+            if (dropped.length > 0) store.markFilesStale(dropped);
           });
 
           changedFiles.push({ rel: f.rel, content: f.content });
           for (const n of newNodes) changedNodes.push(n);
           if (this.debug) {
             process.stderr.write(
-              `[mcp-watcher] graph: ${f.rel} (+${newNodes.length} nodes, +${newEdges.length} edges, ${callerFiles.length} callers)\n`
+              `[mcp-watcher] graph: ${f.rel} (+${newNodes.length} nodes, +${newEdges.length} edges, ` +
+              `${recompute.length} re-resolved` +
+              `${dropped.length ? `, ${dropped.length} over budget → stale` : ''})\n`,
             );
           }
         }
@@ -980,9 +1035,10 @@ export class McpWatcher {
 // full rebuild drops — leaving the incremental graph divergent from the rebuilt one.
 
 /**
- * Re-parse changedFile + up to CALLER_REPARSE_LIMIT callerFiles.
- * Returns fresh edges (all files in subset) and nodes (changedFile only —
- * callerFiles nodes are untouched since their function signatures didn't change).
+ * Re-parse changedFile + the given callerFiles (the closure the caller already
+ * bounded by the work budget — fix-transitive-incremental-staleness). Returns
+ * fresh edges (all files in the subset) and nodes (changedFile only — callerFiles
+ * nodes are untouched since their function signatures didn't change).
  *
  * Exported for unit testing (locks the HTML-blanking node-refresh contract).
  */
@@ -1018,7 +1074,7 @@ export async function buildGraphSubset(
     { path: changedRel, content, language: lang },
   ];
 
-  for (const cf of callerFiles.slice(0, CALLER_REPARSE_LIMIT)) {
+  for (const cf of callerFiles) {
     const cfLang = detectLanguage(cf);
     if (!CALL_GRAPH_LANGS.has(cfLang)) continue;
     try {
