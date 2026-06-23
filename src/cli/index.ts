@@ -3,8 +3,9 @@
 /**
  * openlore CLI entry point
  *
- * Reverse-engineer OpenSpec specifications from existing codebases.
- * Philosophy: "Archaeology over Creativity" — Extract the truth of what code does.
+ * Persistent architectural memory for coding agents: deterministic, local
+ * structural context served through `orient` and an MCP server.
+ * Philosophy: "Archaeology over Creativity" — grounded in static analysis, not LLM guessing.
  */
 
 // Guard the Node version BEFORE anything heavy loads. This bootstrap import runs
@@ -89,9 +90,11 @@ program.hook('preAction', (thisCommand) => {
 program
   .name('openlore')
   .description(
-    'Reverse-engineer OpenSpec specifications from existing codebases.\n\n' +
-      'Philosophy: "Archaeology over Creativity" — We extract the truth of what\n' +
-      'code does, grounded in static analysis, not LLM hallucinations.'
+    'Persistent architectural memory for coding agents.\n\n' +
+      'OpenLore serves deterministic, local structural context — the functions, callers, ' +
+      'specs, and insertion points relevant to a task — through `orient` and an MCP server, ' +
+      'grounded in static analysis, not LLM guessing.\n\n' +
+      'New here? Run `openlore install` to wire your coding agent and build the index in one step.'
   )
   .version(version)
   .option('-q, --quiet', 'Minimal output (errors only)', false)
@@ -107,45 +110,32 @@ program
   .addHelpText(
     'after',
     `
-Workflow:
-  1. openlore init                    Detect project type, create config
-  2. openlore install                 Auto-configure agent surfaces to call orient()
-  3. openlore analyze                 Scan codebase, build dependency graph
-  4. openlore analyze --ai-configs    Generate context files (CLAUDE.md, .cursorrules…)
-  5. openlore setup                   Install workflow skills (Vibe, Cline, GSD)
-  6. openlore view                    Review visually the dependency graph
-  7. openlore generate                Create OpenSpec files using LLM
-  8. openlore verify                  Validate specs against source code
-  9. openlore drift                   Detect when code outpaces specs
-  10. openlore test                    Generate spec-driven tests or check coverage
-  11. openlore digest                  Plain-English summary of specs for human review
-  12. openlore preflight               CI staleness gate: fail PRs when the graph is out of date
-
-Quick start:
+Get started (one command, no API key):
   $ cd your-project
-  $ openlore init
-  $ openlore analyze --ai-configs
-  $ openlore setup
-  $ openlore generate
+  $ openlore install      Wire your coding agent + build the structural index
 
-Or run the full pipeline at once:
-  $ openlore run
+  Then just code. Your agent calls orient at the start of each task and gets the
+  relevant functions, callers, specs, and insertion points in one structural lookup.
+  Not sure it is wired? Run: openlore doctor    Does it pay off? openlore prove --estimate
 
-Troubleshoot your setup:
-  $ openlore doctor
+Core commands (no API key):
+  openlore install      One-command setup: wire agent surfaces + build the index
+  openlore orient       Relevant functions, callers, specs & insertion points for a task
+  openlore mcp          Run the MCP server your agent connects to (lean by default)
+  openlore analyze      (Re)build the structural index from static analysis
+  openlore prove        Measure OpenLore's token value on YOUR repo (--estimate = no API key)
+  openlore doctor       Check your setup and tell you exactly what to fix
 
-Output integrates with OpenSpec ecosystem:
-  openspec/
-  ├── config.yaml
-  ├── specs/
-  │   ├── overview/spec.md
-  │   ├── architecture/spec.md
-  │   └── {domain}/spec.md
-  └── decisions/              (with --adr flag)
-      ├── index.md
-      └── adr-NNNN-*.md
+Spec authoring (optional, needs an LLM API key):
+  openlore generate     Generate OpenSpec spec files from the analysis
+  openlore verify       Verify generated specs against the source
+  openlore drift        Detect when code outpaces specs
+  openlore test         Report spec test coverage
+  openlore digest       Plain-English summary of specs for human review
 
-Learn more: https://github.com/Fission-AI/OpenSpec
+Run 'openlore <command> --help' for the full options of any command.
+
+Learn more: https://github.com/clay-good/OpenLore
 `
   );
 
