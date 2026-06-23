@@ -47,14 +47,23 @@ runs:
       id: review
       shell: bash
       run: |
-        set -o pipefail
-        ARGS=(review --base "${{ inputs.base }}" --head "${{ inputs.head }}" --format markdown --out "$RUNNER_TEMP/openlore-review.md")
+        OUT="$RUNNER_TEMP/openlore-review.md"
+        ARGS=(review --base "${{ inputs.base }}" --head "${{ inputs.head }}" --format markdown --out "$OUT")
         if [ "${{ inputs.gate }}" = "true" ]; then ARGS+=(--hook); fi
-        # Advisory by default: never fail the job on the review itself unless gating is on.
-        if [ "${{ inputs.gate }}" = "true" ]; then
-          npx --yes openlore@${{ inputs.openlore-version }} "${ARGS[@]}"
-        else
-          npx --yes openlore@${{ inputs.openlore-version }} "${ARGS[@]}" || true
+        set +e
+        npx --yes openlore@${{ inputs.openlore-version }} "${ARGS[@]}"
+        RC=$?
+        set -e
+        # Distinguish a REAL gate (review ran and a blastRadius.block pattern fired:
+        # the briefing file was written AND exit was non-zero) from review being unable
+        # to run at all (a published openlore without `review`, an unreachable range, a
+        # crash → no briefing file). Only the former fails the job; the latter is advisory.
+        if [ "${{ inputs.gate }}" = "true" ] && [ "$RC" -ne 0 ] && [ -s "$OUT" ]; then
+          echo "openlore review: a configured blastRadius.block pattern fired — failing the job (gate mode)."
+          exit "$RC"
+        fi
+        if [ ! -s "$OUT" ]; then
+          echo "openlore review produced no briefing — the published 'openlore' (openlore-version: ${{ inputs.openlore-version }}) may not yet ship the 'review' command, or the base..head range was unreachable. Skipping the comment (advisory)."
         fi
 
     - name: Post or update the sticky review comment

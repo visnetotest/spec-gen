@@ -14,6 +14,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../../core/services/mcp-handlers/blast-radius.js', () => ({ computeBlastRadius: vi.fn() }));
 vi.mock('../../core/services/mcp-handlers/structural-diff.js', () => ({ handleStructuralDiff: vi.fn() }));
 vi.mock('../../core/services/config-manager.js', () => ({ readOpenLoreConfig: vi.fn() }));
+vi.mock('node:fs/promises', () => ({ writeFile: vi.fn() }));
+
+import { writeFile } from 'node:fs/promises';
 
 import { composeReview, renderMarkdown, runReviewCli, REVIEW_MARKER, type ReviewBriefing } from './review.js';
 import { computeBlastRadius } from '../../core/services/mcp-handlers/blast-radius.js';
@@ -109,6 +112,15 @@ describe('composeReview (honest degradation + caveats)', () => {
     const b = await composeReview({ cwd: '/p', base: 'bogus' });
     expect(b.caveats.join(' ')).toMatch(/did not resolve.*diffed against "main"/);
   });
+
+  it('discloses a base-ref fallback even when blast is unavailable (derived from the structural resolved base)', async () => {
+    // A shallow CI checkout with no index is exactly the case the spec scenario targets:
+    // blast errors, but the typo'd base must still be disclosed via structural.base.
+    vi.mocked(handleStructuralDiff).mockResolvedValue({ ...structuralWithDelta, base: 'main' });
+    vi.mocked(computeBlastRadius).mockResolvedValue({ error: 'No analysis found.' });
+    const b = await composeReview({ cwd: '/p', base: 'bogus' });
+    expect(b.caveats.join(' ')).toMatch(/Base ref "bogus" did not resolve.*diffed against "main"/);
+  });
 });
 
 describe('runReviewCli (output + advisory posture)', () => {
@@ -133,6 +145,21 @@ describe('runReviewCli (output + advisory posture)', () => {
   it('markdown output carries the sticky marker on stdout', async () => {
     await runReviewCli({ cwd: '/p', base: 'main', format: 'markdown' });
     expect(outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toContain(REVIEW_MARKER);
+  });
+
+  it('--out to an unwritable path never throws — warns on stderr and falls back to stdout', async () => {
+    vi.mocked(writeFile).mockRejectedValueOnce(new Error('ENOENT: no such file or directory'));
+    const code = await runReviewCli({ cwd: '/p', base: 'main', format: 'markdown', out: '/nope/x.md' });
+    expect(code).toBe(0); // advisory: a write failure is not a gate
+    expect(errSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toMatch(/Could not write .*writing to stdout instead/);
+    expect(outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toContain(REVIEW_MARKER); // briefing not lost
+  });
+
+  it('--out success writes its confirmation to stderr, keeping stdout empty', async () => {
+    vi.mocked(writeFile).mockResolvedValueOnce(undefined);
+    await runReviewCli({ cwd: '/p', base: 'main', format: 'markdown', out: '/tmp/x.md' });
+    expect(outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toBe(''); // stdout stays clean
+    expect(errSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toMatch(/Wrote review briefing/);
   });
 
   it('advisory by default (exit 0) even with a block pattern configured but no --hook', async () => {

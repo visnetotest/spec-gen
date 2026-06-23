@@ -335,9 +335,13 @@ without an index (it builds the old/new graphs from just the changed files).
 
 **GitHub Action.** The repo ships `.github/actions/openlore-review` (composite action: checkout →
 `openlore analyze` → `openlore review` → one sticky comment matched by a hidden `<!-- openlore-review -->`
-marker, created once and updated in place, never duplicated) and a copy-paste workflow
-(`.github/workflows/openlore-review.yml.example`). Adoption is one file; it needs a full-history
-checkout (`fetch-depth: 0`) and `pull-requests: write` permission.
+marker, created once and updated in place — duplicate-proof via paginated comment lookup) and a
+copy-paste workflow (`.github/workflows/openlore-review.yml.example`). Adoption is one file; it needs a
+full-history checkout (`fetch-depth: 0`) and `pull-requests: write` permission. The Action runs
+`npx openlore@<version>`, so it activates once a **published** `openlore` ships `review` (until then it
+no-ops gracefully — no comment, the check stays green). Advisory by default; gate mode fails the job
+**only** when the briefing was produced and a configured `blastRadius.block` pattern fired (a missing
+`openlore`/`review` or an unreachable range never produces a false-positive red check).
 
 ### Federation (multi-repo)
 

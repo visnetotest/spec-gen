@@ -20,6 +20,8 @@
  */
 
 import { writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
@@ -65,6 +67,22 @@ export interface ReviewBriefing {
   status: 'ok' | 'unavailable';
 }
 
+const execFileAsync = promisify(execFile);
+
+/** True when two git refs resolve to the same commit. On any git error returns false
+ * (conservative — we'd rather emit the divergence caveat than silently hide it). */
+async function sameCommit(cwd: string, refA: string, refB: string): Promise<boolean> {
+  try {
+    const [a, b] = await Promise.all([
+      execFileAsync('git', ['rev-parse', '--verify', `${refA}^{commit}`], { cwd }),
+      execFileAsync('git', ['rev-parse', '--verify', `${refB}^{commit}`], { cwd }),
+    ]);
+    return a.stdout.trim() === b.stdout.trim() && a.stdout.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** Run both analyses for a `base..head` range and assemble the briefing. Never throws —
  * a thrown handler is captured as that section's `{error}` so an advisory caller (the
  * CLI, the CI Action) is never broken by a composed failure. */
@@ -95,17 +113,25 @@ export async function composeReview(opts: { cwd: string; base?: string; head?: s
   }
 
   // Honest range note: blast radius is always working-tree-vs-base; structural honors
-  // an explicit head. Flag the case where they can diverge (a non-default --head).
+  // an explicit head. Flag the case where they can diverge (an explicit --head that
+  // is NOT the checked-out commit). In CI the runner checks out the head SHA, so
+  // working tree == head and this caveat is correctly suppressed (no noise per PR).
   if (opts.head && opts.head !== 'working tree') {
-    caveats.push(
-      `Blast radius is computed against the working tree vs "${opts.base ?? 'HEAD'}"; the structural delta uses "${opts.base ?? 'HEAD'}..${opts.head}". ` +
-        'In CI these align (the runner checks out the head commit); locally they can differ.',
-    );
+    const headIsWorkingTree = await sameCommit(opts.cwd, opts.head, 'HEAD');
+    if (!headIsWorkingTree) {
+      caveats.push(
+        `Blast radius is computed against the working tree vs "${opts.base ?? 'HEAD'}"; the structural delta uses "${opts.base ?? 'HEAD'}..${opts.head}". ` +
+          'They can differ when --head is not the checked-out commit.',
+      );
+    }
   }
-  // Surface a silent base-ref fallback (a typo'd --base) so the briefing never
-  // misrepresents what it diffed.
-  if (!('error' in blast) && blast.resolvedBaseRef !== blast.baseRef) {
-    caveats.push(`Base ref "${blast.baseRef}" did not resolve — diffed against "${blast.resolvedBaseRef}" instead.`);
+  // Surface a silent base-ref fallback (a typo'd / unreachable --base) so the briefing
+  // never misrepresents what it diffed. Derive the resolved base from whichever analysis
+  // succeeded — so a shallow CI checkout with no index (blast unavailable) still discloses
+  // the fallback via the structural delta's resolved base.
+  const resolvedFromAnalyses = !('error' in blast) ? blast.resolvedBaseRef : (!structural.error ? structural.base : undefined);
+  if (opts.base && resolvedFromAnalyses && resolvedFromAnalyses !== opts.base) {
+    caveats.push(`Base ref "${opts.base}" did not resolve — diffed against "${resolvedFromAnalyses}" instead.`);
   }
   if (!structural.error && blast && 'error' in blast) {
     caveats.push(`Blast radius unavailable (${blast.error}) — showing the structural delta only. Run \`openlore analyze\` for the full briefing.`);
@@ -308,8 +334,15 @@ export async function runReviewCli(opts: ReviewCliOptions): Promise<number> {
     : renderMarkdown(briefing);
 
   if (opts.out) {
-    await writeFile(opts.out, rendered, 'utf-8');
-    logger.success(`Wrote review briefing to ${opts.out}`);
+    // Never throw (advisory contract): if the path is unwritable, say so on stderr and
+    // fall back to stdout so the briefing is not lost. Diagnostics stay off stdout.
+    try {
+      await writeFile(opts.out, rendered, 'utf-8');
+      process.stderr.write(`[ok] Wrote review briefing to ${opts.out}\n`);
+    } catch (err) {
+      process.stderr.write(`[warn] Could not write ${opts.out} (${err instanceof Error ? err.message : String(err)}); writing to stdout instead.\n`);
+      process.stdout.write(rendered);
+    }
   } else if (format === 'json') {
     process.stdout.write(rendered);
   } else {
@@ -350,10 +383,11 @@ export const reviewCommand = new Command('review')
       logger.error(`Unknown --format "${opts.format}". Use "markdown" or "json".`);
       process.exit(2);
     }
-    // A non-git directory cannot produce a review at all — say so cleanly (exit 0,
-    // advisory) rather than emitting an empty briefing.
+    // A non-git directory cannot produce a review at all — say so cleanly on stderr
+    // (exit 0, advisory) so stdout stays empty rather than carrying a marker-less,
+    // non-markdown line that a `review > out.md` consumer would capture.
     if (!(await isGitRepository(process.cwd()).catch(() => false))) {
-      logger.warning('openlore review: not a git repository — nothing to compare. Run inside a git repo.');
+      process.stderr.write('[warn] openlore review: not a git repository — nothing to compare. Run inside a git repo.\n');
       process.exit(0);
     }
     const code = await runReviewCli({

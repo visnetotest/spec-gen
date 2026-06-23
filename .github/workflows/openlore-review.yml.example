@@ -7,6 +7,11 @@
 #
 # Requirements: a full-history checkout (`fetch-depth: 0`) so the base..head range is
 # reachable, and write permission on pull-request comments.
+#
+# Note: this runs `npx openlore@<openlore-version>`, so it activates once a PUBLISHED
+# openlore ships the `review` command (the release that introduces it). Until then the
+# Action no-ops gracefully (no comment, the check stays green); pin `openlore-version`
+# to that release for reproducibility.
 
 name: OpenLore review
 
