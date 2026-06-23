@@ -35,6 +35,12 @@
 | `openlore serve` | Start a warm local HTTP daemon exposing tools (loopback, for Pi / editors) | No |
 | `openlore doctor` | Check environment and configuration for common issues | No |
 | `openlore refresh-stories` | Refresh story files with latest structural context after each commit | No |
+| `openlore blast-radius` | Pre-flight structural blast-radius briefing for the current diff (advisory; `--install-hook` for a pre-commit hook) | No |
+| `openlore preflight` | CI staleness gate: fail when the analysis graph is stale relative to the working tree | No |
+| `openlore export scip` | Export the analysis graph as an SCIP index for the Sourcegraph / Glean ecosystem | No |
+| `openlore telemetry` | Analyze EpistemicLease cognitive-load telemetry | No |
+| `openlore panic-*` | Agent behavioral-governance ("panic") commands — `panic-check`/`panic-level`/`panic-validate`/`panic-hotspots`/`panic-calibrate`/`panic-replay`. Opt-in, off by default; install hooks via `openlore setup --hooks` | No |
+| `openlore gryph-watch` | Background Gryph behavioral observer (opt-in; install via `openlore setup --hooks`) | No |
 
 ### Global Options
 
