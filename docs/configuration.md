@@ -89,7 +89,7 @@ An optional `impactCertificate` block declares the **covering surfaces** the cha
 | `surfaces[].name` | yes | a stable, user-facing surface name (must be unique; empty names and duplicates are dropped) |
 | `surfaces[].members` | yes | the boundary's members: each is a `{ "symbol": "<name>" }` (resolved to exactly one indexed symbol — ambiguous/unknown becomes a finding, never guessed) and/or a `{ "file": "<repo-relative path>" }` (all of the file's symbols). A member may set both. |
 | `surfaces[].severity` | no | `info` \| `warn` \| `critical` (default `warn`); any other value is coerced to `warn` |
-| `block` | no | severities the **advisory git hook** should fail a commit on (e.g. `["critical"]`). Empty/absent = advisory-only (the default). Infrastructure failure never blocks. |
+| `block` | no | severities the **advisory git hook** should fail a commit on (e.g. `["critical"]`). Empty/absent = advisory-only (the default). Infrastructure failure never blocks. Now thin legacy sugar that lowers onto [`enforcement.policy`](#enforcement-policy) (`["critical"]` ≡ `{ "surface-critical": "blocking" }`); a direct policy entry wins. |
 
 A surface is resolved against the indexed graph (plus any symbol the same diff just added). The certificate is advisory by default and decays via the code-anchored freshness lease; when an anchored symbol later moves, `openlore spec-store status` re-fires a persisted certificate as a `certificate-stale` finding.
 
@@ -116,14 +116,18 @@ An optional `enforcement.policy` block is the **single source of truth** for wha
 - **Legacy `block` sugar lowers onto it.** `blastRadius.block: ["orphans-anchored-decision"]` and `impactCertificate.block: ["critical"]` are thin equivalents of `enforcement.policy: { "orphans-anchored-decision": "blocking" }` and `{ "surface-critical": "blocking" }`. A direct `enforcement.policy` entry always wins over inherited legacy sugar.
 - **Unknown codes are retained.** Naming a code no installed source emits yet is not an error — the entry is kept and surfaced as an informational note, so a policy may name a code before its source ships.
 
-The governable finding codes (the **finding-code catalogue**):
+The governable finding codes (the **finding-code catalogue** — every code defaults to `advisory`; blocking is always opt-in):
 
-| Code | Source | Meaning |
-|------|--------|---------|
-| `stale-decision-reference` | enforce | A live, authoritative artifact (approved decision, non-orphaned anchored memory, or spec requirement) references a decision that has since been superseded. |
-| `orphans-anchored-memory` | blast-radius | The change orphans one or more code-anchored memories. |
-| `orphans-anchored-decision` | blast-radius | The change orphans one or more anchored architectural decisions. |
-| `surface-info` / `surface-warn` / `surface-critical` | impact-certificate | The change opens a new path into a declared covering surface of that severity. |
+| Code | Source | Default | Meaning |
+|------|--------|---------|---------|
+| `stale-decision-reference` | stale-decision-reference | advisory | A live, authoritative artifact (approved decision, non-orphaned anchored memory, or spec requirement) references a decision that has since been superseded. |
+| `orphans-anchored-memory` | blast-radius | advisory | The change orphans one or more code-anchored memories. |
+| `orphans-anchored-decision` | blast-radius | advisory | The change orphans one or more anchored architectural decisions. |
+| `surface-info` | impact-certificate | advisory | The change opens a new path into a declared covering surface marked `info`. |
+| `surface-warn` | impact-certificate | advisory | The change opens a new path into a declared covering surface marked `warn`. |
+| `surface-critical` | impact-certificate | advisory | The change opens a new path into a declared covering surface marked `critical`. |
+
+> **Note on the surface codes.** The change-impact certificate's *own* `--json` finding codes are `surface-newly-reached` / `surface-critical` (see [mcp-tools.md](mcp-tools.md)); the enforcement gate governs the **per-severity** codes `surface-info` / `surface-warn` / `surface-critical` (one per declared surface severity). To block a surface via `enforcement.policy`, name the per-severity code (e.g. `"surface-critical": "blocking"`), not `surface-newly-reached` — an unrecognized code is retained but governs nothing.
 
 ### Task-scoped context injection
 

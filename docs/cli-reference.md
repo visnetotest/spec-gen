@@ -273,7 +273,7 @@ Advisory by default — it emits the certificate and exits 0; an infrastructure 
 
 ```bash
 openlore enforce                 # human-readable gate report for the working tree (advisory)
-openlore enforce --json          # documented JSON: gated, blocking[], advisory[], off[], unknownPolicyCodes[]
+openlore enforce --json          # documented JSON: gated, blocking[], advisory[], off[], unknownPolicyCodes[], caveats[]
 openlore enforce --hook          # hook mode: stderr + exit 1 only on a blocking-classed finding
 openlore enforce --install-hook  # install the unified pre-commit hook (coexists with the decisions gate)
 openlore enforce --uninstall-hook
