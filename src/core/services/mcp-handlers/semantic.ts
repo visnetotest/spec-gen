@@ -318,7 +318,7 @@ export async function handleSuggestInsertionPoints(
   const outputDir = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
 
   const { VectorIndex } = await import('../../analyzer/vector-index.js');
-  const { EmbeddingService } = await import('../../analyzer/embedding-service.js');
+  const { resolveEmbedder } = await import('../../analyzer/embedder.js');
 
   if (!VectorIndex.exists(outputDir)) {
     return {
@@ -327,14 +327,10 @@ export async function handleSuggestInsertionPoints(
     };
   }
 
-  // Resolve embedding service — null triggers BM25 fallback in VectorIndex.search().
-  let embedSvc: InstanceType<typeof EmbeddingService> | null = null;
-  try {
-    embedSvc = EmbeddingService.fromEnv();
-  } catch {
-    const cfg = await readOpenLoreConfig(absDir);
-    embedSvc = cfg ? EmbeddingService.fromConfig(cfg) : null;
-  }
+  // Resolve the active embedder (env → local provider → remote config); null
+  // triggers the first-class BM25 path in VectorIndex.search().
+  const cfg = await readOpenLoreConfig(absDir);
+  const embedSvc = await resolveEmbedder(cfg);
 
   limit = Math.max(1, Math.min(limit, 20));
   const { readCachedContext } = await import('./utils.js');
@@ -588,7 +584,7 @@ export async function handleUnifiedSearch(
 
   const { UnifiedSearch, unifiedSearchAvailable } =
     await import('../../analyzer/unified-search.js');
-  const { EmbeddingService } = await import('../../analyzer/embedding-service.js');
+  const { resolveEmbedder } = await import('../../analyzer/embedder.js');
 
   if (!(await unifiedSearchAvailable(outputDir))) {
     return {
@@ -598,17 +594,9 @@ export async function handleUnifiedSearch(
     };
   }
 
-  // Resolve embedding service
-  let embedSvc: InstanceType<typeof EmbeddingService> | null = null;
-  try {
-    embedSvc = EmbeddingService.fromEnv();
-  } catch {
-    const cfg = await readOpenLoreConfig(absDir);
-    const svcFromConfig = cfg ? EmbeddingService.fromConfig(cfg) : null;
-    if (svcFromConfig) {
-      embedSvc = svcFromConfig;
-    }
-  }
+  // Resolve the active embedder (env → local provider → remote config).
+  const cfg = await readOpenLoreConfig(absDir);
+  const embedSvc = await resolveEmbedder(cfg);
 
   limit = Math.max(1, Math.min(limit, 50));
   const results = await UnifiedSearch.unifiedSearch(outputDir, query, embedSvc, {
