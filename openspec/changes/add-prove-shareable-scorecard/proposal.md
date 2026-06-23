@@ -33,6 +33,18 @@
 > instead of a verdict over no data. +4 tests (48 in the prove suites). Documented in the prove section
 > of `docs/AGENT-BENCHMARKS.md`.
 >
+> **Third adversarial round (2026-06-22, decision `dfe33d94`):** filesystem/path/concurrency + doc/spec
+> drift sweep. Fixes: `saveScorecard` now writes atomically with `wx` (closing a TOCTOU race that
+> silently overwrote a prior run under concurrency — the "never overwritten" guarantee is now real), and
+> a save filesystem error (e.g. `.openlore/prove` is a file, permissions) degrades to a clear message +
+> exit 1 instead of an unhandled stack-trace crash that discarded the computed scorecard. Docs brought
+> in line with shipped behavior: a consumer-facing `--json` schema (keys/types/enums) added to
+> `docs/AGENT-BENCHMARKS.md`; `README.md` test count reconciled; `docs/cli-reference.md` gained `prove`
+> rows + a `### Prove Options` block; and the change's `specs/cli/spec.md` delta was corrected (the
+> stale "per-task cells" claim removed — raw cells live only in the `--save` artifact, not the `--json`
+> contract) and extended with the mutual-exclusion, NaN-rejection, and no-verdict-over-no-data
+> requirements. +2 tests.
+>
 > Third of three changes that close the loss case in OpenLore's own agent benchmark (siblings:
 > `add-task-scoped-context-injection`, `default-to-lean-tool-surface` — both still PROPOSED). Builds
 > directly on the existing `openlore prove` command (Spec 25 Q2, `src/cli/commands/prove.ts`,

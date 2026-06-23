@@ -16,7 +16,7 @@
  */
 
 import { Command } from 'commander';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -289,11 +289,24 @@ export function saveScorecard(absDir: string, result: ProveResult): string {
   const dir = join(absDir, OPENLORE_PROVE_REL_PATH);
   mkdirSync(dir, { recursive: true });
   const day = meta.generatedAt.slice(0, 10); // YYYY-MM-DD
-  let path = join(dir, `prove-${day}.json`);
-  for (let n = 2; existsSync(path); n++) path = join(dir, `prove-${day}-${n}.json`);
-  const payload = { ...serializeScorecard(sc, meta), raw: result.raw ? roundRawCosts(result.raw) : undefined };
-  writeFileSync(path, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
-  return path;
+  const payload = JSON.stringify(
+    { ...serializeScorecard(sc, meta), raw: result.raw ? roundRawCosts(result.raw) : undefined },
+    null, 2,
+  ) + '\n';
+  // Pick a non-clobbering name ATOMICALLY: open each candidate with O_CREAT|O_EXCL
+  // (`wx`) and advance the suffix on EEXIST. An existsSync-then-write check races
+  // under concurrency and silently overwrites a prior run; `wx` closes that window
+  // so the "never overwritten" guarantee actually holds.
+  for (let n = 1; ; n++) {
+    const path = join(dir, n === 1 ? `prove-${day}.json` : `prove-${day}-${n}.json`);
+    try {
+      writeFileSync(path, payload, { encoding: 'utf-8', flag: 'wx' });
+      return path;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+      throw err;
+    }
+  }
 }
 
 export const proveCommand = new Command('prove')
@@ -368,9 +381,17 @@ Examples:
     }
 
     if (opts.save) {
-      const path = saveScorecard(resolve(directory), result);
-      // Written to stderr directly so it never pollutes --json / --markdown stdout.
-      process.stderr.write(`Saved scorecard → ${path}\n`);
+      // A filesystem failure (e.g. .openlore/prove is a file, permissions, full
+      // disk) must not crash the process with a stack trace and discard the
+      // already-computed scorecard — surface it and still print the result.
+      try {
+        const path = saveScorecard(resolve(directory), result);
+        // Written to stderr directly so it never pollutes --json / --markdown stdout.
+        process.stderr.write(`Saved scorecard → ${path}\n`);
+      } catch (err) {
+        process.stderr.write(`Could not save scorecard: ${(err as Error).message}\n`);
+        process.exitCode = 1;
+      }
     }
 
     if (json) {

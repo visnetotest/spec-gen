@@ -603,7 +603,7 @@ The same `federation` preset also exposes a spec-store arc — binding OpenLore 
 ```bash
 npm install
 npm run build
-npm test          # 2900+ unit tests
+npm test          # 4400+ unit tests
 npm run typecheck
 ```
 

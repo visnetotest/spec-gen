@@ -5,7 +5,7 @@
  * filesystem behavior (dated, non-clobbering) against a real temp dir.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { saveScorecard, parseNumericFlag, summarizeArms, type ProveResult } from './prove.js';
@@ -62,11 +62,30 @@ describe('saveScorecard', () => {
     expect(files).toEqual(['prove-2026-06-22-2.json', 'prove-2026-06-22-3.json', 'prove-2026-06-22.json']);
   });
 
+  it('never overwrites a pre-existing same-name file (atomic wx write)', () => {
+    const proveDir = join(dir, OPENLORE_PROVE_REL_PATH);
+    mkdirSync(proveDir, { recursive: true });
+    const base = join(proveDir, 'prove-2026-06-22.json');
+    writeFileSync(base, 'SENTINEL — must not be overwritten', 'utf-8');
+    const written = saveScorecard(dir, result());
+    expect(written).not.toBe(base);                                                  // picked a suffix
+    expect(readFileSync(base, 'utf-8')).toBe('SENTINEL — must not be overwritten');  // intact
+    expect(JSON.parse(readFileSync(written, 'utf-8')).schemaVersion).toBe(1);
+  });
+
   it('separates runs from different days into different files', () => {
     saveScorecard(dir, result());
     saveScorecard(dir, result({ ...baseMeta, generatedAt: '2026-06-23T09:00:00.000Z' }));
     const files = readdirSync(join(dir, OPENLORE_PROVE_REL_PATH)).sort();
     expect(files).toEqual(['prove-2026-06-22.json', 'prove-2026-06-23.json']);
+  });
+
+  it('throws a catchable error (not a silent corruption) when .openlore/prove is a file', () => {
+    // The command wraps saveScorecard in try/catch and degrades to a clear stderr
+    // message + exit 1; here we assert the failure is a normal throwable Error.
+    mkdirSync(join(dir, '.openlore'), { recursive: true });
+    writeFileSync(join(dir, OPENLORE_PROVE_REL_PATH), 'not a dir', 'utf-8');
+    expect(() => saveScorecard(dir, result())).toThrow();
   });
 
   it('rounds float noise out of the persisted raw block', () => {

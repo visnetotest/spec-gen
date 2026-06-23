@@ -110,6 +110,25 @@ openlore analyze [options]
   --reindex-specs        # Re-index OpenSpec specs into the vector index without re-running full analysis
 ```
 
+### Prove Options
+
+```bash
+openlore prove [options]
+  --directory <path>     # Repo to measure (default: current directory)
+  --runs <n>             # Runs per arm per task (default: 2; non-numeric is rejected)
+  --model <name>         # Agent model (default: sonnet)
+  --max-budget-usd <n>   # Per-agent-call USD ceiling (default: 0.5; non-numeric is rejected)
+  --estimate             # Deterministic, no-agent, no-API projection of the orientation tax
+  --dry-run              # Synthetic numbers (no agent, no API key)
+  --json                 # Stable schemaVersion:1 scorecard on stdout (mutually exclusive with --markdown)
+  --markdown             # Paste-ready scorecard block + shields.io badge (mutually exclusive with --json)
+  --save                 # Persist a dated, non-clobbering scorecard under .openlore/prove/
+```
+
+The measured arm needs `claude` + an API key; `--estimate` and `--dry-run` need neither. A measured
+run whose agent calls all fail **exits non-zero** rather than emitting a verdict over no data. The
+`--json` shape is documented in [AGENT-BENCHMARKS.md](AGENT-BENCHMARKS.md#json-output-schema-for-ci).
+
 ### Setup Options
 
 ```bash

@@ -5,18 +5,57 @@
 ### Requirement: ProveMachineReadableOutput
 
 The `openlore prove` command SHALL support a `--json` mode emitting the scorecard as documented,
-stable-keyed JSON to stdout (and nothing else on stdout). The object SHALL carry the cost delta, the
-round-trips delta, correctness, per-task cells, the honest verdict, and run metadata (model, runs,
-mode, repo SHA, ISO date). The key set SHALL be documented and guarded so it cannot drift silently.
+stable-keyed JSON to stdout (and nothing else on stdout). The object SHALL be versioned
+(`schemaVersion: 1`) and SHALL carry: `mode` (one of `measured` / `estimate` / `dry-run`),
+`generatedAt`, `repo.sha`, `model`, `samplesPerArm` (= tasks × runs), `tasks`, `cost`
+(`{without, with, deltaPct}`), `roundTrips` (same shape), `freshTokens` (`{without, with}`),
+`correctness` (`{without, with}`), and `verdict` (one of `helps` / `break-even` / `doesn't help here`).
+The full key set SHALL be documented for consumers AND guarded by a test so it cannot drift silently.
 The numbers emitted SHALL be exactly those the run produced — no number the benchmark did not produce
-is ever emitted (honesty contract).
+is ever emitted (honesty contract). Per-arm/per-task raw metrics are NOT part of the `--json` stdout
+contract; they are persisted only in the `--save` artifact's `raw` block.
 
 #### Scenario: prove emits stable JSON
 
 - **GIVEN** a completed `openlore prove` run
 - **WHEN** it is invoked with `--json`
-- **THEN** stdout is a single parseable object carrying every documented key, suitable for CI
-  consumption, with values matching the run
+- **THEN** stdout is a single parseable object carrying exactly the documented key set
+  (including `samplesPerArm`), suitable for CI consumption, with values matching the run
+
+### Requirement: ProveOutputModeIntegrity
+
+The `openlore prove` command's machine-output and input handling SHALL fail loudly rather than emit a
+misleading result. `--json` and `--markdown` SHALL be mutually exclusive (only one may own stdout); a
+non-numeric `--runs` or `--max-budget-usd` SHALL be rejected with a clear error rather than silently
+producing a degenerate scorecard; and a value interpolated into a shareable form (e.g. `--model`) SHALL
+be sanitized so it cannot corrupt the markdown. Each such rejection SHALL exit non-zero.
+
+#### Scenario: Conflicting machine outputs are rejected
+
+- **GIVEN** `openlore prove --json --markdown`
+- **WHEN** the command runs
+- **THEN** it reports that the two are mutually exclusive and exits non-zero, emitting neither form
+
+#### Scenario: A non-numeric flag is rejected, not silently degraded
+
+- **GIVEN** `openlore prove --runs abc`
+- **WHEN** the command runs
+- **THEN** it reports that `--runs` must be a number and exits non-zero, rather than emitting an
+  all-zero scorecard
+
+### Requirement: ProveNeverEmitsAVerdictOverNoData
+
+For the measured arm, an errored agent run (the agent threw, or returned unparseable output) SHALL NOT
+be counted as a valid cost/turn sample. Errored runs SHALL be excluded from the per-arm medians, and if
+either arm has no successful run the command SHALL fail (exit non-zero) with an actionable message
+rather than emit a verdict computed over no data.
+
+#### Scenario: A fully-failed measured run produces no verdict
+
+- **GIVEN** a measured `openlore prove` run in which every agent invocation fails
+- **WHEN** the command runs
+- **THEN** it reports that no usable measurement was produced and exits non-zero, and does NOT emit a
+  `break-even` (or any) verdict
 
 ### Requirement: ProvePersistedDatedScorecards
 

@@ -53,3 +53,21 @@
 - [x] Document `--json` (with the stable key schema), `--save`, `--markdown`/badge, and `--estimate`
       (and its labeling + scope limit) in `docs/AGENT-BENCHMARKS.md`, reinforcing the honesty contract
       (measured numbers only; estimate clearly labeled; losses shown next to wins).
+- [x] Surface the no-API-key `--estimate` path + badge in `README.md`; add `prove` rows + a
+      `### Prove Options` block to `docs/cli-reference.md`; add a consumer-facing `--json` schema
+      (keys/types/enums) to `docs/AGENT-BENCHMARKS.md`.
+
+## 7. Adversarial QA hardening (three rounds — what shipped beyond the original plan)
+- [x] **Round 1** (4 parallel agents: flag-fuzz / JSON-contract / estimate-model / docs-injection):
+      rejected non-numeric `--runs`/`--max-budget-usd` (`parseNumericFlag`); made `--json`/`--markdown`
+      mutually exclusive; renamed the contract key `runsPerArm → samplesPerArm` (= tasks × runs) before
+      v1 ships; sanitized `--model` in markdown + finite-guarded `money()`/`parseAgentJson`; silenced
+      `gitShortSha` stderr; rounded the persisted `raw` block.
+- [x] **Round 2** (failure injection via the injectable `runProve` runner): errored runs dropped from
+      the medians via the pure exported `summarizeArms`; a measured arm with no successful sample now
+      fails (exit 1) instead of emitting a verdict over no data.
+- [x] **Round 3** (filesystem/path/concurrency + spec/doc drift): `saveScorecard` now writes atomically
+      with `wx` (closes the TOCTOU non-clobber race — no silent overwrite under concurrency) and the
+      command degrades a save filesystem error to a clear message + exit 1 (no stack-trace crash when
+      `.openlore/prove` is a file); the change spec delta + docs were brought in line with shipped
+      behavior. Tests: 13 prove-command + 35 agent-eval = 48 in the prove suites.
