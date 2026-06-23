@@ -14,6 +14,12 @@ function openDatabase(dbPath: string): DatabaseSync {
   const db = new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA synchronous = NORMAL');
+  // Wait (don't immediately throw "database is locked") when another process
+  // holds the write lock — e.g. the incremental watcher marking files stale
+  // while a post-commit `analyze --force` rebuilds the store. Without this the
+  // loser of the race throws on open/write and silently drops its work
+  // (fix-transitive-incremental-staleness widened this contention).
+  db.exec('PRAGMA busy_timeout = 5000');
   return db;
 }
 
@@ -111,6 +117,14 @@ export class EdgeStore {
       CREATE INDEX IF NOT EXISTS idx_callee_id   ON edges(callee_id);
       CREATE INDEX IF NOT EXISTS idx_caller_file ON edges(caller_file);
       CREATE INDEX IF NOT EXISTS idx_callee_file ON edges(callee_file);
+      -- callee_name is filtered by the incremental closure's consumer lookups
+      -- (getExternalConsumerFiles / getNameOnlyConsumers / getExternalConsumers)
+      -- on the hot watch path. Without this index each is a full scan of edges,
+      -- making one save O(edges × addedSymbols) — seconds on a large repo. Index
+      -- build is ~28ms / +2MB and keeps those lookups sub-millisecond. Additive
+      -- (IF NOT EXISTS), so existing stores gain it on next open with no schema
+      -- bump (fix-transitive-incremental-staleness).
+      CREATE INDEX IF NOT EXISTS idx_callee_name ON edges(callee_name);
 
       CREATE TABLE IF NOT EXISTS inheritance_edges (
         parent_id TEXT NOT NULL,

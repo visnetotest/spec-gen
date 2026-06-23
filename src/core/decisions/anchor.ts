@@ -226,6 +226,27 @@ export function memoryFreshness(
   };
 }
 
+/**
+ * True when a memory's non-`fresh` aggregate is due ONLY to the explicit stale
+ * region — every drifted anchor is a stale-region downgrade and nothing is
+ * orphaned or genuinely content-drifted (fix-transitive-incremental-staleness).
+ * The anchored code is byte-identical; its surrounding topology simply was not
+ * recomputed by a budget-exceeded incremental update and will self-heal. Callers
+ * use this to label it honestly ("not yet reconciled") instead of asserting the
+ * code changed, and the drift detector uses it to NOT report a false code-drift.
+ */
+export function isStaleRegionOnly(verdicts: readonly AnchorVerdict[]): boolean {
+  let sawStaleRegionDrift = false;
+  for (const v of verdicts) {
+    if (v.freshness === 'orphaned') return false;
+    if (v.freshness === 'drifted') {
+      if (!v.staleRegion) return false; // a genuine content drift is present
+      sawStaleRegionDrift = true;
+    }
+  }
+  return sawStaleRegionDrift;
+}
+
 // ── contradiction surfacing (add-bitemporal-typed-memory-operations) ──────────
 
 /** A memory reduced to what deterministic contradiction detection needs. */

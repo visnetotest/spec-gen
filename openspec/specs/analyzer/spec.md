@@ -5763,13 +5763,13 @@ The incremental call-graph update path (the file watcher's per-batch update) SHA
 
 ### Requirement: FreshnessVerdictsHonorTheStaleRegion
 
-A freshness verdict over a symbol SHALL account for the staleness of the symbol's surrounding topology, not only the symbol's own existence and content hash. A symbol that lies within an explicitly-marked stale region SHALL NOT be reported as `fresh`/authoritative; it SHALL be reported as `drifted` (or otherwise non-authoritative) until the region is reconciled.
+A freshness verdict over a symbol SHALL account for the staleness of the symbol's surrounding topology, not only the symbol's own existence and content hash. A symbol that lies within an explicitly-marked stale region SHALL NOT be reported as `fresh`/authoritative; it SHALL be reported as `drifted` (or otherwise non-authoritative) until the region is reconciled. A downgrade caused ONLY by the stale region (the anchored code is byte-identical) SHALL be distinguishable from a genuine content change — it carries a `staleRegion` marker — so consumers can label it "not yet reconciled" rather than asserting the code changed. In particular, the code-vs-memory drift detector SHALL NOT report a pure stale-region downgrade as drift (it is not a code change and it self-heals).
 
 #### Scenario: A memory anchored above a stale subgraph is not reported fresh
 
 - **GIVEN** a memory anchored to `A`, where `A`'s file has been marked `stale` by a budget-exceeded incremental update
 - **WHEN** the memory's freshness is evaluated
-- **THEN** the verdict is not `fresh`; it reflects that `A`'s topology is stale
+- **THEN** the verdict is not `fresh`; it reflects that `A`'s topology is stale, and it is marked as a stale-region downgrade (not a code change)
 
 ### Requirement: StaleRegionsAreReconciledWithoutAManualFullAnalyze
 

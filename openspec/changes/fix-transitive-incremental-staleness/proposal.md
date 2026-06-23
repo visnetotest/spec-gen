@@ -42,12 +42,31 @@
 > reports `skipped` files, whose edges are preserved and which are marked stale (the one silent-
 > divergence the contract forbids). Both have regression tests and were dogfooded on the real CLI.
 >
+> **Review hardening (third adversarial pass).** Four more fixes, all in-scope to the new closure:
+> (7) the consumer-discovery queries filter `edges.callee_name`, which was UNINDEXED — each was a full
+> table scan, making one save O(edges × addedSymbols) (measured up to ~3s on a 150k-edge repo). Added
+> `idx_callee_name` (additive, no schema bump); the lookups are now sub-millisecond. (8) the new
+> per-batch stale-marking writes race a concurrent post-commit `analyze --force` on the same WAL db with
+> no `busy_timeout` (0), so the loser threw `database is locked` and silently dropped its work — added
+> `PRAGMA busy_timeout = 5000` (verified: 5 concurrent analyze-vs-watcher rounds, 0 lock errors, graph
+> never emptied). (9) the `AnchorVerdict.staleRegion` marker was written but read by NO consumer, so a
+> byte-identical stale-region anchor was mislabeled "the code changed" everywhere — most seriously the
+> drift detector FABRICATED a `memory-drifted` finding ("anchored to X, which changed since it was
+> recorded") for untouched decisions. The drift detector now suppresses pure stale-region downgrades
+> (via `isStaleRegionOnly`) — a stale region is not code-drift and self-heals — and `recall` now surfaces
+> a `staleRegion` flag so an agent can tell "not yet reconciled" from "the code changed". All have
+> regression tests and were dogfooded.
+>
 > **Accepted, documented behavior (sound over-approximation).** A budget-exceeded edit marks the
-> un-recomputed files stale, which (a) flips file-level *decision* anchors on those files to `drifted`
-> (with the `staleRegion` marker) even though their content is byte-identical, and (b) excludes any
-> downgraded memory from `findUnreconciled` contradiction detection until the region self-heals. Both
-> are sound (the topology genuinely was not recomputed) and, after fix (5), only occur on a genuine
-> large-fan-in hub edit — honest "verify this, it wasn't recomputed" signals, not silent loss.
+> un-recomputed files stale, which (a) downgrades memories/decisions anchored to those files in `recall`
+> to `drifted` + `staleRegion` even though their content is byte-identical, and (b) excludes any
+> downgraded memory from `findUnreconciled` contradiction detection until the region self-heals. Both are
+> sound (the topology genuinely was not recomputed), self-heal, and — after fix (5) — only occur on a
+> genuine large-fan-in hub edit. Crucially the downgrade is now labeled honestly ("not yet reconciled",
+> via fix (9)) and the drift detector no longer reports it as a code change, so it is an honest "verify
+> this" signal, never a false claim or silent loss. The advisory impact-certificate lease and federated
+> fleet-memory surfaces still show the literal `drifted` verdict (correct — they are conservatively
+> non-authoritative), without the `staleRegion` sub-label; surfacing it there is a deferred nicety.
 
 ## Why
 

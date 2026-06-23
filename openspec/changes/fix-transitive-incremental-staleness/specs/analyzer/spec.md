@@ -44,7 +44,11 @@ mark more than the minimal dirty set as stale, but it SHALL NOT report a stale r
 A freshness verdict over a symbol SHALL account for the staleness of the symbol's surrounding
 topology, not only the symbol's own existence and content hash. A symbol that lies within an
 explicitly-marked stale region SHALL NOT be reported as `fresh`/authoritative; it SHALL be reported as
-`drifted` (or otherwise non-authoritative) until the region is reconciled.
+`drifted` (or otherwise non-authoritative) until the region is reconciled. A downgrade caused ONLY by
+the stale region (the anchored code is byte-identical) SHALL be distinguishable from a genuine content
+change — it carries a `staleRegion` marker — so consumers can label it "not yet reconciled" rather than
+asserting the code changed. In particular, the code-vs-memory drift detector SHALL NOT report a pure
+stale-region downgrade as drift (it is not a code change and it self-heals).
 
 #### Scenario: A memory anchored above a stale subgraph is not reported fresh
 

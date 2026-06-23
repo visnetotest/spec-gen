@@ -67,7 +67,13 @@ All notable changes to OpenLore are documented here. This project adheres to
   verdicts over their symbols report non-authoritative, never silently wrong) and
   self-heal as later edits touch them. A full `openlore analyze --force` clears the
   region. Name resolution for duplicate simple names is now deterministic
-  (seed-order-independent), so incremental and from-scratch builds agree.
+  (seed-order-independent), so incremental and from-scratch builds agree. The
+  call-graph store gains an additive `edges(callee_name)` index (keeps the new
+  closure lookups sub-millisecond instead of full table scans) and a
+  `busy_timeout` (a watcher save and a concurrent `analyze --force` no longer
+  throw `database is locked`). A stale-region freshness downgrade is now labeled
+  distinctly (`staleRegion`) and the drift detector no longer reports it as a
+  code change — the anchored code is byte-identical and it self-heals.
 - **Node-version guard** — launching the CLI under an unsupported Node (<22.5) now
   fails fast with one legible stderr line and the stable exit code 78 (never a
   stack trace), protecting subprocess delegation from a host on Node 20/21. The
