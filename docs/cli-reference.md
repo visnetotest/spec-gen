@@ -3,7 +3,11 @@
 | Command | Description | API Key |
 |---------|-------------|---------|
 | `openlore init` | Initialize configuration | No |
+| `openlore install` | One-command setup: wire agent surfaces (lean `navigation` MCP + hooks) and build the index | No |
+| `openlore connect [agent]` | Wire a specific coding agent to the MCP server + hooks | No |
 | `openlore analyze` | Run static analysis | No |
+| `openlore orient` | Relevant functions, callers, specs, and insertion points for a task (the flagship) | No |
+| `openlore orient --inject` | Emit a bounded, ignorable task-scoped orientation block for a pre-turn hook | No |
 | `openlore generate` | Generate specs from analysis | Yes |
 | `openlore generate --adr` | Also generate Architecture Decision Records | Yes |
 | `openlore verify` | Verify spec accuracy | Yes |
@@ -47,6 +51,64 @@ Generate-specific options:
 ```bash
 --model <name>         # Override LLM model (e.g. gpt-4o-mini, llama3.2)
 ```
+
+### Orient Options
+
+```bash
+openlore orient [options]
+
+  --task <task>          # Natural-language task (e.g. "add rate limiting")
+  --directory <path>     # Project directory to orient in (default: cwd)
+  --limit <n>            # Number of relevant functions to return (default: 5)
+  --token-budget <n>     # Cap relevantFunctions to ~this many tokens
+  --lean                 # Return only the navigation core (drop heavier sections)
+  --json                 # Emit the full result as JSON instead of the human view
+  --metrics              # Report wall time + output size to stderr (opt-in)
+  --inject               # Emit a bounded, ignorable task-scoped orientation block
+                         #   for a pre-turn agent hook; reads the task from --task
+                         #   or stdin. Fail-open: any failure degrades to a single
+                         #   pointer line at exit 0 (see docs/install.md).
+```
+
+With no `--task`, `orient` prints a session-start primer. Requires `openlore analyze`
+to have run at least once.
+
+### Install / Connect Options
+
+```bash
+openlore install [options]        # detect agents, wire surfaces, build the index
+openlore connect [agent] [options] # wire a specific agent (no index build by default)
+
+  --agent <name>         # Limit to one surface: claude-code, cursor, cline,
+                         #   continue, agents-md
+  --preset <name>        # MCP tool preset to wire: navigation (lean default),
+                         #   minimal, memory, verify, federation, or full
+  --all-tools            # Wire the full 62-tool surface (alias of --preset full)
+  --dry-run              # Print planned changes without writing any files
+  --force                # Overwrite OpenLore-managed blocks even if hand-edited
+  --uninstall            # Remove OpenLore-managed blocks and entries
+  --no-analyze           # Configure surfaces only; skip init/analyze
+```
+
+A bare `openlore install` wires the lean `navigation` surface (10 tools) and, for
+Claude Code, both a `SessionStart` primer hook and a `UserPromptSubmit` task-scoped
+injection hook. Restore the prior all-tools default with `--preset full`.
+
+### MCP Server Options
+
+```bash
+openlore mcp [options]             # start the stdio MCP server
+
+  --preset <name>        # Expose a named preset (default: lean navigation, 10 tools)
+  --minimal              # Expose only the core 6 governance tools
+  --all-tools            # Expose the full surface — all 62 tools (alias --preset full)
+  --watch-auto           # Auto-detect + incrementally re-index the project dir
+  --no-watch-auto        # Disable auto-watch (use for one-shot tool calls)
+  --daemon               # Delegate tool calls to a shared `openlore serve` daemon
+```
+
+When the lean default is active, the server advertises the opt-in presets once via
+the MCP `initialize` `instructions` channel (no extra tool schemas).
 
 ### Drift Options
 
