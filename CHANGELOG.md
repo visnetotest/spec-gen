@@ -7,6 +7,14 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Added
 
+- **OpenSpec plugin manifest (marketplace Phase 1)** — OpenLore is the inaugural
+  OpenSpec marketplace plugin. It now ships a declarative plugin manifest (the
+  `"openspec"` key in `package.json`, vendored schema
+  `schemas/openspec-plugin-manifest-v1.json`) that OpenSpec reads to discover,
+  surface, gate, and invoke OpenLore as a subprocess without importing its code.
+  New `openlore plugin-manifest emit|validate` inspects/validates it — named
+  distinctly from the federation `openlore manifest` so the two never collide. The
+  host loader and curated registry are built separately in the OpenSpec repo.
 - **Task-scoped context injection** — `openlore install` now wires a Claude Code
   `UserPromptSubmit` hook running `openlore orient --inject`, which orients on your
   submitted prompt and injects a bounded, deterministic, ignorable orientation
@@ -18,6 +26,23 @@ All notable changes to OpenLore are documented here. This project adheres to
   block in `.openlore/config.json` (`mode: "off"`, `tokenBudget`, gate thresholds).
   Adapters without a pre-turn hook (Cursor/Cline/Continue/AGENTS.md) fall back to
   the instruction block (#184).
+
+### Changed
+
+- **Config-key ownership** — when OpenSpec owns `openspec/config.yaml`, OpenLore now
+  writes only its `openlore` key and preserves every other key and comment
+  byte-for-byte (a top-level-block string splice that keeps CRLF line endings,
+  inline-comment spacing, and folded scalars intact); it refuses to overwrite a
+  malformed host config rather than risk clobbering it.
+
+### Fixed
+
+- **Node-version guard** — launching the CLI under an unsupported Node (<22.5) now
+  fails fast with one legible stderr line and the stable exit code 78 (never a
+  stack trace), protecting subprocess delegation from a host on Node 20/21. The
+  guard runs from a bootstrap module so it evaluates before commander loads.
+- **`--json` stream purity** — `verify --json` (and, defensively, `drift`/`decisions`
+  `--json`) now keep stdout pure: machine output on stdout, all logs on stderr.
 
 ## [2.1.3] - 2026-06-22
 
