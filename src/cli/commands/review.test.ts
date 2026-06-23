@@ -18,7 +18,7 @@ vi.mock('node:fs/promises', () => ({ writeFile: vi.fn() }));
 
 import { writeFile } from 'node:fs/promises';
 
-import { composeReview, renderMarkdown, runReviewCli, REVIEW_MARKER, type ReviewBriefing } from './review.js';
+import { composeReview, renderMarkdown, runReviewCli, REVIEW_MARKER, MAX_MARKDOWN_CHARS, type ReviewBriefing } from './review.js';
 import { computeBlastRadius } from '../../core/services/mcp-handlers/blast-radius.js';
 import { handleStructuralDiff } from '../../core/services/mcp-handlers/structural-diff.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
@@ -77,6 +77,30 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
     expect(md).toContain('Blast radius unavailable');
     expect(md).toContain('openlore analyze');
     expect(md).toContain('**Removed** `gamma`');             // structural delta still shown
+  });
+
+  it('always fits in a GitHub comment (≤65536 chars) even with pathological names + many hubs', () => {
+    // A 50k-char symbol name + 200 hubs + 200 long governing decisions would, unbounded,
+    // blow past GitHub's 65536-char comment limit and 422 the Action's post step.
+    const longName = 'x'.repeat(50_000);
+    const pathological = {
+      ...structuralWithDelta,
+      removed: [{ name: longName, file: `${longName}.ts`, staleCallers: [] }],
+      signatureChanged: [{ name: longName + 'B', file: 'a.ts', before: 'a', after: 'b', staleCallers: [] }],
+    };
+    const blast = {
+      ...blastBriefing,
+      impact: {
+        ...blastBriefing.impact,
+        hubsTouched: Array.from({ length: 200 }, (_, i) => ({ symbol: `${longName}_hub${i}`, fanIn: i })),
+        governingDecisions: Array.from({ length: 200 }, (_, i) => `ADR-${i}: ${'d'.repeat(500)}`),
+        layersCrossed: Array.from({ length: 50 }, (_, i) => `layer${i}`),
+      },
+    } as unknown as BlastRadiusBriefing;
+    const md = renderMarkdown({ base: 'main', head: 'working tree', structural: pathological, blast, caveats: [], status: 'ok' });
+    expect(md.length).toBeLessThanOrEqual(MAX_MARKDOWN_CHARS);
+    expect(md.startsWith(REVIEW_MARKER)).toBe(true);          // marker survives any clamp
+    expect(md).toMatch(/…and \d+ more/);                      // inline lists summarise the tail
   });
 });
 

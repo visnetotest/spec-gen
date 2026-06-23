@@ -12,6 +12,13 @@
 # openlore ships the `review` command (the release that introduces it). Until then the
 # Action no-ops gracefully (no comment, the check stays green); pin `openlore-version`
 # to that release for reproducibility.
+#
+# Fork PRs: GitHub hands a READ-ONLY `GITHUB_TOKEN` to `pull_request` runs triggered from a
+# fork, so the sticky comment cannot be posted for external contributors — the Action warns
+# and the briefing stays in the job log (it never fails the check). If you need the comment
+# on fork PRs, switch the trigger to `pull_request_target` — but understand the security
+# trade-off (it runs with the base repo's write token; only safe because this Action runs
+# deterministic local analysis, not untrusted head code).
 
 name: OpenLore review
 
@@ -21,6 +28,12 @@ on:
 permissions:
   contents: read
   pull-requests: write
+
+# One run per PR: a newer push cancels the in-flight review so only the latest posts
+# (avoids a race that could create a duplicate sticky comment).
+concurrency:
+  group: openlore-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   openlore-review:

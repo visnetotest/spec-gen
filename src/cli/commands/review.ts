@@ -150,8 +150,29 @@ export async function composeReview(opts: { cwd: string; base?: string; head?: s
 
 // ── Rendering ────────────────────────────────────────────────────────────────────
 
+/** GitHub rejects an issue/PR comment body over this many characters with HTTP 422.
+ * renderMarkdown clamps to it so the bundled Action can always post the briefing. */
+export const MAX_MARKDOWN_CHARS = 65536;
+/** Per-item identifier clamp — one pathologically long symbol/file name (minified or
+ * generated code) must not blow a single bullet past the comment limit on its own. */
+const MAX_IDENT = 160;
+/** Per-inline-list clamp — hubs/layers/decisions are joined onto one line; bound the
+ * count so a hub-heavy change stays a briefing, not an unbounded line. */
+const INLINE_CAP = 12;
+
 function fileName(p: string): string {
   return p.replace(/^.*\//, '');
+}
+
+/** Clip an identifier/message to a sane length so no single token dominates the briefing. */
+function clip(s: string, max = MAX_IDENT): string {
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+/** Join an inline list with a bounded count + "…and N more" tail (no unbounded one-liner). */
+function inlineList(items: string[], cap = INLINE_CAP, sep = ', '): string {
+  if (items.length <= cap) return items.join(sep);
+  return items.slice(0, cap).join(sep) + sep + `…and ${items.length - cap} more`;
 }
 
 /** One-line conclusion summarising the whole review. */
@@ -205,20 +226,20 @@ export function renderMarkdown(b: ReviewBriefing): string {
       if (removed.length) {
         L.push(...mdList(removed.map(r => {
           const stale = (r.staleCallers?.length ?? 0);
-          return `**Removed** \`${r.name}\` (${fileName(r.file)})${stale ? ` — ${stale} caller${stale === 1 ? '' : 's'} now dangling` : ''}`;
+          return `**Removed** \`${clip(r.name)}\` (${clip(fileName(r.file))})${stale ? ` — ${stale} caller${stale === 1 ? '' : 's'} now dangling` : ''}`;
         })));
       }
       if (sig.length) {
         L.push(...mdList(sig.map(c => {
           const stale = (c.staleCallers?.length ?? 0);
-          return `**Signature changed** \`${c.name}\` (${fileName(c.file)})${stale ? ` — ${stale} caller${stale === 1 ? '' : 's'} may be stale` : ''}`;
+          return `**Signature changed** \`${clip(c.name)}\` (${clip(fileName(c.file))})${stale ? ` — ${stale} caller${stale === 1 ? '' : 's'} may be stale` : ''}`;
         })));
       }
       if (added.length) {
-        L.push(...mdList(added.map(a => `**Added** \`${a.name}\` (${fileName(a.file)})`)));
+        L.push(...mdList(added.map(a => `**Added** \`${clip(a.name)}\` (${clip(fileName(a.file))})`)));
       }
       if (renames.length) {
-        L.push(...mdList(renames.map(r => `**Renamed/moved** \`${r.from.name}\` → \`${r.to.name}\` (${r.confidence})`)));
+        L.push(...mdList(renames.map(r => `**Renamed/moved** \`${clip(r.from.name)}\` → \`${clip(r.to.name)}\` (${clip(r.confidence, 24)})`)));
       }
       L.push('');
     } else if (s.message) {
@@ -238,13 +259,13 @@ export function renderMarkdown(b: ReviewBriefing): string {
     if (hasImpact) {
       L.push('### Blast radius');
       if (blast.impact.hubsTouched.length) {
-        L.push(`- **Hubs touched:** ${blast.impact.hubsTouched.map(h => `\`${h.symbol}\` (${h.fanIn} callers)`).join(', ')}`);
+        L.push(`- **Hubs touched:** ${inlineList(blast.impact.hubsTouched.map(h => `\`${clip(h.symbol)}\` (${h.fanIn} callers)`))}`);
       }
       if (blast.impact.layersCrossed.length) {
-        L.push(`- **Layers crossed:** ${blast.impact.layersCrossed.join(', ')}`);
+        L.push(`- **Layers crossed:** ${inlineList(blast.impact.layersCrossed.map(l => clip(l, 60)))}`);
       }
       if (blast.impact.governingDecisions.length) {
-        L.push(`- **Governing decisions:** ${blast.impact.governingDecisions.join('; ')}`);
+        L.push(`- **Governing decisions:** ${inlineList(blast.impact.governingDecisions.map(d => clip(d, 200)), INLINE_CAP, '; ')}`);
       }
       if (blast.tests.count) {
         const tests = blast.tests.toRun.slice(0, 10).map(t => `\`${t.test}\``).join(', ');
@@ -259,15 +280,15 @@ export function renderMarkdown(b: ReviewBriefing): string {
     const DRIFT_CAP = 5;
     const driftLines: string[] = [];
     for (const m of blast.memory.willDrift.slice(0, DRIFT_CAP)) {
-      driftLines.push(`**Memory** ${m.kind === 'memory-orphaned' ? 'orphaned' : 'drifted'}: ${m.message}`);
+      driftLines.push(`**Memory** ${m.kind === 'memory-orphaned' ? 'orphaned' : 'drifted'}: ${clip(m.message, 200)}`);
     }
     const memExtra = blast.memory.drifted + blast.memory.orphaned - Math.min(blast.memory.willDrift.length, DRIFT_CAP);
     if (memExtra > 0) driftLines.push(`…and ${memExtra} more anchored memor${memExtra === 1 ? 'y' : 'ies'}`);
-    for (const d of blast.decisions.items.slice(0, DRIFT_CAP)) driftLines.push(`**Decision** ${d.kind}: ${d.message}`);
+    for (const d of blast.decisions.items.slice(0, DRIFT_CAP)) driftLines.push(`**Decision** ${d.kind}: ${clip(d.message, 200)}`);
     if (blast.decisions.affected > Math.min(blast.decisions.items.length, DRIFT_CAP)) {
       driftLines.push(`…and ${blast.decisions.affected - Math.min(blast.decisions.items.length, DRIFT_CAP)} more decision issue(s)`);
     }
-    for (const sp of blast.specs.items.slice(0, DRIFT_CAP)) driftLines.push(`**Spec** ${sp.kind}: ${sp.message}`);
+    for (const sp of blast.specs.items.slice(0, DRIFT_CAP)) driftLines.push(`**Spec** ${sp.kind}: ${clip(sp.message, 200)}`);
     if (blast.specs.willGoStale > Math.min(blast.specs.items.length, DRIFT_CAP)) {
       driftLines.push(`…and ${blast.specs.willGoStale - Math.min(blast.specs.items.length, DRIFT_CAP)} more spec issue(s)`);
     }
@@ -285,7 +306,16 @@ export function renderMarkdown(b: ReviewBriefing): string {
   }
 
   L.push('<sub>Advisory — informational, never a gate (unless your repo opts into `blastRadius.block`). Generated by [OpenLore](https://github.com/clay-good/OpenLore) `openlore review`.</sub>');
-  return L.join('\n') + '\n';
+  const out = L.join('\n') + '\n';
+  // Final safety net: GitHub rejects a comment body over MAX_MARKDOWN_CHARS (422). The
+  // per-item clips + inline caps make this practically unreachable, but a degenerate diff
+  // must never produce an un-postable briefing. Head-truncate (the sticky marker is line 1,
+  // so it survives) and append a clear notice.
+  if (out.length > MAX_MARKDOWN_CHARS) {
+    const notice = '\n\n<sub>⚠ Briefing truncated to fit GitHub\'s comment size limit — run `openlore review` locally for the full output.</sub>\n';
+    return out.slice(0, MAX_MARKDOWN_CHARS - notice.length) + notice;
+  }
+  return out;
 }
 
 /** Compact terminal rendering (human-readable, to stdout). */

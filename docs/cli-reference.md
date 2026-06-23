@@ -341,7 +341,11 @@ full-history checkout (`fetch-depth: 0`) and `pull-requests: write` permission. 
 `npx openlore@<version>`, so it activates once a **published** `openlore` ships `review` (until then it
 no-ops gracefully — no comment, the check stays green). Advisory by default; gate mode fails the job
 **only** when the briefing was produced and a configured `blastRadius.block` pattern fired (a missing
-`openlore`/`review` or an unreachable range never produces a false-positive red check).
+`openlore`/`review` or an unreachable range never produces a false-positive red check). A comment-post
+failure never fails the check either: on a **fork PR** GitHub gives `pull_request` a read-only token, so
+the comment can't be posted for external contributors — the Action warns and leaves the briefing in the
+job log (use `pull_request_target`, with its security trade-offs, if you need the comment on fork PRs).
+The briefing is always clamped to GitHub's 65,536-char comment limit.
 
 ### Federation (multi-repo)
 

@@ -75,17 +75,40 @@ runs:
           const fs = require('fs');
           const path = `${process.env.RUNNER_TEMP}/openlore-review.md`;
           if (!fs.existsSync(path)) { core.info('No review output to post.'); return; }
-          const body = fs.readFileSync(path, 'utf8');
+          let body = fs.readFileSync(path, 'utf8');
+          if (!body.trim()) { core.info('Review output was empty; skipping comment.'); return; }
+          // GitHub rejects a comment body over 65536 chars (422). `openlore review` already
+          // clamps, but guard here too so a future change can never 422 the post step.
+          const MAX = 65536;
+          if (body.length > MAX) {
+            const notice = '\n\n<sub>⚠ Briefing truncated to fit GitHub\'s comment size limit.</sub>\n';
+            body = body.slice(0, MAX - notice.length) + notice;
+          }
           const marker = '<!-- openlore-review -->';
           const { owner, repo } = context.repo;
           const issue_number = context.issue.number;
           if (!issue_number) { core.info('Not a PR context; skipping comment.'); return; }
-          const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
-          const existing = comments.find(c => typeof c.body === 'string' && c.body.includes(marker));
-          if (existing) {
-            await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
-            core.info(`Updated sticky review comment #${existing.id}`);
-          } else {
-            await github.rest.issues.createComment({ owner, repo, issue_number, body });
-            core.info('Created sticky review comment');
+          // Advisory contract: a comment-post failure (a fork PR's read-only GITHUB_TOKEN,
+          // a missing `pull-requests: write` permission, a transient API error) must NEVER
+          // fail the check. Warn and move on — the briefing is in the job log either way.
+          try {
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const matches = comments.filter(c => typeof c.body === 'string' && c.body.includes(marker));
+            const existing = matches[0];
+            // Self-heal: if more than one sticky comment ever exists (a prior race / human
+            // copy), keep the first and remove the rest so the PR carries exactly one.
+            for (const dup of matches.slice(1)) {
+              await github.rest.issues.deleteComment({ owner, repo, comment_id: dup.id }).catch(() => {});
+            }
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+              core.info(`Updated sticky review comment #${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+              core.info('Created sticky review comment');
+            }
+          } catch (e) {
+            core.warning(`OpenLore: could not post the review comment (${e.status ?? ''} ${e.message}). ` +
+              `On pull requests from a fork, GITHUB_TOKEN is read-only and cannot comment; ` +
+              `the briefing is available in this job's log.`);
           }
