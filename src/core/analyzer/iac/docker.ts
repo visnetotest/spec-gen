@@ -100,9 +100,47 @@ export function extractDocker(files: InFile[]): IacGraph {
 
 // ── Dockerfile ───────────────────────────────────────────────────────────────
 
-const FROM_RE = /^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?\s*$/i;
+// The trailing `(?:#.*)?` tolerates an inline comment after the instruction
+// (`FROM python:3.12-slim  # pinned`) — common, and the `$` anchor would otherwise
+// drop the whole FROM. Image refs / stage names never contain unquoted whitespace,
+// so the comment is always whitespace-separated from the captured token.
+const FROM_RE = /^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?\s*(?:#.*)?$/i;
 const COPY_FROM_RE = /^\s*(?:COPY|ADD)\s+(?:[^\n]*?\s)?--from=(\S+)/i;
 const ARG_REF_RE = /\$\{?[A-Za-z_]/; // FROM ${BASE} / $BASE — dynamic, not resolvable
+// A heredoc redirect on an instruction line (`RUN <<EOF`, `COPY <<-'EOF' dest`). The
+// `<<` must follow whitespace/start so shell left-shift inside a string ("a<<b") is not
+// mistaken for one. Body lines that follow MUST NOT be scanned for FROM/COPY.
+const HEREDOC_RE = /(?:^|\s)<<[-~]?\s*['"]?([A-Za-z_]\w*)['"]?/g;
+
+/**
+ * Reduce a Dockerfile to its logical instruction lines, carrying each one's 1-based
+ * start line: line continuations (`\` at end of line) are joined, and heredoc bodies
+ * (`RUN <<EOF … EOF`) and comment lines are dropped, so the FROM/COPY scanner never
+ * matches text inside a RUN script.
+ */
+function toInstructions(content: string): Array<{ text: string; line: number }> {
+  const lines = content.split('\n');
+  const out: Array<{ text: string; line: number }> = [];
+  let pendingHeredocs: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (pendingHeredocs.length > 0) {
+      // Inside a heredoc body: only a line equal to a delimiter closes it.
+      const trimmed = lines[i].trim();
+      pendingHeredocs = pendingHeredocs.filter((d) => d !== trimmed);
+      continue;
+    }
+    if (/^\s*#/.test(lines[i])) continue; // comment / parser directive
+    const startLine = i + 1;
+    let joined = lines[i];
+    while (/\\\s*$/.test(joined) && i + 1 < lines.length) {
+      joined = joined.replace(/\\\s*$/, ' ') + lines[++i];
+    }
+    const hd = [...joined.matchAll(HEREDOC_RE)].map((m) => m[1]);
+    if (hd.length) pendingHeredocs.push(...hd);
+    out.push({ text: joined, line: startLine });
+  }
+  return out;
+}
 
 function parseDockerfile(
   filePath: string,
@@ -116,11 +154,10 @@ function parseDockerfile(
   const copyFromByStage: Array<Array<{ ref: string; line: number }>> = [];
   const fromByStage: Array<{ base: string; line: number } | null> = [];
 
-  const lines = content.split('\n');
+  const instructions = toInstructions(content);
   let stageIndex = -1;
 
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
+  for (const { text: raw, line: lineNo } of instructions) {
     const fromM = FROM_RE.exec(raw);
     if (fromM) {
       stageIndex++;
@@ -133,19 +170,19 @@ function parseDockerfile(
         type: 'docker-stage',
         kind: 'resource',
         filePath,
-        startLine: i + 1,
+        startLine: lineNo,
         signature: asName ? `FROM ${base} AS ${asName}` : `FROM ${base}`,
         language: 'Dockerfile',
       });
       stageAddrByName.set(stageName, address);
       stageAddrByIndex.push(address);
-      fromByStage.push({ base, line: i + 1 });
+      fromByStage.push({ base, line: lineNo });
       copyFromByStage.push([]);
       continue;
     }
     const copyM = COPY_FROM_RE.exec(raw);
     if (copyM && stageIndex >= 0) {
-      copyFromByStage[stageIndex].push({ ref: copyM[1], line: i + 1 });
+      copyFromByStage[stageIndex].push({ ref: copyM[1], line: lineNo });
     }
   }
 
@@ -205,10 +242,17 @@ function parseCompose(
 ): void {
   let doc;
   try {
-    doc = parseDocument(content);
+    // `merge: true` expands YAML merge keys (`<<: *anchor`) — the ubiquitous
+    // `x-*: &anchor` compose extension pattern — so inherited image/depends_on/build
+    // keys are present rather than left under a literal `<<` property. (It must be set
+    // at parse time, not on toJS.)
+    doc = parseDocument(content, { merge: true });
   } catch {
     return;
   }
+  // `yaml` collects recoverable syntax errors instead of throwing and returns a
+  // best-effort partial document; bail rather than mint a garbage service node.
+  if (doc.errors && doc.errors.length > 0) return;
   const js = doc.toJS() as Record<string, unknown> | null;
   if (!js || typeof js !== 'object') return;
   const services = js.services;

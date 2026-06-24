@@ -39,6 +39,17 @@ access): it is a static parse only.
 - **THEN** the system emits the node but no dependency edge for the unresolvable reference, rather than a
   speculative or wrong edge
 
+#### Scenario: Real-world container syntax is parsed without false edges
+
+- **GIVEN** a Dockerfile that uses heredoc `RUN <<EOF … EOF` blocks whose body contains the literal word
+  `FROM`, `\` line continuations across a `FROM` instruction, and trailing inline comments on `FROM`
+  lines; and a compose file that uses YAML merge keys (`x-*: &anchor` with `<<: *anchor`)
+- **WHEN** the repository is analyzed
+- **THEN** the heredoc body produces no stage or edge, the continued `FROM` resolves to its real base
+  image, the trailing comment does not suppress the `FROM`, and the merged service inherits its
+  `image`/`depends_on`/`build` keys — and recoverable-but-malformed YAML produces no node rather than a
+  garbage one
+
 #### Scenario: Detection does not regress incremental watching
 
 - **GIVEN** the incremental watcher, which graphs only a subset of languages and never includes IaC

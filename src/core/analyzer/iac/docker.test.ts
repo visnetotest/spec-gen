@@ -152,3 +152,81 @@ describe('compose ↔ Dockerfile cross-file resolution (fixtures)', () => {
     expect(refsOf(a).sort()).toEqual(refs.sort());
   });
 });
+
+// Regression coverage for real-world Dockerfile/compose syntax that adversarial
+// e2e dogfooding (PR #193 review) found breaking the naive parser.
+describe('Dockerfile robustness (adversarial regressions)', () => {
+  it('ignores FROM/COPY --from inside heredoc bodies', () => {
+    const g = extractDocker([
+      df(['FROM node:20 AS base', 'RUN <<EOF', 'FROM not-a-stage', 'COPY --from=99 /a /b', 'echo hi', 'EOF'].join('\n')),
+    ]);
+    expect(g.resources.filter((r) => !r.isExternal).map((r) => r.address)).toEqual(['Dockerfile::base']);
+    expect(g.resources.some((r) => r.address === 'not-a-stage')).toBe(false);
+    expect(refsOf(g)).toEqual(['Dockerfile::base -references-> node:20']);
+  });
+
+  it('joins line continuations across a FROM instruction', () => {
+    const g = extractDocker([df(['FROM \\', '  python:3.12 AS app', 'COPY --from=app /a /b'].join('\n'))]);
+    expect(g.resources.some((r) => r.address === 'Dockerfile::app')).toBe(true);
+    expect(g.resources.some((r) => r.address === '\\')).toBe(false);
+    expect(refsOf(g)).toContain('Dockerfile::app -references-> python:3.12');
+  });
+
+  it('tolerates trailing inline comments on FROM lines (single-stage)', () => {
+    const g = extractDocker([df('FROM python:3.12-slim   # base, pinned\nWORKDIR /app')]);
+    expect(g.resources.some((r) => r.address === 'Dockerfile::stage0')).toBe(true);
+    expect(refsOf(g)).toEqual(['Dockerfile::stage0 -references-> python:3.12-slim']);
+  });
+
+  it('tolerates trailing inline comments on multi-stage FROM ... AS lines', () => {
+    const g = extractDocker([df('FROM node:20-alpine AS base  # pin\nFROM base AS final  # final\nCOPY . .')]);
+    expect(g.resources.filter((r) => !r.isExternal).map((r) => r.address)).toEqual(
+      expect.arrayContaining(['Dockerfile::base', 'Dockerfile::final']),
+    );
+    expect(g.resources.some((r) => r.address === 'base' && r.isExternal)).toBe(false);
+    expect(refsOf(g)).toContain('Dockerfile::final -references-> Dockerfile::base');
+    expect(refsOf(g)).toContain('Dockerfile::base -references-> node:20-alpine');
+  });
+
+  it('ignores whole-line comments mentioning FROM', () => {
+    const g = extractDocker([df('# FROM commented:nope\nFROM alpine:3.20\n')]);
+    expect(g.resources.some((r) => r.address === 'commented:nope')).toBe(false);
+    expect(refsOf(g)).toEqual(['Dockerfile::stage0 -references-> alpine:3.20']);
+  });
+
+  it('handles CRLF line endings', () => {
+    const g = extractDocker([df('FROM node:20 AS base\r\nFROM base AS final\r\nCOPY --from=base /a /b\r\n')]);
+    expect(refsOf(g)).toContain('Dockerfile::base -references-> node:20');
+    expect(refsOf(g)).toContain('Dockerfile::final -references-> Dockerfile::base');
+  });
+});
+
+describe('docker-compose robustness (adversarial regressions)', () => {
+  it('expands YAML merge keys (x-*: &anchor / <<: *anchor)', () => {
+    const g = extractDocker([
+      compose(
+        [
+          'x-common: &common',
+          '  image: apache/airflow:2.9.0',
+          '  depends_on:',
+          '    - db',
+          'services:',
+          '  web:',
+          '    <<: *common',
+          '  db:',
+          '    image: postgres:16',
+        ].join('\n'),
+      ),
+    ]);
+    const refs = refsOf(g);
+    expect(refs).toContain('docker-compose.yml::service.web -references-> apache/airflow:2.9.0');
+    expect(refs).toContain('docker-compose.yml::service.web -depends_on-> docker-compose.yml::service.db');
+    // No literal `<<` ever becomes a service candidate.
+    expect(g.resources.some((r) => r.address.endsWith('service.<<'))).toBe(false);
+  });
+
+  it('does not mint a garbage node from recoverable-but-malformed YAML', () => {
+    const g = extractDocker([compose('services:\n  web:\n    image: [ { bad: [ unclosed ]\n')]);
+    expect(g.resources).toHaveLength(0);
+  });
+});

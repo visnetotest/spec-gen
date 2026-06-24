@@ -68,3 +68,31 @@ openlore orient --task "postgres database service dependencies"
 
 `analyze → graph → orient` works end-to-end on real container files with zero MCP-tool or schema
 changes. No regression to general-purpose or other IaC extraction (full suite: 4692 passed / 2 skipped).
+
+## Adversarial hardening (PR review, 2026-06-24)
+
+Three parallel adversarial e2e agents dogfooded real-world Dockerfiles and compose files
+(multi-stage builds, Airflow-style compose, popular-project shapes). They found and we fixed four
+real defects; all are now locked by regression tests in `docker.test.ts`:
+
+| Bug | Symptom | Fix |
+|-----|---------|-----|
+| Heredoc body scanned | `FROM`/`COPY --from` inside `RUN <<EOF … EOF` became bogus stages/edges | `toInstructions` skips heredoc bodies |
+| Line continuation | `FROM \`⏎`python:3.12 AS app` captured `\` as an image, lost the real base + stage name | `toInstructions` joins `\` continuations |
+| Trailing inline comment | `FROM python:3.12-slim # pinned` failed the `$`-anchored regex → whole Dockerfile vanished, or (multi-stage) missing stage + bogus external image + wrong edge | `FROM_RE` tolerates a trailing `# …` |
+| YAML merge key | `x-*: &anchor` + `<<: *anchor` (Airflow) left inherited `image`/`depends_on`/`build` under a literal `<<` → missed edges | `parseDocument(content, { merge: true })` |
+| (hardening) malformed YAML | recoverable syntax errors minted a garbage service node | bail when `doc.errors.length > 0` |
+
+Final comprehensive dogfood — an Airflow-style repo combining all of the above (merge keys + heredoc +
+trailing comments + dynamic `ARG` base + multi-stage + cross-file `build.target`) — passes 12/12
+end-to-end checks through the real `openlore analyze` CLI:
+
+- dynamic `FROM node:${NODE_VERSION}` → stage node, **no** edge, no `${}` node minted;
+- heredoc `FROM` → not a node;
+- `COPY --from=` chains resolve (builder→deps, final→builder);
+- trailing-comment `FROM` → correct base-image edge;
+- merged `<<: *common` → `webserver`/`worker` inherit `image` + `depends_on`;
+- `webserver` has `build:` so the merged `image:` is correctly the build tag (no image edge), while
+  `worker` (no build) gets the image edge.
+
+No regressions: full suite 4700 passed / 2 skipped; lint + typecheck clean.

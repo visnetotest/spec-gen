@@ -79,6 +79,7 @@ Helm, executes Ansible, or calls a cloud API. No external CLI is required.
 - **Compose edges:** `depends_on` and `links` → service→service; `build:` → the resolved Dockerfile stage (the final stage, or `target:` when given) — a **cross-file** edge; `image:` → external image (only when the service has no `build:`, since with `build:` the image is the output tag, not a dependency).
 - **The high-value chain:** compose service → Dockerfile stage → base image, so a single `analyze_impact` on a base image surfaces every stage and service that would rebuild — across files, deterministically, no LLM.
 - **Notes:** Dockerfiles and compose files are parsed *together* (they cross-reference). One extractor, both ecosystems. Static only — no `docker build`, no compose interpolation, no registry access.
+- **Robustness (real-world syntax):** the Dockerfile scanner joins `\` line continuations, skips heredoc bodies (`RUN <<EOF … EOF` — a `FROM` inside a script is never a stage), ignores whole-line and trailing inline comments, and handles CRLF, `--platform=…`, lowercase `from … as …`, digest pins, and numeric `COPY --from=0`. The compose parser expands YAML merge keys (`x-*: &anchor` / `<<: *anchor`, the Airflow-style extension pattern) and ignores recoverable-but-malformed YAML rather than minting a garbage node.
 
 ## Discovery & disambiguation
 
