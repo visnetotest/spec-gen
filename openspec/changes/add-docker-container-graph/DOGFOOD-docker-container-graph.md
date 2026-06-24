@@ -96,3 +96,38 @@ end-to-end checks through the real `openlore analyze` CLI:
   `worker` (no build) gets the image edge.
 
 No regressions: full suite 4700 passed / 2 skipped; lint + typecheck clean.
+
+## Adversarial round 2 + edge-store verification (2026-06-24)
+
+A second adversarial pass (one e2e agent dogfooding **real OSS repos** — `docker/awesome-compose`
+and Apache Airflow's canonical `docker-compose.yaml` — plus targeted probing) found two more real
+defects, now fixed and regression-tested (`docker.test.ts`: 21→28):
+
+| Bug | Symptom | Fix |
+|-----|---------|-----|
+| Stage-name case sensitivity | `FROM x AS Builder` + `COPY --from=builder` → bogus external image `builder` + wrong edge (Docker stage names are case-insensitive) | lookup map keyed lowercase; `FROM`/`COPY --from`/compose `target` lowercased before lookup |
+| `${VAR:-default}` interpolation dropped | `image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.0.0}` produced no edge → 8/10 Airflow services had no base-image dependency (defeats blast-radius) | `resolveRef()` substitutes inline `${VAR:-default}` / `${VAR-default}` defaults across `image`, `FROM`, `COPY --from`, and `build.context`/`build.dockerfile`; truly-dynamic refs (`${VAR}`, `${VAR:?err}`) stay edge-less |
+
+**Edge-store persistence verified.** Confirmed Docker nodes AND edges land in the production SQLite
+edge store (`call-graph.db`) — the substrate `analyze_impact`/`get_subgraph`/`blast_radius` read,
+not just `llm-context.json`:
+
+```
+sqlite3 call-graph.db "SELECT language, COUNT(*) FROM nodes GROUP BY language;"
+  Docker Compose|2   Dockerfile|5
+-- edges (caller → callee, kind), persisted:
+  svc/Dockerfile::build   → golang:1.22            references
+  svc/Dockerfile::runtime → gcr.io/distroless/base references
+  svc/Dockerfile::runtime → svc/Dockerfile::build  references   (COPY --from=build)
+  docker-compose.yml::service.svc → svc/Dockerfile::runtime     references   (build → final stage)
+  docker-compose.yml::service.svc → docker-compose.yml::service.db  depends_on
+  docker-compose.yml::service.db  → postgres:16    references
+```
+
+**Real-OSS dogfood (`docker/awesome-compose`, 531 files):** `analyze` 5.4s, exit 0, no Docker
+warnings. 150 Dockerfile + 81 Docker Compose nodes; 210 `references` + 26 `depends_on` edges,
+all persisted to `call-graph.db`. Spot-checked against source: multi-stage `FROM` chains, `COPY
+--from` (stage + external), `--platform` stripping, `build`/`build.target`, `depends_on`, external
+image dedup across files, and Airflow merge-key inheritance all match the real files.
+
+No regressions: full suite 4707 passed / 2 skipped; lint + typecheck clean.

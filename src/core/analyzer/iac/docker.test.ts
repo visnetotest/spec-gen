@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { extractDocker, isDockerfilePath } from './docker.js';
+import { projectIacGraph } from './project.js';
 
 const df = (content: string, path = 'Dockerfile') => ({ path, content, language: 'Dockerfile' });
 const compose = (content: string, path = 'docker-compose.yml') => ({ path, content, language: 'Docker Compose' });
@@ -228,5 +229,65 @@ describe('docker-compose robustness (adversarial regressions)', () => {
   it('does not mint a garbage node from recoverable-but-malformed YAML', () => {
     const g = extractDocker([compose('services:\n  web:\n    image: [ { bad: [ unclosed ]\n')]);
     expect(g.resources).toHaveLength(0);
+  });
+});
+
+describe('Dockerfile stage-name case-insensitivity (Docker/BuildKit semantics)', () => {
+  it('resolves COPY --from and FROM to a differently-cased stage name', () => {
+    const g = extractDocker([
+      df(['FROM node:20 AS Builder', 'FROM Builder AS final', 'COPY --from=builder /a /b'].join('\n')),
+    ]);
+    // No bogus external image named after the stage.
+    expect(g.resources.some((r) => r.isExternal && r.address === 'builder')).toBe(false);
+    expect(g.resources.filter((r) => r.isExternal).map((r) => r.address)).toEqual(['node:20']);
+    expect(refsOf(g)).toContain('Dockerfile::final -references-> Dockerfile::Builder');
+    // FROM Builder + COPY --from=builder dedupe to a single projected edge.
+    const projected = projectIacGraph(g);
+    const finalId = projected.nodes.find((n) => n.name === 'Dockerfile::final')!.id;
+    const builderId = projected.nodes.find((n) => n.name === 'Dockerfile::Builder')!.id;
+    expect(projected.edges.filter((e) => e.callerId === finalId && e.calleeId === builderId)).toHaveLength(1);
+  });
+
+  it('resolves a compose build.target case-insensitively', () => {
+    const g = extractDocker([
+      df('FROM x AS Builder\nFROM scratch', 'api/Dockerfile'),
+      compose('services:\n  web:\n    build:\n      context: ./api\n      target: BUILDER\n'),
+    ]);
+    expect(refsOf(g)).toContain('docker-compose.yml::service.web -references-> api/Dockerfile::Builder');
+  });
+});
+
+describe('variable interpolation with inline defaults (compose + Dockerfile)', () => {
+  it('resolves compose image: ${VAR:-default} (the Airflow pattern)', () => {
+    const g = extractDocker([
+      compose('services:\n  web:\n    image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.0.0}\n  db:\n    image: ${DB-postgres:16}\n'),
+    ]);
+    const refs = refsOf(g);
+    expect(refs).toContain('docker-compose.yml::service.web -references-> apache/airflow:3.0.0');
+    expect(refs).toContain('docker-compose.yml::service.db -references-> postgres:16');
+  });
+
+  it('resolves every ${VAR:-default} segment in a registry/name:tag ref', () => {
+    const g = extractDocker([compose('services:\n  app:\n    image: ${REG:-docker.io}/${NS:-lib}/app:${TAG:-1.2}\n')]);
+    expect(refsOf(g)).toContain('docker-compose.yml::service.app -references-> docker.io/lib/app:1.2');
+  });
+
+  it('emits no edge when interpolation has no inline default', () => {
+    const g = extractDocker([compose('services:\n  a:\n    image: ${ONLYVAR}\n  b:\n    image: ${NEEDED:?must set}\n')]);
+    expect(g.references).toHaveLength(0);
+    expect(g.resources.some((r) => r.isExternal)).toBe(false);
+  });
+
+  it('resolves a Dockerfile FROM ${BASE:-default} inline default', () => {
+    const g = extractDocker([df('FROM ${BASE:-node:20} AS app')]);
+    expect(refsOf(g)).toContain('Dockerfile::app -references-> node:20');
+  });
+
+  it('resolves an interpolated compose build.dockerfile default', () => {
+    const g = extractDocker([
+      df('FROM alpine AS app', 'api/Dockerfile'),
+      compose('services:\n  web:\n    build:\n      context: ./api\n      dockerfile: ${DF:-Dockerfile}\n'),
+    ]);
+    expect(refsOf(g)).toContain('docker-compose.yml::service.web -references-> api/Dockerfile::app');
   });
 });

@@ -106,7 +106,20 @@ export function extractDocker(files: InFile[]): IacGraph {
 // so the comment is always whitespace-separated from the captured token.
 const FROM_RE = /^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?\s*(?:#.*)?$/i;
 const COPY_FROM_RE = /^\s*(?:COPY|ADD)\s+(?:[^\n]*?\s)?--from=(\S+)/i;
-const ARG_REF_RE = /\$\{?[A-Za-z_]/; // FROM ${BASE} / $BASE — dynamic, not resolvable
+
+/**
+ * Resolve a value that may carry compose/Dockerfile variable interpolation.
+ * `${VAR:-default}` / `${VAR-default}` (the form used by, e.g., Airflow's
+ * `image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.0.0}`) are replaced by their inline
+ * default. Any `$` left afterward — an unresolvable `${VAR}`, `${VAR:?err}`, or `$VAR`
+ * with no inline default — makes the value dynamic, so we return null and emit no edge
+ * rather than a wrong one.
+ */
+function resolveRef(value: string): string | null {
+  const resolved = value.replace(/\$\{[A-Za-z_]\w*:?-([^}]*)\}/g, '$1');
+  if (resolved.includes('$')) return null;
+  return resolved;
+}
 // A heredoc redirect on an instruction line (`RUN <<EOF`, `COPY <<-'EOF' dest`). The
 // `<<` must follow whitespace/start so shell left-shift inside a string ("a<<b") is not
 // mistaken for one. Body lines that follow MUST NOT be scanned for FROM/COPY.
@@ -174,7 +187,9 @@ function parseDockerfile(
         signature: asName ? `FROM ${base} AS ${asName}` : `FROM ${base}`,
         language: 'Dockerfile',
       });
-      stageAddrByName.set(stageName, address);
+      // Stage names are case-insensitive in Docker/BuildKit (`AS Builder` is reachable
+      // via `--from=builder`), so key the lookup map by lowercase name.
+      stageAddrByName.set(stageName.toLowerCase(), address);
       stageAddrByIndex.push(address);
       fromByStage.push({ base, line: lineNo });
       copyFromByStage.push([]);
@@ -199,28 +214,30 @@ function parseDockerfile(
   for (let s = 0; s <= stageIndex; s++) {
     const stageAddr = stageAddrByIndex[s];
     const from = fromByStage[s];
-    if (from && !ARG_REF_RE.test(from.base)) {
-      const earlier = stageAddrByName.get(from.base);
+    const base = from ? resolveRef(from.base) : null;
+    if (from && base) {
+      const earlier = stageAddrByName.get(base.toLowerCase());
       if (earlier) {
         addRef(stageAddr, earlier, from.line, 'references');
-      } else if (from.base.toLowerCase() !== 'scratch') {
-        ensureImage(from.base);
-        addRef(stageAddr, from.base, from.line, 'references');
+      } else if (base.toLowerCase() !== 'scratch') {
+        ensureImage(base);
+        addRef(stageAddr, base, from.line, 'references');
       }
       // else: `FROM scratch` — the empty base, no dependency.
     }
     for (const cf of copyFromByStage[s]) {
-      if (ARG_REF_RE.test(cf.ref)) continue; // dynamic --from, no edge
-      const named = stageAddrByName.get(cf.ref);
+      const ref = resolveRef(cf.ref);
+      if (!ref) continue; // dynamic --from, no edge
+      const named = stageAddrByName.get(ref.toLowerCase());
       if (named) { addRef(stageAddr, named, cf.line, 'references'); continue; }
-      const asIndex = Number(cf.ref);
+      const asIndex = Number(ref);
       if (Number.isInteger(asIndex) && asIndex >= 0 && asIndex < stageAddrByIndex.length) {
         addRef(stageAddr, stageAddrByIndex[asIndex], cf.line, 'references');
         continue;
       }
       // Otherwise --from references an external image (e.g. COPY --from=nginx:latest …).
-      ensureImage(cf.ref);
-      addRef(stageAddr, cf.ref, cf.line, 'references');
+      ensureImage(ref);
+      addRef(stageAddr, ref, cf.line, 'references');
     }
   }
 
@@ -307,9 +324,12 @@ function parseCompose(
     const buildTarget = resolveBuildTarget(svc.build, composeDir, dockerInfoByPath);
     if (buildTarget) {
       addRef(from, buildTarget, 'references');
-    } else if (typeof svc.image === 'string' && svc.image && !ARG_REF_RE.test(svc.image)) {
-      ensureImage(svc.image);
-      addRef(from, svc.image, 'references');
+    } else if (typeof svc.image === 'string') {
+      const img = resolveRef(svc.image);
+      if (img) {
+        ensureImage(img);
+        addRef(from, img, 'references');
+      }
     }
   }
 }
@@ -335,11 +355,13 @@ function resolveBuildTarget(
   } else {
     return null;
   }
-  if (ARG_REF_RE.test(context) || ARG_REF_RE.test(dockerfile)) return null; // templated → no edge
-  const dfPath = posixNormalize([composeDir, context, dockerfile].filter(Boolean).join('/'));
+  const ctx = resolveRef(context);
+  const dfName = resolveRef(dockerfile);
+  if (ctx == null || dfName == null) return null; // unresolvable interpolation → no edge
+  const dfPath = posixNormalize([composeDir, ctx, dfName].filter(Boolean).join('/'));
   const info = dockerInfoByPath.get(dfPath);
   if (!info) return null; // Dockerfile not in the indexed set → best-effort, no edge
-  if (target) return info.stageAddrByName.get(target) ?? null;
+  if (target) return info.stageAddrByName.get(target.toLowerCase()) ?? null;
   return info.finalStageAddress || null;
 }
 

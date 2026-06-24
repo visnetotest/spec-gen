@@ -42,13 +42,16 @@ access): it is a static parse only.
 #### Scenario: Real-world container syntax is parsed without false edges
 
 - **GIVEN** a Dockerfile that uses heredoc `RUN <<EOF … EOF` blocks whose body contains the literal word
-  `FROM`, `\` line continuations across a `FROM` instruction, and trailing inline comments on `FROM`
-  lines; and a compose file that uses YAML merge keys (`x-*: &anchor` with `<<: *anchor`)
+  `FROM`, `\` line continuations across a `FROM` instruction, trailing inline comments on `FROM` lines,
+  a differently-cased stage reference (`AS Builder` reached via `--from=builder`), and a base with an
+  inline default (`FROM ${BASE:-node:20}`); and a compose file that uses YAML merge keys
+  (`x-*: &anchor` with `<<: *anchor`) and an interpolated image (`image: ${VAR:-apache/airflow:3.0.0}`)
 - **WHEN** the repository is analyzed
 - **THEN** the heredoc body produces no stage or edge, the continued `FROM` resolves to its real base
-  image, the trailing comment does not suppress the `FROM`, and the merged service inherits its
-  `image`/`depends_on`/`build` keys — and recoverable-but-malformed YAML produces no node rather than a
-  garbage one
+  image, the trailing comment does not suppress the `FROM`, the differently-cased `--from` resolves to
+  the stage (not a bogus external image), the inline `${VAR:-default}` references resolve to their
+  defaults, the merged service inherits its `image`/`depends_on`/`build` keys, and
+  recoverable-but-malformed YAML produces no node rather than a garbage one
 
 #### Scenario: Detection does not regress incremental watching
 
