@@ -874,6 +874,9 @@ const SKIP_BY_TOOL: Record<string, Set<string>> = {
   // bits: `language` (redundant scalar) and `criticalPathLeaves` (a long list of
   // leaf names, far less actionable than the up/downstream chains above it).
   analyze_impact: new Set(['language', 'criticalPathLeaves']),
+  // sync_decisions: `modifiedSpecs` repeats the per-item `specs` already shown
+  // under synced[]; drop it so the glance is just synced decisions + any errors.
+  sync_decisions: new Set(['modifiedSpecs']),
 };
 
 /** Skip set for a tool: base skips plus any tool-specific extras. */
