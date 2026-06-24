@@ -16,6 +16,7 @@ import { extractPulumi } from './pulumi.js';
 import { extractCdk } from './cdk.js';
 import { extractDocker } from './docker.js';
 import { extractGitHubActions } from './github-actions.js';
+import { extractBicep } from './bicep.js';
 import { projectIacGraph, type ProjectedIac } from './project.js';
 import { mergeIacGraphs, type IacGraph } from './types.js';
 
@@ -46,6 +47,8 @@ export function buildIacGraph(files: InFile[]): IacGraph {
     extractDocker(files.filter((f) => f.language === 'Dockerfile' || f.language === 'Docker Compose')),
     // Workflows + composite/reusable actions are cross-referential, so one extractor sees both.
     extractGitHubActions(byLang('GitHub Actions')),
+    // Bicep is its own DSL, tagged by the `.bicep` extension.
+    extractBicep(byLang('Bicep')),
   ];
   return mergeIacGraphs(graphs);
 }

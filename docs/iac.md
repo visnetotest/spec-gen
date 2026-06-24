@@ -26,8 +26,8 @@ Edge direction is **dependent → dependency**. So for any resource node:
 
 `FunctionNode.language` carries the ecosystem tag (`Terraform`, `Kubernetes`,
 `Helm`, `CloudFormation`, `Ansible`, `Pulumi`, `CDK`, `CDKTF`, `Dockerfile`,
-`Docker Compose`, `GitHub Actions`); `className` carries the resource type, so
-clustering and architecture overviews group by type.
+`Docker Compose`, `GitHub Actions`, `Bicep`); `className` carries the resource
+type, so clustering and architecture overviews group by type.
 
 ## What is extracted, per ecosystem
 
@@ -106,11 +106,18 @@ change this?".
   expanded so an anchored job inherits its `steps`/`needs` edges; SHA pins with trailing comments,
   `docker://` actions, and `.yml`/`.yaml`/CRLF variants are all handled.
 
+### Azure Bicep  (`*.bicep`)
+- **Nodes:** every `resource` (typed by `Microsoft.Foo/bar`, the `@apiVersion` stripped), `param`, `var`, `output`, and `module`. An `existing` resource is kind `data`; a nested child `resource` declared inside another resource's body is its own node; a `[for … : { … }]` loop is a **single** node (noted in the signature). The node name is the bare symbol (`stg`), even though the resolution address is file-scoped.
+- **Edges:** `parent:` → child → parent; `dependsOn: [ … ]` → dependent → each listed symbol; every other bare symbol used in a value → declaring symbol → referenced symbol. References are caught inside `${…}` string interpolations, as the base of a `.property` access (`stg.id` → `stg`), on **both** sides of the `::` nested-resource accessor (`vnet::subnet` → `vnet` and `subnet`), and as the source of a spread (`{ ...commonTags }` → `commonTags`). A conditional `resource x '…' = if (cond) { … }` keeps the condition's symbols as dependencies and still attributes nested children. Property keys, function names (`resourceGroup()`), and string-literal text are not references.
+- **Modules:** a local `module './net.bicep'` links (cross-file) to every resource declared in the target file and groups them as a `ClassNode`; a registry/template-spec module (`br/…`, `ts/…`) is an external node.
+- **File-scoped resolution:** Bicep resolves bare identifiers against a flat **per-file** symbol table (no `var.`/`type.name` prefixes), so the same name (`location`, `vnet`) recurs across files. Addresses are scoped by file (`<file>::<symbol>`) and references resolve **within the declaring file only** — two files each declaring `param location` never cross-link. The single cross-file edge is the local-`module` link above.
+- **Notes:** parsed with a tolerant, hand-rolled scanner (no Bicep compiler, no native dependency). Static only — no `bicep build`, no ARM emit, no Azure/registry access. A multi-line ternary value (`= cond\n ? a\n : b`) resolves only the first line's symbols; the others are dropped rather than guessed.
+
 ## Discovery & disambiguation
 
-`.tf`/`.tfvars`/`.tf.json` map to Terraform by extension. `.yaml`/`.yml`/`.json`
-are ambiguous, so they route through a small pure function,
-`classifyYaml(path, content)`:
+`.tf`/`.tfvars`/`.tf.json` map to Terraform by extension; `.bicep` maps to Bicep
+by extension (both via `detectLanguage`). `.yaml`/`.yml`/`.json` are ambiguous, so
+they route through a small pure function, `classifyYaml(path, content)`:
 
 - `apiVersion:` + `kind:` → **Kubernetes**
 - `AWSTemplateFormatVersion` / `Transform: AWS::Serverless` / `Resources:` with `Type: AWS::…` → **CloudFormation**
@@ -132,11 +139,14 @@ watcher's path unchanged — consistent with how all IaC YAML is resolved.
 
 ## Out of scope (future specs)
 
-Bicep, ARM JSON, Kustomize, Crossplane, Jsonnet/CUE, Nix, Bazel/Starlark,
-Packer, Vagrant, and non-GitHub CI systems (GitLab CI, CircleCI, Azure
-Pipelines). For GitHub Actions specifically: `${{ matrix }}` fan-out as distinct
-nodes, step-level granularity (the job is the unit), and remote
-reusable-workflow *contents* (an external ref is a node, not fetched). Also
-deferred for Docker specifically: compose `volumes`/`networks` as first-class
-nodes, cross-file compose `extends`, and incremental-watch of container files
-(matches all IaC YAML today).
+ARM JSON, Kustomize, Crossplane, Jsonnet/CUE, Nix, Bazel/Starlark, Packer,
+Vagrant, and non-GitHub CI systems (GitLab CI, CircleCI, Azure Pipelines). For
+GitHub Actions specifically: `${{ matrix }}` fan-out as distinct nodes,
+step-level granularity (the job is the unit), and remote reusable-workflow
+*contents* (an external ref is a node, not fetched). Also deferred for Docker
+specifically: compose `volumes`/`networks` as first-class nodes, cross-file
+compose `extends`, and incremental-watch of container files (matches all IaC
+YAML today). Also deferred for Bicep specifically: `.bicepparam` parameter
+files, `import`/user-defined functions and types, and cross-file `module`
+**output** type-resolution (the module links to the target file's resources, not
+to specific output symbols).

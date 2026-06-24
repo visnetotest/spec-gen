@@ -70,7 +70,7 @@ describe('cross-domain code↔infra wiring (spec-17)', () => {
     // No code→infra edges (the only possible references here would be infra→infra).
     const codeToInfra = refs.filter(e => {
       const caller = g.nodes.find(n => n.id === e.callerId);
-      return caller && !['Terraform', 'Kubernetes', 'Pulumi', 'CDK', 'CDKTF', 'Helm', 'CloudFormation', 'Ansible'].includes(caller.language);
+      return caller && !['Terraform', 'Kubernetes', 'Pulumi', 'CDK', 'CDKTF', 'Helm', 'CloudFormation', 'Ansible', 'Bicep'].includes(caller.language);
     });
     expect(codeToInfra).toHaveLength(0);
   });

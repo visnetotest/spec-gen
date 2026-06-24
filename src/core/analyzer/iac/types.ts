@@ -24,7 +24,9 @@ export type IacLanguage =
   | 'Dockerfile'
   | 'Docker Compose'
   // CI/CD layer (spec-07 deferred follow-up: add-github-actions-workflow-graph).
-  | 'GitHub Actions';
+  | 'GitHub Actions'
+  // Azure IaC DSL (spec-07 deferred follow-up: add-bicep-iac-graph).
+  | 'Bicep';
 
 /** All IaC language tags (single source of truth for dispatch + gating). */
 export const IAC_LANGUAGES: readonly IacLanguage[] = [
@@ -39,6 +41,7 @@ export const IAC_LANGUAGES: readonly IacLanguage[] = [
   'Dockerfile',
   'Docker Compose',
   'GitHub Actions',
+  'Bicep',
 ] as const;
 
 export function isIacLanguage(lang: string): lang is IacLanguage {
@@ -64,6 +67,12 @@ export type IacResourceKind =
 export interface IacResource {
   /** Canonical, ecosystem-specific address (e.g. "aws_s3_bucket.logs", "Deployment/web"). */
   address: string;
+  /**
+   * Human-facing node name, when the resolution `address` must be more qualified than the
+   * name should read. Defaults to `address`. Used by Bicep, whose addresses are file-scoped
+   * (`<file>::<symbol>`) for correct cross-file resolution while the name stays the bare symbol.
+   */
+  displayName?: string;
   /** Resource type / kind ("aws_s3_bucket", "Deployment", "AWS::S3::Bucket"). */
   type: string;
   kind: IacResourceKind;
@@ -95,6 +104,8 @@ export interface IacReference {
 export interface IacModule {
   /** Canonical module address (e.g. "module.network", chart name, role name). */
   address: string;
+  /** Human-facing name when the address is more qualified than the name should read (Bicep). */
+  displayName?: string;
   type: string;
   filePath: string;
   language: IacLanguage;

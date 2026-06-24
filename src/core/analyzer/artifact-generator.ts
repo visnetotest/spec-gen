@@ -1122,6 +1122,8 @@ export class AnalysisArtifactGenerator {
       'Dockerfile', 'Docker Compose',
       // CI/CD layer (add-github-actions-workflow-graph).
       'GitHub Actions',
+      // Azure IaC DSL (add-bicep-iac-graph).
+      'Bicep',
     ]);
     // Skip inline-script extraction for very large HTML files: bounds the
     // same-length char-array allocation in extractHtmlScripts (the scan is O(N)).
