@@ -564,6 +564,17 @@ const NAV_TOOLS: NavToolSpec[] = [
     }),
   },
   {
+    name: 'verify_claim',
+    label: 'openlore verify_claim',
+    description: 'Verify a structural claim against the graph before asserting it — "X is dead", "Y calls Z", "Z is safe to change" — and get a deterministic verdict (confirmed / refuted / unverifiable) with a citation receipt.',
+    guideline: 'Before you tell the user a structural fact ("X is dead", "Y calls Z", "this is safe to change"), call openlore_verify_claim with `kind` and `subject` (and `object` for relational kinds: calls, reaches, impacts). An "unverifiable" verdict means hedge or read the source rather than assert.',
+    parameters: Type.Object({
+      kind: StringEnum(['calls', 'reaches', 'dead', 'impacts', 'safe-to-change'] as const, { description: 'REQUIRED. The kind of structural claim to verify.' }),
+      subject: Type.String({ description: 'REQUIRED. The symbol the claim is about (a function/method name).' }),
+      object: Type.Optional(Type.String({ description: 'The second symbol — required for relational kinds (calls, reaches, impacts).' })),
+    }),
+  },
+  {
     name: 'suggest_insertion_points',
     label: 'openlore suggest_insertion_points',
     description: 'Suggest where to add new code — ranked files and functions.',
