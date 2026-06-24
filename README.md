@@ -277,6 +277,7 @@ The default MCP surface is the lean **`navigation`** preset — 10 tools, the Sp
 | "What changes together with this / what's volatile?" | `get_change_coupling` — co-change + churn from git history (Spec 22) |
 | "May I add this import here / what breaks the architecture?" | `check_architecture` — pre-edit verdict against declared rules (Spec 23) |
 | Recording an architectural choice | `record_decision` **before** writing the code |
+| About to assert a fact to a human ("X is dead", "Y calls Z") — or cite a decision ("ADR `abc12345` governs this") | `verify_claim` — a deterministic verdict (`confirmed`/`refuted`/`unverifiable`) + citation receipt, never an LLM guess. Structural kinds check the call graph; `decision-current` checks a recorded decision is still authoritative (subject = an 8-char decision id) and is `refuted`, naming the live superseder to cite instead, if it was superseded/rejected (opt-in `verify` preset) |
 | Reading / checking a spec | `get_spec` · `search_specs` · `check_spec_drift` |
 | Ranking what changed by risk | `detect_changes` |
 
