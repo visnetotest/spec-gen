@@ -67,7 +67,8 @@ outputs, vars, and sibling resources that depend on it — end to end, determini
    - **Edges (dependent → dependency).** `parent:` → child → parent. `dependsOn: [ … ]` → dependent →
      each listed symbol (`depends_on`). Every other bare symbol that appears in a declaration's value and
      matches a same-file declared symbol → declaring symbol → referenced symbol (`references`), including
-     symbols inside `${…}` string interpolations and `.property` access bases (`stg.id` → `stg`).
+     symbols inside `${…}` string interpolations, `.property` access bases (`stg.id` → `stg`), both sides
+     of the `::` nested-resource accessor (`vnet::subnet`), and spread sources (`{ ...commonTags }`).
      Property **keys** (`name:`), function names (`resourceGroup()`), and string literal text are not
      references.
    - **Modules.** A `module 'path'` whose path starts with `./`/`../` or is a bare relative `*.bicep` is

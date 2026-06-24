@@ -28,12 +28,14 @@ cross-file edges SHALL be explicit local `module` links.
 
 #### Scenario: Dependencies between symbols become edges
 
-- **GIVEN** a resource whose body references another resource by symbol (`keyVaultId: kv.id`), declares
-  `parent: stg`, and declares `dependsOn: [ otherRes ]`, and an `output` whose value is `stg.id`
+- **GIVEN** a resource whose body references another resource by symbol (`keyVaultId: kv.id`), a child
+  resource nested inside `stg`'s body (or one declaring a `parent: stg` property), a resource that
+  declares `dependsOn: [ otherRes ]`, and an `output` whose value is `stg.id`
 - **WHEN** the repository is analyzed
-- **THEN** there are dependency edges from the resource to `kv`, from the child resource to its `parent`
-  `stg`, a `depends_on` edge from the resource to `otherRes`, and a dependency edge from the output to
-  `stg`, so that depth-1 reachability over `stg` surfaces every symbol that depends on it
+- **THEN** there are dependency edges from the resource to `kv`, from the child resource to its parent
+  `stg` (derived from structural nesting, or from an explicit `parent:`/`::` reference), a `depends_on`
+  edge from the resource to `otherRes`, and a dependency edge from the output to `stg`, so that depth-1
+  reachability over `stg` surfaces every symbol that depends on it
 
 #### Scenario: A local module links cross-file to the resources it deploys
 

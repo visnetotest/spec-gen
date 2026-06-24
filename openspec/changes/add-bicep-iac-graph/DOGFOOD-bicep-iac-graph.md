@@ -60,3 +60,35 @@ Bicep rides the existing IaC projector with zero MCP-tool changes: nodes are `se
 power `analyze_impact`/`get_subgraph`/`blast_radius`, the cross-file module link makes a module's blast
 radius traversable, and the flat per-file symbol namespace is resolved correctly (file-scoped). Verdict:
 **ships.**
+
+---
+
+## Round 2 — adversarial review + a realistic 4-file Azure deployment (2026-06-24)
+
+A second adversarial pass (empirically testing the compiled extractor against 15 real-world Bicep
+constructs) found two **high-severity** dropped-edge bugs, both fixed:
+
+1. **`::` nested-resource accessor** (`output id = vnet::subnet.id`) dropped the parent (`vnet`) — the
+   `::` left operand was misread as an object property key. Fixed: `::` is never a key; both sides are refs.
+2. **Spread operator** (`{ ...commonTags }`, `[ ...base ]`) dropped the spread source — the leading
+   `...` collided with the `.property`-accessor exclusion. Fixed: consecutive dots are not member access.
+
+The other 13 probed constructs were already correct (user-defined `type`/`func`, `loadTextContent`,
+interpolated keys, `@batchSize` + loops, `targetScope`, `scope:`, `existing` + `scope:`, multi-line
+arrays/objects, nested function calls, `mod.outputs.x`, `using`). No crashes on any malformed input.
+
+Then dogfooded a realistic **subscription-scope, 4-file** deployment (`main.bicep` + `modules/`
+{`storage`,`network`,`firewall`}.bicep) with decorators, `@allowed`/`@minLength`, a spread-merged tags
+var, a **module loop** over a param array, a **conditional** (`= if (deployFirewall)`) module, a
+**nested loop** subnet, an `existing` key vault, and `::` accessors. `openlore analyze` reported 34
+functions and even flagged `sa` as a hub (fanIn=5). Graph (`call-graph.db`) verified:
+
+- **Spread** `allTags → commonTags`; **`::`** `containerName → sa, blobService, container` (all 3 levels).
+- **Cross-file module links** for every module incl. the **conditional** `firewall → fw` and the
+  **loop** `network → vnet/subnet` — proving conditional and loop modules still link cross-file.
+- **File-scoping holds at scale:** every `location` reference resolves within its own file; the *only*
+  cross-file edges are local-module links (zero spurious symbol bleed across 4 files).
+- **Loop nodes are single** (`network` module, `subnet` resource) with the signature note.
+
+Both fixes are locked into the unit suite (`bicep.test.ts`) and the e2e path (`integration.test.ts`,
+which now exercises spread + `::` through `CallGraphBuilder`). Re-verdict: **ships.**
