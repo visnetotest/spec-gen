@@ -233,6 +233,74 @@ describe('GitHub Actions extraction', () => {
     expect(bad.resources.every(r => r.filePath !== '.github/workflows/bad.yml')).toBe(true);
   });
 
+  it('does not mint an edge from a `with:` input literally named uses', () => {
+    // Only a step's top-level `uses:` is an action ref; a `with: { uses: … }` input is data.
+    const g = extractGitHubActions([{
+      path: '.github/workflows/w.yml',
+      content: [
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - uses: actions/configure@v1',
+        '        with:',
+        '          uses: evil/not-an-edge@v9',
+      ].join('\n'),
+    }]);
+    const targets = g.references.map(r => r.toAddress);
+    expect(targets).toContain('actions/configure@v1');
+    expect(targets).not.toContain('evil/not-an-edge@v9');
+    expect(g.resources.some(r => r.address.includes('evil'))).toBe(false);
+  });
+
+  it('treats a remote reusable workflow (owner/repo/.github/workflows/x.yml@ref) as external', () => {
+    const g = extractGitHubActions([{
+      path: '.github/workflows/w.yml',
+      content: [
+        'on: push',
+        'jobs:',
+        '  call:',
+        '    uses: octo-org/shared/.github/workflows/build.yml@v2',
+      ].join('\n'),
+    }]);
+    expect(g.references.map(r => r.toAddress)).toContain('octo-org/shared/.github/workflows/build.yml@v2');
+    const ext = g.resources.find(r => r.address === 'octo-org/shared/.github/workflows/build.yml@v2')!;
+    expect(ext.isExternal).toBe(true);
+  });
+
+  it('does not mint service/container images as nodes (out of scope)', () => {
+    const g = extractGitHubActions([{
+      path: '.github/workflows/w.yml',
+      content: [
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    container: node:20',
+        '    services:',
+        '      postgres:',
+        '        image: postgres:16',
+        '    steps:',
+        '      - uses: actions/checkout@v4',
+      ].join('\n'),
+    }]);
+    const addrs = g.resources.map(r => r.address);
+    expect(addrs).not.toContain('node:20');
+    expect(addrs).not.toContain('postgres:16');
+    // the real step uses edge is still present
+    expect(g.references.map(r => r.toAddress)).toContain('actions/checkout@v4');
+  });
+
+  it('survives a leading `---` document start marker (common real-world)', () => {
+    const g = extractGitHubActions([{
+      path: '.github/workflows/w.yml',
+      content: '---\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4',
+    }]);
+    expect(g.resources.some(r => r.address === '.github/workflows/w.yml::job.a')).toBe(true);
+    expect(g.references.map(r => r.toAddress)).toContain('actions/checkout@v4');
+  });
+
   it('is deterministic across runs', () => {
     const a = JSON.stringify(extractGitHubActions(files));
     const b = JSON.stringify(extractGitHubActions(files));

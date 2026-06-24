@@ -59,6 +59,30 @@ across input file order (the projector sorts). Two edge cases left acceptable-as
 duplicate-job-key file is dropped whole (GitHub rejects it too), and a repo-root action referenced as
 `uses: ./` is unresolved.
 
+## Second adversarial round (new angles + claim-vs-reality audit)
+A follow-up pass probed angles the first did not, and an independent claim-vs-reality audit checked
+every doc claim against code + tests. No new bugs; it closed real test-coverage gaps (all now green):
+
+- **SCIP export of GitHub Actions nodes — VERIFIED.** Ran the real `exportScip` over a GHA graph: the
+  3 local nodes (workflow handle + job + composite action) export as 3 SCIP symbols under
+  `unspecifiedLanguageFiles` (language `''`, exactly like every other IaC tag); the external
+  `actions/checkout@v4` is correctly skipped (no file). This backs the docs' "SCIP export works on IaC
+  unchanged" claim, which had **no** test before — added `export.test.ts` coverage (and extended the
+  stale spec-07 IaC→UnspecifiedLanguage tag list to include `GitHub Actions`).
+- **Masking-regex perf / ReDoS — safe.** 5,000 unclosed `${{` tokens parse in ~106 ms; 5,000 closed
+  `${{ }}` in ~43 ms. The non-greedy `${{ … }}` mask does not backtrack pathologically.
+- **`with:` input literally named `uses` → no false edge** (only a step's top-level `uses:` is read).
+  Added a regression test.
+- **Remote reusable workflow** (`owner/repo/.github/workflows/x.yml@ref`) → external node. Added a test.
+- **`services:`/`container:` images are not nodes** (out of scope). Added a guard test.
+- **Leading `---` document start marker** (common YAML) parses fine; only a genuine *trailing*
+  multi-document workflow (invalid GitHub syntax → `MULTIPLE_DOCS`) is dropped, same acceptable class as
+  duplicate keys. Added a leading-`---` test.
+- **Audit note (out of scope):** `docs/cross-domain-impact.md:5` says "seven" while listing eight
+  embedded-IaC ecosystems — a pre-existing CDK/CDKTF-era miscount, unrelated to GitHub Actions (which
+  is config, not embedded IaC, and correctly excluded there). Left untouched to keep this PR scoped;
+  flagged for a separate fix.
+
 ## Verdict
 The CI DAG is now a first-class part of the same graph as application code and the other ten IaC
 ecosystems, with zero MCP-tool or schema changes — the spec-07 projector carried it unchanged.
