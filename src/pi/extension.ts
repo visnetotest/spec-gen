@@ -530,6 +530,28 @@ const NAV_TOOLS: NavToolSpec[] = [
     }),
   },
   {
+    name: 'blast_radius',
+    label: 'openlore blast_radius',
+    description: 'Before committing a change, get one briefing of what it touches: affected callers, layers crossed, the tests to run, and the decisions/specs/memories it puts at risk.',
+    guideline: 'Before you commit or finish a change, call openlore_blast_radius to see the blast radius — what your edits affect and which tests to run. With no arguments it uses your current uncommitted changes (diff vs HEAD).',
+    parameters: Type.Object({
+      baseRef: Type.Optional(Type.String({ description: 'Git ref to diff the working tree against (e.g. "HEAD", "main"). Optional — defaults to HEAD (uncommitted changes).' })),
+      depth: Type.Optional(Type.Number({ description: 'Impact-analysis traversal depth (default 2).' })),
+      maxSymbols: Type.Optional(Type.Number({ description: 'Cap on the highest-fan-in changed symbols analyzed (default 12).' })),
+    }),
+  },
+  {
+    name: 'structural_diff',
+    label: 'openlore structural_diff',
+    description: 'Show what changed structurally between two states (working tree vs a ref, or two refs): functions and call edges added/removed, signature changes, and the existing callers left STALE by a moved signature.',
+    guideline: 'When reviewing or refactoring a change, call openlore_structural_diff to see the structural delta and whose callers are now stale — a complement to git diff. With no arguments it compares your working tree against HEAD.',
+    parameters: Type.Object({
+      baseRef: Type.Optional(Type.String({ description: 'Old state to diff against (e.g. "HEAD", "main"). Optional — defaults to HEAD.' })),
+      headRef: Type.Optional(Type.String({ description: 'New state (a git ref). Optional — omit to use the working tree.' })),
+      maxResults: Type.Optional(Type.Number({ description: 'Cap reported items per category (default 200).' })),
+    }),
+  },
+  {
     name: 'suggest_insertion_points',
     label: 'openlore suggest_insertion_points',
     description: 'Suggest where to add new code — ranked files and functions.',
