@@ -234,7 +234,7 @@ Durable, code-anchored notes that self-invalidate when the code they describe mo
 
 | Tool | Description | Requires prior analysis |
 |------|-------------|:---:|
-| `verify_claim` | Verify a structural claim **before** asserting it to a human ("X is dead", "Y calls Z", "this is safe to change"): a deterministic verdict (`confirmed` / `refuted` / `unverifiable`) plus a citation receipt. An `unverifiable` verdict means hedge or read the source. Registered only under `openlore mcp --preset verify`. | Yes |
+| `verify_claim` | Verify a claim **before** asserting it to a human: a deterministic verdict (`confirmed` / `refuted` / `unverifiable`) plus a citation receipt. Structural kinds (`calls`, `reaches`, `dead`, `impacts`, `safe-to-change`) check the call graph ("X is dead", "Y calls Z", "this is safe to change"). The `decision-current` kind checks whether a recorded decision is still authoritative before you cite it — `subject` is an 8-char decision id, and the verdict is `refuted` (naming the live superseder to cite instead) if that decision was superseded or rejected. An `unverifiable` verdict means hedge or read the source. Registered only under `openlore mcp --preset verify`. | Yes (structural kinds) |
 
 **Federation (multi-repo, opt-in)**
 
