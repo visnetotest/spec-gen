@@ -457,7 +457,7 @@ interface NavToolSpec { name: string; label: string; description: string; guidel
 // Descriptions and guidelines are written trigger-first and jargon-light: weak
 // local tool-callers (e.g. codestral) pattern-match on "when the user asks X,
 // call this" far better than on a capability statement full of graph jargon.
-const NAV_TOOLS: NavToolSpec[] = [
+export const NAV_TOOLS: NavToolSpec[] = [
   {
     name: 'orient',
     label: 'openlore orient',
