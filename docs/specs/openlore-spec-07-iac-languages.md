@@ -189,6 +189,8 @@ test/  →  co-located *.test.ts + fixtures   # NOTE: top-level test/ is gitigno
 
 All IaC ecosystems above ship in this one PR. The following are explicitly deferred to future specs to keep this bounded (do not start them here): **Bicep**, **ARM JSON templates**, **Kustomize** overlays, **Crossplane**, **CDK / CDKTF** (synthesize to CFN/TF; structurally similar to Pulumi but separate), **Dockerfile**, **docker-compose**, **Jsonnet/CUE**, **Nix**, **Bazel/Starlark**, **Packer**, **Vagrant**. Leave `TODO(spec-07-followup): <name>` references where a natural extension point exists. (You asked whether to fold another language family in — no: the six IaC ecosystems are a full PR on their own.)
 
+> **Follow-up status:** **CDK / CDKTF** shipped with spec-07's projector; **Azure Bicep** shipped as a deferred follow-up (`add-bicep-iac-graph`, `src/core/analyzer/iac/bicep.ts`).
+
 ## Test plan
 
 - **Per-ecosystem unit tests**, co-located, using small fixtures under `src/core/analyzer/iac/fixtures/<ecosystem>/`. Build the normalized graph from each fixture, project it, and assert exact nodes + edges (lock counts once computed — small fixtures, like spec-04's tiny-repo).

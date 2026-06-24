@@ -25,8 +25,9 @@ Edge direction is **dependent → dependency**. So for any resource node:
 - **fanOut** = "what does this resource need?"
 
 `FunctionNode.language` carries the ecosystem tag (`Terraform`, `Kubernetes`,
-`Helm`, `CloudFormation`, `Ansible`, `Pulumi`); `className` carries the resource
-type, so clustering and architecture overviews group by type.
+`Helm`, `CloudFormation`, `Ansible`, `Pulumi`, `CDK`, `CDKTF`, `Bicep`);
+`className` carries the resource type, so clustering and architecture overviews
+group by type.
 
 ## What is extracted, per ecosystem
 
@@ -72,11 +73,18 @@ Helm, executes Ansible, or calls a cloud API. No external CLI is required.
 - **Edges:** when one construct's args reference another construct's variable.
 - Static detection only — OpenLore never runs `cdk synth` / `cdktf synth`.
 
+### Azure Bicep  (`*.bicep`)
+- **Nodes:** every `resource` (typed by `Microsoft.Foo/bar`, the `@apiVersion` stripped), `param`, `var`, `output`, and `module`. An `existing` resource is kind `data`; a nested child `resource` declared inside another resource's body is its own node; a `[for … : { … }]` loop is a **single** node (noted in the signature). The node name is the bare symbol (`stg`), even though the resolution address is file-scoped.
+- **Edges:** `parent:` → child → parent; `dependsOn: [ … ]` → dependent → each listed symbol; every other bare symbol used in a value (including inside `${…}` string interpolations and as the base of a `.property` access) → declaring symbol → referenced symbol. A conditional `resource x '…' = if (cond) { … }` keeps the condition's symbols as dependencies and still attributes nested children. Property keys, function names (`resourceGroup()`), and string-literal text are not references.
+- **Modules:** a local `module './net.bicep'` links (cross-file) to every resource declared in the target file and groups them as a `ClassNode`; a registry/template-spec module (`br/…`, `ts/…`) is an external node.
+- **File-scoped resolution:** Bicep resolves bare identifiers against a flat **per-file** symbol table (no `var.`/`type.name` prefixes), so the same name (`location`, `vnet`) recurs across files. Addresses are scoped by file (`<file>::<symbol>`) and references resolve **within the declaring file only** — two files each declaring `param location` never cross-link. The single cross-file edge is the local-`module` link above.
+- **Notes:** parsed with a tolerant, hand-rolled scanner (no Bicep compiler, no native dependency). Static only — no `bicep build`, no ARM emit, no Azure/registry access. A multi-line ternary value (`= cond\n ? a\n : b`) resolves only the first line's symbols; the others are dropped rather than guessed.
+
 ## Discovery & disambiguation
 
-`.tf`/`.tfvars`/`.tf.json` map to Terraform by extension. `.yaml`/`.yml`/`.json`
-are ambiguous, so they route through a small pure function,
-`classifyYaml(path, content)`:
+`.tf`/`.tfvars`/`.tf.json` map to Terraform by extension; `.bicep` maps to Bicep
+by extension (both via `detectLanguage`). `.yaml`/`.yml`/`.json` are ambiguous, so
+they route through a small pure function, `classifyYaml(path, content)`:
 
 - `apiVersion:` + `kind:` → **Kubernetes**
 - `AWSTemplateFormatVersion` / `Transform: AWS::Serverless` / `Resources:` with `Type: AWS::…` → **CloudFormation**
@@ -92,5 +100,8 @@ are ambiguous, so they route through a small pure function,
 
 ## Out of scope (future specs)
 
-Bicep, ARM JSON, Kustomize, Crossplane, Dockerfile, docker-compose,
-Jsonnet/CUE, Nix, Bazel/Starlark, Packer, Vagrant.
+ARM JSON, Kustomize, Crossplane, Dockerfile, docker-compose,
+Jsonnet/CUE, Nix, Bazel/Starlark, Packer, Vagrant. Also deferred for Bicep
+specifically: `.bicepparam` parameter files, `import`/user-defined functions and
+types, and cross-file `module` **output** type-resolution (the module links to the
+target file's resources, not to specific output symbols).
