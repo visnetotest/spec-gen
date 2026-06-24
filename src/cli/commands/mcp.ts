@@ -1764,9 +1764,10 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
     'orient', 'remember', 'recall',
   ]),
   // Claim verification (opt-in): orient to ground, then verify a structural claim
-  // and cite the receipt before asserting it to a human. Deliberately NOT in the
-  // default or `minimal` surface (mcp-quality: minimize the tools an agent must
-  // consider). search_code helps the agent name the subject/object precisely.
+  // (calls/reaches/dead/impacts/safe-to-change) or a decision-authority claim
+  // (decision-current) and cite the receipt before asserting it to a human.
+  // Deliberately NOT in the default or `minimal` surface (mcp-quality: minimize the
+  // tools an agent must consider). search_code helps the agent name the subject precisely.
   verify: new Set([
     'orient', 'search_code', 'verify_claim',
   ]),
