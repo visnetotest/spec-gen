@@ -25,9 +25,9 @@ Edge direction is **dependent → dependency**. So for any resource node:
 - **fanOut** = "what does this resource need?"
 
 `FunctionNode.language` carries the ecosystem tag (`Terraform`, `Kubernetes`,
-`Helm`, `CloudFormation`, `Ansible`, `Pulumi`, `CDK`, `CDKTF`, `GitHub Actions`);
-`className` carries the resource type, so clustering and architecture overviews
-group by type.
+`Helm`, `CloudFormation`, `Ansible`, `Pulumi`, `CDK`, `CDKTF`, `Dockerfile`,
+`Docker Compose`, `GitHub Actions`); `className` carries the resource type, so
+clustering and architecture overviews group by type.
 
 ## What is extracted, per ecosystem
 
@@ -73,6 +73,14 @@ Helm, executes Ansible, or calls a cloud API. No external CLI is required.
 - **Edges:** when one construct's args reference another construct's variable.
 - Static detection only — OpenLore never runs `cdk synth` / `cdktf synth`.
 
+### Docker  (`Dockerfile`, `Dockerfile.*`, `*.Dockerfile`, `Containerfile`; `docker-compose*.y?ml`, `compose*.y?ml`)
+- **Nodes:** one per Dockerfile build **stage** (`FROM … AS x`, or `stage<index>` when anonymous); one per compose **service**; base/registry images are external nodes (`node:20`, `postgres:16`), deduped across all files.
+- **Dockerfile edges:** `FROM` → an earlier same-file stage (when the base names one, case-insensitively) or the external base image; `COPY/ADD --from=` → a stage (by name or build index) or an external image. `FROM scratch` produces no edge; a base parameterized by a build arg with a known default (`ARG NODE_VERSION=20` … `FROM node:${NODE_VERSION}`) resolves to the default; a fully dynamic base (a `${VAR}`/`$VAR` with no inline or ARG default) produces no edge.
+- **Compose edges:** `depends_on` and `links` → service→service; `build:` → the resolved Dockerfile stage (the final stage, or `target:` when given) — a **cross-file** edge; `image:` → external image (only when the service has no `build:`, since with `build:` the image is the output tag, not a dependency).
+- **The high-value chain:** compose service → Dockerfile stage → base image, so a single `analyze_impact` on a base image surfaces every stage and service that would rebuild — across files, deterministically, no LLM.
+- **Notes:** Dockerfiles and compose files are parsed *together* (they cross-reference). One extractor, both ecosystems. Static only — no `docker build`, no environment-based interpolation, no registry access — but inline `${VAR:-default}` defaults *are* resolved statically (see below).
+- **Robustness (real-world syntax):** the Dockerfile scanner joins `\` line continuations, skips heredoc bodies (`RUN <<EOF … EOF` — a `FROM` inside a script is never a stage), ignores whole-line and trailing inline comments, treats stage names case-insensitively (BuildKit semantics), and handles CRLF, `--platform=…`, lowercase `from … as …`, digest pins, and numeric `COPY --from=0`. Variable references resolve to a known default — both inline (`image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.0.0}`, `FROM ${BASE:-node:20}`, `dockerfile: ${DF:-Dockerfile}`) and from a global `ARG NAME=default` declared before the first `FROM` (`FROM node:${NODE_VERSION}`); a `${VAR}`/`$VAR` with no inline or ARG default stays edge-less. The compose parser expands YAML merge keys (`x-*: &anchor` / `<<: *anchor`, the Airflow-style extension pattern) and ignores recoverable-but-malformed YAML rather than minting a garbage node.
+
 ### GitHub Actions  (`.github/workflows/*.yml`, `action.yml`/`action.yaml`)
 The CI/CD layer — the dependency graph nearly every repository on GitHub has. Modeled as
 dependent → dependency, like the rest of IaC, so the same tools answer "which jobs break if I
@@ -109,7 +117,12 @@ are ambiguous, so they route through a small pure function,
 - `Chart.yaml`, or a `{{ … }}` template under `templates/`, or any file under a chart directory → **Helm**
 - top-level `hosts:`/playbook list, or a file under `roles/*/{tasks,handlers,…}/` → **Ansible**
 - a `.github/workflows/*.y?ml` with `on:` + `jobs:`, or an `action.y?ml` with `runs:` → **GitHub Actions**
-- otherwise → `null` (left as generic config — `docker-compose`, app config, other CI systems are never misclassified as IaC)
+- a `docker-compose*.y?ml` / `compose*.y?ml` filename with a top-level `services:` key → **Docker Compose**
+- otherwise → `null` (left as generic config — app config and other CI systems are never misclassified as IaC)
+
+Dockerfiles have no extension to switch on, so they are recognized by name in the
+analyze-time resolution layer (not `detectLanguage`), keeping the incremental
+watcher's path unchanged — consistent with how all IaC YAML is resolved.
 
 ## Limits & conservatism
 
@@ -119,8 +132,11 @@ are ambiguous, so they route through a small pure function,
 
 ## Out of scope (future specs)
 
-Bicep, ARM JSON, Kustomize, Crossplane, Dockerfile, docker-compose,
-Jsonnet/CUE, Nix, Bazel/Starlark, Packer, Vagrant, and non-GitHub CI systems
-(GitLab CI, CircleCI, Azure Pipelines). For GitHub Actions specifically:
-`${{ matrix }}` fan-out as distinct nodes, step-level granularity (the job is the
-unit), and remote reusable-workflow *contents* (an external ref is a node, not fetched).
+Bicep, ARM JSON, Kustomize, Crossplane, Jsonnet/CUE, Nix, Bazel/Starlark,
+Packer, Vagrant, and non-GitHub CI systems (GitLab CI, CircleCI, Azure
+Pipelines). For GitHub Actions specifically: `${{ matrix }}` fan-out as distinct
+nodes, step-level granularity (the job is the unit), and remote
+reusable-workflow *contents* (an external ref is a node, not fetched). Also
+deferred for Docker specifically: compose `volumes`/`networks` as first-class
+nodes, cross-file compose `extends`, and incremental-watch of container files
+(matches all IaC YAML today).

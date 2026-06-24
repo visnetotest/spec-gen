@@ -37,6 +37,13 @@ export function classifyYaml(path: string, content: string): IacLanguage | null 
     return 'GitHub Actions';
   }
 
+  // docker-compose — by conventional filename (docker-compose*.yml, compose*.yml),
+  // corroborated by a top-level `services:` key so a stray same-named file is not
+  // misclassified (add-docker-container-graph).
+  if (/^(docker-compose|compose)(\.[^/]+)?\.ya?ml$/.test(fileName) && /(^|\n)services\s*:/.test(content)) {
+    return 'Docker Compose';
+  }
+
   // Helm template: a Go-template expression inside a templates/ directory.
   const inTemplatesDir = /(^|\/)templates\//.test(posix);
   if (inTemplatesDir && /\{\{[-\s]/.test(content)) return 'Helm';

@@ -14,7 +14,10 @@ describe('classifyYaml', () => {
     ['gha workflow', '.github/workflows/ci.yml', 'name: CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n', 'GitHub Actions'],
     ['gha composite action', '.github/actions/setup/action.yml', 'name: Setup\nruns:\n  using: composite\n  steps: []\n', 'GitHub Actions'],
     ['non-workflow yaml under .github', '.github/dependabot.yml', 'version: 2\nupdates: []\n', null],
-    ['docker compose', 'docker-compose.yml', 'version: "3"\nservices:\n  web:\n    image: nginx\n', null],
+    ['docker compose', 'docker-compose.yml', 'version: "3"\nservices:\n  web:\n    image: nginx\n', 'Docker Compose'],
+    ['compose short name', 'compose.yaml', 'services:\n  web:\n    image: nginx\n', 'Docker Compose'],
+    ['compose env variant', 'docker-compose.prod.yml', 'services:\n  web:\n    image: nginx\n', 'Docker Compose'],
+    ['compose-named file without services key', 'docker-compose.yml', 'foo: bar\n', null],
     ['plain app config', 'config.yaml', 'database:\n  host: localhost\n  port: 5432\n', null],
   ];
 
