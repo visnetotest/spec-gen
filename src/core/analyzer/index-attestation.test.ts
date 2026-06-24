@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -11,11 +11,13 @@ import {
   reconcile,
   writeAttestation,
   readAttestation,
+  refreshAttestationCounts,
   type AttNode,
   type AttEdge,
   type AttClass,
   type IndexAttestation,
   type PersistedCounts,
+  type AttestationCountSource,
 } from './index-attestation.js';
 import { ARTIFACT_INDEX_ATTESTATION } from '../../constants.js';
 
@@ -146,6 +148,110 @@ describe('index-attestation: read/write round-trip', () => {
   it('returns null for a foreign attestationVersion (forward-compat: do not trust an unknown shape)', async () => {
     const att = computeAttestation(SCHEMA, ...Object.values(makeGraph(30)) as [AttNode[], AttEdge[], AttClass[]]);
     await writeAttestation(dir, { ...att, attestationVersion: ATTESTATION_VERSION + 99 });
+    expect(await readAttestation(dir)).toBeNull();
+  });
+});
+
+describe('index-attestation: readAttestation fails closed on malformed input', () => {
+  let dir: string;
+  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'att-mal-')); });
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+  const writeRaw = (s: string) => writeFile(join(dir, ARTIFACT_INDEX_ATTESTATION), s);
+  const base = computeAttestation(SCHEMA, ...Object.values(makeGraph(30)) as [AttNode[], AttEdge[], AttClass[]]);
+
+  it('rejects a committed object with missing numeric fields (the NaN→false-healthy trap)', async () => {
+    // The critical bug guard: `committed: {}` would make reconcile's ratio NaN, and
+    // `NaN < floor === false` would silently fabricate `healthy`. readAttestation must
+    // reject it as unverifiable instead.
+    await writeRaw(JSON.stringify({ ...base, committed: {} }));
+    expect(await readAttestation(dir)).toBeNull();
+  });
+
+  it('rejects a committed object whose counts are non-numeric', async () => {
+    await writeRaw(JSON.stringify({ ...base, committed: { files: 'x', functions: null, edges: 1, classes: 1 } }));
+    expect(await readAttestation(dir)).toBeNull();
+  });
+
+  it('rejects a JSON-serialized non-finite count (NaN/Infinity serialize to null → rejected)', async () => {
+    // JSON.stringify turns NaN/Infinity into null; the numeric-field check rejects null.
+    await writeRaw(JSON.stringify({ ...base, committed: { files: 1, functions: NaN, edges: 1, classes: 1 } }));
+    expect(await readAttestation(dir)).toBeNull();
+  });
+
+  it('rejects a missing digest and a missing committed', async () => {
+    const noDigest: Record<string, unknown> = { ...base };
+    delete noDigest['digest'];
+    await writeRaw(JSON.stringify(noDigest));
+    expect(await readAttestation(dir)).toBeNull();
+    const noCommitted: Record<string, unknown> = { ...base };
+    delete noCommitted['committed'];
+    await writeRaw(JSON.stringify(noCommitted));
+    expect(await readAttestation(dir)).toBeNull();
+  });
+
+  it('rejects non-JSON garbage', async () => {
+    await writeRaw('}{ not json');
+    expect(await readAttestation(dir)).toBeNull();
+  });
+
+  it('rejects an oversized file without an unbounded read (mcp-security)', async () => {
+    await writeRaw(JSON.stringify(base) + ' '.repeat(1024 * 1024 + 16));
+    expect(await readAttestation(dir)).toBeNull();
+  });
+});
+
+describe('index-attestation: verdict boundaries', () => {
+  it('ratio EXACTLY at the floor is healthy; just below is degraded (strict `<`)', () => {
+    const att = computeAttestation(SCHEMA, ...Object.values(makeGraph(100, 4)) as [AttNode[], AttEdge[], AttClass[]]);
+    const atFloor = Math.round(att.committed.functions * DEGRADED_RATIO_FLOOR); // exactly 0.5×
+    const p = (fns: number): PersistedCounts => ({ schemaVersion: SCHEMA, files: 4, functions: fns, edges: att.committed.edges, classes: 1 });
+    expect(reconcile(att, p(atFloor)).verdict).toBe('healthy');     // ratio === floor, not < floor
+    expect(reconcile(att, p(atFloor - 1)).verdict).toBe('degraded');
+  });
+
+  it('small-repo threshold: exactly at the minimum applies the floor; one below is exempt', () => {
+    const atMin = computeAttestation(SCHEMA, ...Object.values(makeGraph(SMALL_REPO_MIN_FUNCTIONS, 2)) as [AttNode[], AttEdge[], AttClass[]]);
+    const below = computeAttestation(SCHEMA, ...Object.values(makeGraph(SMALL_REPO_MIN_FUNCTIONS - 1, 2)) as [AttNode[], AttEdge[], AttClass[]]);
+    const empty: PersistedCounts = { schemaVersion: SCHEMA, files: 0, functions: 0, edges: 0, classes: 0 };
+    expect(reconcile(atMin, empty).verdict).toBe('degraded');  // floor active at the threshold
+    expect(reconcile(below, empty).verdict).toBe('healthy');   // exempt one below
+  });
+
+  it('committed.edges === 0 does not divide-by-zero (edge ratio treated as satisfied)', () => {
+    const nodes: AttNode[] = Array.from({ length: 30 }, (_, i) => ({ id: `src/a.ts::f${i}`, filePath: 'src/a.ts' }));
+    const att = computeAttestation(SCHEMA, nodes, [], [{ id: 'src/a.ts::C' }]);
+    expect(att.committed.edges).toBe(0);
+    expect(reconcile(att, { schemaVersion: SCHEMA, files: 1, functions: 30, edges: 0, classes: 1 }).verdict).toBe('healthy');
+  });
+});
+
+describe('index-attestation: refreshAttestationCounts (keeps the verdict honest under incremental edits)', () => {
+  let dir: string;
+  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'att-refresh-')); });
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  const store = (counts: { files: number; functions: number; edges: number; classes: number }): AttestationCountSource => ({
+    countFiles: () => counts.files, countNodes: () => counts.functions,
+    countEdges: () => counts.edges, countClasses: () => counts.classes,
+  });
+
+  it('updates committed counts to the live store and preserves the build-time digest', async () => {
+    const built = computeAttestation(SCHEMA, ...Object.values(makeGraph(100, 5)) as [AttNode[], AttEdge[], AttClass[]]);
+    await writeAttestation(dir, built);
+    // Simulate the watcher deleting ~70% of nodes, then refreshing.
+    await refreshAttestationCounts(dir, store({ files: 3, functions: 30, edges: 29, classes: 1 }), SCHEMA);
+    const after = await readAttestation(dir);
+    expect(after?.committed).toEqual({ files: 3, functions: 30, edges: 29, classes: 1 });
+    expect(after?.digest).toBe(built.digest); // digest stamps the last full build, carried forward
+    // The crux: a load now reconciles HEALTHY against the shrunken-but-current store,
+    // instead of falsely `degraded` against the stale build-time counts.
+    expect(reconcile(after!, { schemaVersion: SCHEMA, files: 3, functions: 30, edges: 29, classes: 1 }).verdict).toBe('healthy');
+    // Without the refresh, the original attestation would have flagged this as degraded:
+    expect(reconcile(built, { schemaVersion: SCHEMA, files: 3, functions: 30, edges: 29, classes: 1 }).verdict).toBe('degraded');
+  });
+
+  it('no-ops when no attestation exists (a legacy/unverifiable index is never fabricated)', async () => {
+    await refreshAttestationCounts(dir, store({ files: 1, functions: 1, edges: 0, classes: 0 }), SCHEMA);
     expect(await readAttestation(dir)).toBeNull();
   });
 });

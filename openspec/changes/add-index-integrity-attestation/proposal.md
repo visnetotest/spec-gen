@@ -116,13 +116,28 @@ signal emitted on non-healthy), and surfaced via `confidence-boundary.ts` (`asse
 `analyze_impact`, path tracing) and `health-map.ts`. EdgeStore gained `countFiles`/`countEdges`/
 `countClasses`/`getSchemaVersion`/`checkpoint` and an exported `SCHEMA_VERSION`.
 
+**Adversarial hardening pass (post-review, same PR):**
+- **Fail closed on a malformed attestation.** `readAttestation` now validates the `committed` counts are
+  finite numbers and bounds the file size before reading (untrusted-artifact safety). Without the numeric
+  check a `committed: {}` made the ratio `NaN` and `NaN < floor` `false` — silently fabricating `healthy`,
+  the exact failure the feature prevents. Now treated as unverifiable.
+- **Incremental watcher keeps counts in lockstep.** The build-time attestation snapshots the full build;
+  the watcher legitimately deletes nodes/edges between builds. Left alone, a bulk deletion could drive the
+  persisted counts below the build-time baseline and falsely report `degraded`. The watcher now calls
+  `refreshAttestationCounts` after its store mutations (cheap recount; build-time digest carried forward),
+  so the verdict reconciles against the *current* store. Verified on this repo: a 1,700-node deletion
+  stays `healthy` after refresh.
+
 Verified by: unit tests over the pure functions (`index-attestation.test.ts` — counts, determinism,
-order-independent digest, the three verdicts, small-repo exemption, read/write round-trip + foreign-version
-rejection); a load-path e2e (`index-integrity-load.test.ts` — healthy / degraded partial-persist /
-mismatched schema / unverifiable-legacy, all driving the real `readCachedContext`); and the
-confidence-boundary wiring (`confidence-boundary-integrity.test.ts`). Dogfooded on this repo: a full
-`analyze` writes a deterministic attestation (byte-identical across two builds), the live index loads
-`healthy` (2532/2532 functions), a node-deleted clone loads `degraded`, and a schema-bumped attestation
-loads `mismatched`. Dogfooding caught a real bug pre-merge — the attestation initially counted external
-nodes while the load recounts internal-only, falsely flagging the healthy index `degraded`; fixed to
-count the same population.
+order-independent digest, the three verdicts, small-repo + ratio-floor boundaries, `committed.edges===0`
+guard, read/write round-trip, foreign-version + malformed + oversized rejection, `refreshAttestationCounts`);
+a load-path + agent-surface e2e (`index-integrity-load.test.ts` — healthy / degraded partial-persist /
+mismatched schema / unverifiable-legacy / db-absent, plus `find_dead_code` and `get_health_map` carrying
+the verdict and the recoverable telemetry signal, all driving real handlers); the confidence-boundary
+wiring (`confidence-boundary-integrity.test.ts`); and direct EdgeStore method tests (`edge-store.test.ts`).
+Dogfooded on this repo: a full `analyze` writes a deterministic attestation (byte-identical across two
+builds), the live index loads `healthy` (2534/2534 functions), a node-deleted clone loads `degraded`, a
+schema-bumped attestation loads `mismatched`, a malformed/oversized attestation loads `unverifiable`, and
+the watcher-deletion+refresh path stays `healthy`. Dogfooding caught a real bug pre-merge — the attestation
+initially counted external nodes while the load recounts internal-only, falsely flagging the healthy index
+`degraded`; fixed to count the same population.

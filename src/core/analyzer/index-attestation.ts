@@ -23,9 +23,17 @@
 
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { ARTIFACT_INDEX_ATTESTATION } from '../../constants.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
+
+/**
+ * Upper bound on the attestation file size read at load. The attestation lives under
+ * `.openlore/analysis/` — untrusted on-disk input (mcp-security: Untrusted Artifact
+ * Deserialization Safety) read on every cache miss. A real attestation is < 1 KB; a
+ * generous 1 MB cap fails closed on a poisoned/oversized file without an unbounded read.
+ */
+const ATTESTATION_MAX_BYTES = 1024 * 1024;
 
 /** Format version of the attestation record itself. Bump only on a shape change. */
 export const ATTESTATION_VERSION = 1;
@@ -153,6 +161,51 @@ export async function writeAttestation(outputDir: string, attestation: IndexAtte
   );
 }
 
+/** The subset of EdgeStore the counts refresh needs — keeps this module store-agnostic. */
+export interface AttestationCountSource {
+  countFiles(): number;
+  countNodes(): number;
+  countEdges(): number;
+  countClasses(): number;
+}
+
+/**
+ * Keep an existing attestation's `committed` counts in lockstep with the live store
+ * after an incremental watcher mutation, so the load-time verdict stays correct
+ * (change: add-index-integrity-attestation).
+ *
+ * The build-time attestation is a snapshot of the *full* build's production graph. The
+ * incremental watcher legitimately deletes nodes/edges for changed or removed files
+ * between full builds; left alone, the persisted store would drift below the build-time
+ * counts and `reconcile` would FALSELY report `degraded` on a perfectly valid, current
+ * index. Refreshing the counts from the store (cheap COUNT queries) keeps `degraded`
+ * meaning what it should: the store is materially smaller than the *most recent* persist,
+ * i.e. real truncation/corruption — never ordinary incremental editing.
+ *
+ * No-ops when no attestation exists (a legacy/unverifiable index stays unverifiable — we
+ * never fabricate one from a partial incremental state). The `digest` is carried forward:
+ * it stamps the last full build (it is not a load-time verdict driver), while the counts
+ * track the live store. Best-effort and cheap; callers invoke it as additive fire-and-forget.
+ */
+export async function refreshAttestationCounts(
+  outputDir: string,
+  store: AttestationCountSource,
+  schemaVersion: number,
+): Promise<void> {
+  const existing = await readAttestation(outputDir);
+  if (!existing) return;
+  await writeAttestation(outputDir, {
+    ...existing,
+    schemaVersion,
+    committed: {
+      files: store.countFiles(),
+      functions: store.countNodes(),
+      edges: store.countEdges(),
+      classes: store.countClasses(),
+    },
+  });
+}
+
 /**
  * Read the attestation, or null when absent/unreadable/foreign-version. A legacy index
  * built before this change has no attestation — we return null (unverifiable), never a
@@ -160,21 +213,35 @@ export async function writeAttestation(outputDir: string, attestation: IndexAtte
  */
 export async function readAttestation(outputDir: string): Promise<IndexAttestation | null> {
   try {
-    const raw = await readFile(join(outputDir, ARTIFACT_INDEX_ATTESTATION), 'utf-8');
-    const parsed = JSON.parse(raw) as Partial<IndexAttestation>;
+    const path = join(outputDir, ARTIFACT_INDEX_ATTESTATION);
+    // Bound the read: untrusted on-disk artifact (mcp-security). Fail closed on oversized.
+    if ((await stat(path)).size > ATTESTATION_MAX_BYTES) return null;
+    const parsed = JSON.parse(await readFile(path, 'utf-8')) as Partial<IndexAttestation>;
     if (
       parsed === null || typeof parsed !== 'object' ||
       parsed.attestationVersion !== ATTESTATION_VERSION ||
       typeof parsed.schemaVersion !== 'number' ||
       typeof parsed.digest !== 'string' ||
-      typeof parsed.committed !== 'object' || parsed.committed === null
+      !isAttestationCounts(parsed.committed)
     ) {
+      // Fail closed: a malformed/partial attestation (e.g. `committed: {}`) is treated as
+      // unverifiable, NEVER trusted. Without the numeric-field check, an undefined count
+      // would make `reconcile`'s ratio NaN and `NaN < floor` false — silently fabricating
+      // a `healthy` verdict, the exact failure this feature exists to prevent.
       return null;
     }
     return parsed as IndexAttestation;
   } catch {
     return null;
   }
+}
+
+/** True only when every reconciliation count is a finite number. */
+function isAttestationCounts(c: unknown): c is AttestationCounts {
+  if (c === null || typeof c !== 'object') return false;
+  const r = c as Record<string, unknown>;
+  return (['files', 'functions', 'edges', 'classes'] as const)
+    .every(k => typeof r[k] === 'number' && Number.isFinite(r[k]));
 }
 
 /**

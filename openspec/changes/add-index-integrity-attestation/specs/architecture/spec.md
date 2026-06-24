@@ -41,6 +41,17 @@ load-time verdict: the incremental watcher legitimately mutates the persisted st
 so a digest-equality load check would false-positive on every incremental update. Schema version drives
 `mismatched`; the count ratio drives `degraded`.
 
+Reading the attestation SHALL fail closed: a malformed, truncated, foreign-version, or oversized
+attestation (e.g. a `committed` record missing numeric counts) SHALL be treated as unverifiable
+(no verdict), NEVER trusted — without this, an undefined count would make the ratio non-finite and the
+`degraded` comparison `false`, silently fabricating a `healthy` verdict. The read SHALL bound the file
+size, consistent with untrusted-artifact deserialization safety.
+
+The incremental watcher SHALL keep the attestation's committed counts in lockstep with the store it
+mutates (a cheap recount; the build-time digest is carried forward), so that ordinary incremental
+editing — including bulk deletions — does not drive the persisted counts below the build-time baseline
+and falsely report `degraded`. When no attestation exists, the watcher SHALL NOT fabricate one.
+
 #### Scenario: A half-built index is reported degraded, not healthy
 
 - **GIVEN** an index whose persistence was interrupted so that far fewer edges landed on disk than
@@ -53,6 +64,19 @@ so a digest-equality load check would false-positive on every incremental update
 - **GIVEN** a persisted index built at a previous schema version
 - **WHEN** it is loaded and re-checked against its attestation
 - **THEN** the verdict is `mismatched`
+
+#### Scenario: A malformed attestation is unverifiable, never fabricated healthy
+
+- **GIVEN** an `index-attestation.json` whose `committed` record is missing its numeric counts
+- **WHEN** the index is loaded
+- **THEN** the attestation is rejected as unverifiable (no verdict), not read as `healthy`
+
+#### Scenario: Incremental deletions do not falsely report degraded
+
+- **GIVEN** a healthy index whose watcher then deletes the nodes/edges of many removed files
+- **WHEN** the index is loaded after the watcher refreshes the attestation counts
+- **THEN** the verdict is `healthy`, reconciling against the current store, not `degraded` against the
+  stale build-time counts
 
 ### Requirement: NoSilentServiceOfADegradedIndex
 
