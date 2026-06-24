@@ -78,10 +78,12 @@ every doc claim against code + tests. No new bugs; it closed real test-coverage 
 - **Leading `---` document start marker** (common YAML) parses fine; only a genuine *trailing*
   multi-document workflow (invalid GitHub syntax → `MULTIPLE_DOCS`) is dropped, same acceptable class as
   duplicate keys. Added a leading-`---` test.
-- **Audit note (out of scope):** `docs/cross-domain-impact.md:5` says "seven" while listing eight
-  embedded-IaC ecosystems — a pre-existing CDK/CDKTF-era miscount, unrelated to GitHub Actions (which
-  is config, not embedded IaC, and correctly excluded there). Left untouched to keep this PR scoped;
-  flagged for a separate fix.
+- **Audit note (pre-existing doc fix, folded in on request):** `docs/cross-domain-impact.md:5` said
+  "seven" while listing eight embedded-IaC ecosystems — a CDK/CDKTF-era miscount. Corrected to "eight".
+  GitHub Actions is config, not embedded-in-code IaC, so it is correctly **excluded** from this
+  cross-domain list (cross-domain edges link a code function to the resource it provisions; workflows
+  have no co-located provisioning code). The spec-17 line (`openlore-spec-17-cross-domain-impact.md:43`)
+  lists seven items and says "seven" — internally consistent — so it was left as-is.
 
 ## Third round — downstream-consumer integration audit (`isIacLanguage`)
 A third pass verified every consumer of `isIacLanguage` / the IaC node set handles GitHub Actions
