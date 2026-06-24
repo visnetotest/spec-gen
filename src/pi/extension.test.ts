@@ -3,7 +3,8 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { modelsUrl, stripMarker, isUsableConfig, readConfig, formatToolResult, formatCallArgs } from './extension.js';
+import { modelsUrl, stripMarker, isUsableConfig, readConfig, formatToolResult, formatCallArgs, NAV_TOOLS } from './extension.js';
+import { TOOL_DEFINITIONS } from '../cli/commands/mcp.js';
 
 describe('modelsUrl', () => {
   it('appends /v1/models to a bare host', () => {
@@ -270,5 +271,46 @@ describe('readConfig', () => {
     const cfg = await readConfig(dir);
     expect(cfg?.generation.provider).toBe('openai-compat');
     expect(cfg?.generation.model).toBe('codestral');
+  });
+});
+
+describe('NAV_TOOLS surface', () => {
+  it('has unique tool names', () => {
+    const names = NAV_TOOLS.map(t => t.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('every entry is fully specified for registration', () => {
+    for (const t of NAV_TOOLS) {
+      expect(t.name, `name on ${JSON.stringify(t)}`).toMatch(/^[a-z][a-z_]*$/);
+      expect(t.label, `label on ${t.name}`).toMatch(/^openlore /);
+      expect(t.description.length, `description on ${t.name}`).toBeGreaterThan(0);
+      expect(t.guideline.length, `guideline on ${t.name}`).toBeGreaterThan(0);
+      // typebox object schema — what registerTool receives as the tool's params
+      expect((t.parameters as { type?: string }).type, `parameters on ${t.name}`).toBe('object');
+    }
+  });
+
+  // The load-bearing guard: every Pi-surfaced tool must be a real dispatchable
+  // daemon tool. A renamed/removed tool (e.g. get_decisions, removed in #179)
+  // would otherwise 404 silently at call time — this fails the build instead.
+  it('only names tools the daemon can dispatch', () => {
+    const dispatchable = new Set(TOOL_DEFINITIONS.map(t => t.name));
+    const missing = NAV_TOOLS.map(t => t.name).filter(n => !dispatchable.has(n));
+    expect(missing, `Pi NAV_TOOLS not in TOOL_DEFINITIONS: ${missing.join(', ')}`).toEqual([]);
+  });
+
+  it("each tool's declared params are a subset of the daemon tool's inputSchema", () => {
+    const byName = new Map(TOOL_DEFINITIONS.map(t => [t.name, t]));
+    for (const tool of NAV_TOOLS) {
+      const def = byName.get(tool.name);
+      if (!def) continue; // covered by the dispatchable test above
+      const schemaProps = (def.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+      const allowed = new Set(Object.keys(schemaProps));
+      // `directory` is injected by the daemon, never declared on the Pi side.
+      const declared = Object.keys((tool.parameters as { properties?: Record<string, unknown> }).properties ?? {});
+      const unknown = declared.filter(p => p !== 'directory' && !allowed.has(p));
+      expect(unknown, `${tool.name} declares params absent from inputSchema: ${unknown.join(', ')}`).toEqual([]);
+    }
   });
 });

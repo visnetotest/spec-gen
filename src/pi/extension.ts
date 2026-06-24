@@ -488,7 +488,7 @@ interface NavToolSpec { name: string; label: string; description: string; guidel
 // Descriptions and guidelines are written trigger-first and jargon-light: weak
 // local tool-callers (e.g. codestral) pattern-match on "when the user asks X,
 // call this" far better than on a capability statement full of graph jargon.
-const NAV_TOOLS: NavToolSpec[] = [
+export const NAV_TOOLS: NavToolSpec[] = [
   {
     name: 'orient',
     label: 'openlore orient',
@@ -530,6 +530,18 @@ const NAV_TOOLS: NavToolSpec[] = [
     }),
   },
   {
+    name: 'find_path',
+    label: 'openlore find_path',
+    description: 'Find the cheapest call path from one function to another — the route from A to B through the call graph, plus a few alternates.',
+    guideline: 'When you need the route between two functions ("how does A reach B"), call openlore_find_path with `from` and `to` — function names, or selectors like role:entrypoint / file:<path>. For a step-by-step trace of an already-known path, use trace_execution_path instead.',
+    parameters: Type.Object({
+      from: Type.String({ description: 'REQUIRED. Start endpoint: a function name, or a selector — landmark:<id> / role:entrypoint|hub|sink / file:<path>.' }),
+      to: Type.String({ description: 'REQUIRED. Goal endpoint: a function name, or a selector — landmark:<id> / role:entrypoint|hub|sink / file:<path>.' }),
+      useCallDistance: Type.Optional(Type.Boolean({ description: 'Rank by confidence-weighted call-distance (default true); false ranks by fewest hops.' })),
+      directResolvedOnly: Type.Optional(Type.Boolean({ description: 'Traverse only directly-resolved edges, ignoring synthesized dynamic-dispatch edges (default false).' })),
+    }),
+  },
+  {
     name: 'analyze_impact',
     label: 'openlore analyze_impact',
     description: 'List everything that depends on a function or type (its blast radius).',
@@ -558,6 +570,39 @@ const NAV_TOOLS: NavToolSpec[] = [
     parameters: Type.Object({
       domains: Type.Optional(Type.Array(Type.String(), { description: 'Limit to these spec domains' })),
       minCoverage: Type.Optional(Type.Number()),
+    }),
+  },
+  {
+    name: 'blast_radius',
+    label: 'openlore blast_radius',
+    description: 'Before committing a change, get one briefing of what it touches: affected callers, layers crossed, the tests to run, and the decisions/specs/memories it puts at risk.',
+    guideline: 'Before you commit or finish a change, call openlore_blast_radius to see the blast radius — what your edits affect and which tests to run. With no arguments it uses your current uncommitted changes (diff vs HEAD).',
+    parameters: Type.Object({
+      baseRef: Type.Optional(Type.String({ description: 'Git ref to diff the working tree against (e.g. "HEAD", "main"). Optional — defaults to HEAD (uncommitted changes).' })),
+      depth: Type.Optional(Type.Number({ description: 'Impact-analysis traversal depth (default 2).' })),
+      maxSymbols: Type.Optional(Type.Number({ description: 'Cap on the highest-fan-in changed symbols analyzed (default 12).' })),
+    }),
+  },
+  {
+    name: 'structural_diff',
+    label: 'openlore structural_diff',
+    description: 'Show what changed structurally between two states (working tree vs a ref, or two refs): functions and call edges added/removed, signature changes, and the existing callers left STALE by a moved signature.',
+    guideline: 'When reviewing or refactoring a change, call openlore_structural_diff to see the structural delta and whose callers are now stale — a complement to git diff. With no arguments it compares your working tree against HEAD.',
+    parameters: Type.Object({
+      baseRef: Type.Optional(Type.String({ description: 'Old state to diff against (e.g. "HEAD", "main"). Optional — defaults to HEAD.' })),
+      headRef: Type.Optional(Type.String({ description: 'New state (a git ref). Optional — omit to use the working tree.' })),
+      maxResults: Type.Optional(Type.Number({ description: 'Cap reported items per category (default 200).' })),
+    }),
+  },
+  {
+    name: 'verify_claim',
+    label: 'openlore verify_claim',
+    description: 'Verify a structural claim against the graph before asserting it — "X is dead", "Y calls Z", "Z is safe to change" — and get a deterministic verdict (confirmed / refuted / unverifiable) with a citation receipt.',
+    guideline: 'Before you tell the user a structural fact ("X is dead", "Y calls Z", "this is safe to change"), call openlore_verify_claim with `kind` and `subject` (and `object` for relational kinds: calls, reaches, impacts). An "unverifiable" verdict means hedge or read the source rather than assert.',
+    parameters: Type.Object({
+      kind: StringEnum(['calls', 'reaches', 'dead', 'impacts', 'safe-to-change'] as const, { description: 'REQUIRED. The kind of structural claim to verify.' }),
+      subject: Type.String({ description: 'REQUIRED. The symbol the claim is about (a function/method name).' }),
+      object: Type.Optional(Type.String({ description: 'The second symbol — required for relational kinds (calls, reaches, impacts).' })),
     }),
   },
   {
@@ -599,6 +644,25 @@ const NAV_TOOLS: NavToolSpec[] = [
     description: 'Get a bird\'s-eye view of the codebase — domain clusters, cross-cluster dependencies, entry points, and critical hubs.',
     guideline: 'Before planning a large feature or onboarding to an unknown area, call openlore_get_architecture_overview for a structural overview.',
     parameters: Type.Object({}),
+  },
+  {
+    name: 'get_map',
+    label: 'openlore get_map',
+    description: 'The lay of the land — a coarse-to-fine map of the codebase: each region (community) as a super-node with its top files, plus how the regions connect. Drill into one region with its id.',
+    guideline: 'To get oriented in an unfamiliar codebase or see where regions connect, call openlore_get_map. Pass a `communityId` from the region view to drill into one region at function granularity.',
+    parameters: Type.Object({
+      communityId: Type.Optional(Type.String({ description: 'Optional: drill into this region (a communityId from the region view) at function granularity.' })),
+    }),
+  },
+  {
+    name: 'get_landmarks',
+    label: 'openlore get_landmarks',
+    description: 'The structural anchors of the whole repo — hubs, orchestrators, chokepoints, volatile, entrypoint, and dead functions, each labeled with evidence.',
+    guideline: 'To find the most structurally important functions before a change, call openlore_get_landmarks. Filter to one kind with `label` (hub | orchestrator | chokepoint | volatile | entrypoint | dead).',
+    parameters: Type.Object({
+      label: Type.Optional(Type.String({ description: 'Optional: return only landmarks carrying this label — hub | orchestrator | chokepoint | volatile | entrypoint | dead.' })),
+      limit: Type.Optional(Type.Number({ description: 'Max landmarks to return, ordered by fan-in (default 20, max 200).' })),
+    }),
   },
   {
     name: 'get_refactor_report',
@@ -681,6 +745,119 @@ const NAV_TOOLS: NavToolSpec[] = [
       direction: Type.Optional(StringEnum(['imports', 'importedBy', 'both'] as const)),
     }),
   },
+  {
+    name: 'remember',
+    label: 'openlore remember',
+    description: 'Persist a durable, code-anchored fact for a later session — an invariant, gotcha, or rationale. Anchor it to a symbol/file so it self-invalidates when that code changes.',
+    guideline: 'When you learn something durable about the code that future sessions should know (an invariant, a gotcha, why something is the way it is), call openlore_remember with the `content` and `anchors` (the symbol/file it is about). For spec-synced architectural decisions, use record_decision instead.',
+    parameters: Type.Object({
+      content: Type.String({ description: 'REQUIRED. The memory to persist — one self-contained fact.' }),
+      anchors: Type.Optional(Type.Array(
+        Type.Object({
+          symbol: Type.Optional(Type.String({ description: 'Function/method name (optional).' })),
+          file: Type.Optional(Type.String({ description: 'Repo-relative file path (optional).' })),
+        }),
+        { description: 'Code this memory is about; each anchor names a symbol and/or file so the memory self-invalidates when that code changes.' },
+      )),
+      type: Type.Optional(StringEnum(['invariant', 'gotcha', 'rationale', 'convention', 'preference', 'todo', 'note'] as const, { description: 'Classification (default note); never inferred.' })),
+      tags: Type.Optional(Type.Array(Type.String(), { description: 'Optional retrieval tags.' })),
+      supersedes: Type.Optional(Type.String({ description: 'Id of a prior memory to retire (kept queryable via asOf).' })),
+    }),
+  },
+  {
+    name: 'recall',
+    label: 'openlore recall',
+    description: 'Recall code-anchored memories for what you are about to work on, each with a freshness verdict (fresh / drifted / orphaned).',
+    guideline: 'When starting work on code, call openlore_recall with a short `task` to surface durable notes left by earlier sessions. Drifted memories need verifying; orphaned ones are never authoritative.',
+    parameters: Type.Object({
+      task: Type.Optional(Type.String({ description: 'What you are about to work on (optional) — scopes the recall; omit to scan all.' })),
+      type: Type.Optional(Type.String({ description: 'Restrict notes to this type (decisions excluded when set).' })),
+      limit: Type.Optional(Type.Number({ description: 'Max memories to return (default 10).' })),
+      asOf: Type.Optional(Type.String({ description: 'Commit-ish: memory authoritative as of that commit.' })),
+      changedSince: Type.Optional(Type.String({ description: 'Commit-ish: memory recorded/invalidated after it.' })),
+    }),
+  },
+  {
+    name: 'check_spec_drift',
+    label: 'openlore check_spec_drift',
+    description: 'Check whether your code changes have drifted from the specs — which changed files are no longer covered by their spec.',
+    guideline: 'After modifying code, or before opening a PR, call openlore_check_spec_drift to see whether the specs are still in sync with what you changed. Requires `openlore generate` to have been run once.',
+    parameters: Type.Object({
+      base: Type.Optional(Type.String({ description: 'Git ref to compare against (default: auto-detect main/master).' })),
+      domains: Type.Optional(Type.Array(Type.String(), { description: 'Only check these spec domains (default: all).' })),
+      failOn: Type.Optional(StringEnum(['error', 'warning', 'info'] as const, { description: 'Minimum severity to report (default warning).' })),
+    }),
+  },
+  {
+    name: 'audit_spec_coverage',
+    label: 'openlore audit_spec_coverage',
+    description: 'Find spec coverage gaps — functions with no spec, hub gaps, orphan requirements, and stale domains.',
+    guideline: 'Before starting a new feature, or to audit spec health, call openlore_audit_spec_coverage to see what needs specs.',
+    parameters: Type.Object({
+      hubThreshold: Type.Optional(Type.Number({ description: 'Minimum fanIn to flag a function as a hub gap (default 5).' })),
+      maxUncovered: Type.Optional(Type.Number({ description: 'Maximum uncovered functions to return (default 50).' })),
+    }),
+  },
+  {
+    name: 'list_spec_domains',
+    label: 'openlore list_spec_domains',
+    description: 'List all spec domains in the project.',
+    guideline: 'When you need to know which spec domains exist before a targeted search_specs or get_spec, call openlore_list_spec_domains.',
+    parameters: Type.Object({}),
+  },
+  {
+    name: 'record_decision',
+    label: 'openlore record_decision',
+    description: 'Record an architectural decision before writing the code — data structure, library, API contract, auth strategy, module boundary, schema, caching, or error-handling choice.',
+    guideline: 'When you make a significant design choice, call openlore_record_decision BEFORE writing the code, with a `title` and `rationale` (plus `consequences`, `affectedFiles`, `supersedes` if relevant). Recording proactively keeps commits fast — the decisions gate reads the recorded store instead of running a slow extraction.',
+    parameters: Type.Object({
+      title: Type.String({ description: 'REQUIRED. Short imperative statement, e.g. "Use UUIDs for decision IDs".' }),
+      rationale: Type.String({ description: 'REQUIRED. Why this decision was made.' }),
+      consequences: Type.Optional(Type.String({ description: 'What changes as a result (optional).' })),
+      affectedFiles: Type.Optional(Type.Array(Type.String(), { description: 'Source files most relevant to this decision (optional).' })),
+      scope: Type.Optional(StringEnum(['local', 'component', 'cross-domain', 'system'] as const, { description: 'Decision scope (default component; cross-domain/system generate ADR files).' })),
+      supersedes: Type.Optional(Type.String({ description: 'ID of a prior decision this one replaces (optional).' })),
+    }),
+  },
+  {
+    name: 'list_decisions',
+    label: 'openlore list_decisions',
+    description: 'List architectural decisions recorded this session and their status (draft, verified, approved, rejected, synced).',
+    guideline: 'To review what decisions are pending — e.g. when a commit is blocked by the decisions gate — call openlore_list_decisions.',
+    parameters: Type.Object({
+      status: Type.Optional(StringEnum(['draft', 'consolidated', 'verified', 'phantom', 'approved', 'rejected', 'synced'] as const, { description: 'Filter by status (default: all).' })),
+    }),
+  },
+  {
+    name: 'approve_decision',
+    label: 'openlore approve_decision',
+    description: 'Approve a verified architectural decision for syncing into specs. Requires explicit human authorization.',
+    guideline: 'ONLY after the user has explicitly said "yes" / "approve" to a specific decision, call openlore_approve_decision with its `id`. Never approve on the user\'s behalf or autonomously — present the decision and wait for the user\'s explicit approval first. Then call sync_decisions.',
+    parameters: Type.Object({
+      id: Type.String({ description: 'REQUIRED. 8-character decision ID from list_decisions.' }),
+      note: Type.Optional(Type.String({ description: 'Optional review note.' })),
+    }),
+  },
+  {
+    name: 'reject_decision',
+    label: 'openlore reject_decision',
+    description: 'Reject a pending architectural decision so it is never synced to specs.',
+    guideline: 'When the user rejects a decision, call openlore_reject_decision with its `id` and an optional `note` (the reason).',
+    parameters: Type.Object({
+      id: Type.String({ description: 'REQUIRED. 8-character decision ID from list_decisions.' }),
+      note: Type.Optional(Type.String({ description: 'Optional reason for rejection.' })),
+    }),
+  },
+  {
+    name: 'sync_decisions',
+    label: 'openlore sync_decisions',
+    description: 'Write approved decisions into their target spec.md files and create ADR files. Append-only, never overwrites.',
+    guideline: 'After decisions are approved, call openlore_sync_decisions to write them into the specs. Pass `dryRun: true` to preview without writing first.',
+    parameters: Type.Object({
+      dryRun: Type.Optional(Type.Boolean({ description: 'Preview without writing files (default false).' })),
+      id: Type.Optional(Type.String({ description: 'Sync only this specific decision ID (default: all approved).' })),
+    }),
+  },
 ];
 
 function toolResult(text: string, details: unknown = null): AgentToolResult<unknown> {
@@ -728,6 +905,9 @@ const SKIP_BY_TOOL: Record<string, Set<string>> = {
   // bits: `language` (redundant scalar) and `criticalPathLeaves` (a long list of
   // leaf names, far less actionable than the up/downstream chains above it).
   analyze_impact: new Set(['language', 'criticalPathLeaves']),
+  // sync_decisions: `modifiedSpecs` repeats the per-item `specs` already shown
+  // under synced[]; drop it so the glance is just synced decisions + any errors.
+  sync_decisions: new Set(['modifiedSpecs']),
 };
 
 /** Skip set for a tool: base skips plus any tool-specific extras. */
