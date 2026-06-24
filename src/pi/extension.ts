@@ -91,6 +91,22 @@ export async function readConfig(cwd: string): Promise<OpenLoreConfig | null> {
   } catch { return null; }
 }
 
+/**
+ * Read just the `contextInjection` block, independent of `isUsableConfig`.
+ * The injection opt-out must work even before an LLM provider is configured —
+ * `readConfig` returns null until `generation.provider` is set (a headless/rpc
+ * session may never run the wizard), which would silently drop `mode: "off"`.
+ * Mirrors the CLI path, which reads config unconditionally.
+ */
+export async function readContextInjection(cwd: string): Promise<ContextInjectionConfig | undefined> {
+  try {
+    const raw = JSON.parse(await readFile(join(cwd, OPENLORE_DIR, 'config.json'), 'utf-8')) as unknown;
+    return raw && typeof raw === 'object'
+      ? (raw as { contextInjection?: ContextInjectionConfig }).contextInjection
+      : undefined;
+  } catch { return undefined; }
+}
+
 async function writeConfig(cwd: string, config: OpenLoreConfig): Promise<void> {
   await mkdir(join(cwd, OPENLORE_DIR), { recursive: true });
   await writeFile(join(cwd, OPENLORE_DIR, 'config.json'), JSON.stringify(config, null, 2) + '\n', 'utf-8');
@@ -998,16 +1014,19 @@ export default function openlore(pi: ExtensionAPI): void {
     // Pi's own baseline grounding, are unaffected); a weak/absent match degrades
     // to the single ignorable pointer line instead of dumping raw orient JSON.
     const daemon = await getDaemon(sessionCwd);
-    const cfg = resolveInjectionConfig((await readConfig(sessionCwd))?.contextInjection);
+    const cfg = resolveInjectionConfig(await readContextInjection(sessionCwd));
     if (daemon && event.prompt && cfg.mode !== 'off') {
       const oriented = await callTool(daemon, 'orient', { task: event.prompt }, sessionCwd);
       const result =
         oriented && typeof oriented === 'object' && !('error' in (oriented as object))
           ? (oriented as LeanOrientResult)
           : null;
-      blocks.push(result && passesRelevanceGate(result, cfg)
-        ? renderInjectionBlock(result, cfg)
-        : POINTER_LINE);
+      // Weak match → the single ignorable pointer line. A null result (daemon
+      // error / no graph) pushes nothing, so the no-analysis baseline nudge in
+      // the `suffix` fallback below can still surface.
+      if (result) {
+        blocks.push(passesRelevanceGate(result, cfg) ? renderInjectionBlock(result, cfg) : POINTER_LINE);
+      }
     }
 
     const suffix = blocks.length > 0
