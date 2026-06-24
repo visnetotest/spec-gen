@@ -89,8 +89,14 @@ change this?".
   is "everything this job pulls in".
 - **`uses:` resolution:** a `./`-prefixed ref is local (resolved relative to the repo root) — a
   `.yml`/`.yaml` target is a reusable workflow, anything else is a local action directory; every
-  other ref is external. Dynamic refs (`uses: ${{ matrix.action }}`) and unresolvable local refs
-  emit no edge, never a wrong one. Static parse only — no `${{ }}` evaluation, no matrix expansion.
+  other ref is external. Dynamic refs (`uses: ${{ matrix.action }}`, a partially-templated
+  `org/action@${{ ver }}`) and unresolvable local refs emit no edge, never a wrong one. Static parse
+  only — no `${{ }}` evaluation, no matrix expansion.
+- **Real-world YAML robustness:** `${{ … }}` expressions are masked before parsing (GitHub tolerates
+  them anywhere, but strict YAML rejects them inside a flow mapping like `with: { x: ${{ y }} }`, and
+  the error would otherwise drop later jobs); YAML merge keys (`<<: *anchor`, shared job config) are
+  expanded so an anchored job inherits its `steps`/`needs` edges; SHA pins with trailing comments,
+  `docker://` actions, and `.yml`/`.yaml`/CRLF variants are all handled.
 
 ## Discovery & disambiguation
 

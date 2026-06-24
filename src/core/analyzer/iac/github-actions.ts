@@ -25,6 +25,21 @@ interface InFile { path: string; content: string; language?: string }
 
 const LANG = 'GitHub Actions';
 
+/**
+ * Placeholder a `${{ … }}` expression is masked to before YAML parsing. GitHub's own
+ * parser tolerates `${{ … }}` anywhere, but strict YAML 1.2 (the `yaml` package) chokes
+ * on it inside a flow mapping — `with: { x: ${{ y }} }` — because `{{`/`}}` read as nested
+ * flow-map delimiters, and the resulting errors desync the parse and drop downstream jobs.
+ * Masking neutralizes that while keeping the value detectable as dynamic (a `uses:` that
+ * contains the sentinel is unresolvable → no edge). Mirrors the Helm `{{ }}` masking pre-pass.
+ */
+const GHA_EXPR = '__OPENLORE_GHA_EXPR__';
+
+/** Replace every `${{ … }}` with the sentinel, preserving newline count so line numbers stay stable. */
+function maskExpressions(content: string): string {
+  return content.replace(/\$\{\{[\s\S]*?\}\}/g, (m) => GHA_EXPR + m.replace(/[^\n]/g, ''));
+}
+
 /** True for `.github/workflows/<name>.yml` / `.yaml` (the workflow directory is fixed). */
 export function isWorkflowPath(path: string): boolean {
   return /(^|\/)\.github\/workflows\/[^/]+\.ya?ml$/i.test(path.replace(/\\/g, '/'));
@@ -138,7 +153,8 @@ function addRef(graph: IacGraph, from: string, to: string, kind: IacReference['k
  */
 function resolveUses(uses: string, ctx: Ctx): string | null {
   const ref = uses.trim();
-  if (!ref || ref.includes('${{')) return null; // dynamic → no edge
+  // Dynamic (a raw `${{ }}` or its masked sentinel, incl. partial refs like `org/x@${{v}}`) → no edge.
+  if (!ref || ref.includes('${{') || ref.includes(GHA_EXPR)) return null;
   if (ref.startsWith('./') || ref.startsWith('../')) {
     const norm = posixNormalize(ref);
     if (/\.ya?ml$/i.test(norm)) return ctx.workflowHandleByPath.get(norm) ?? null;
@@ -160,7 +176,10 @@ function lineOfPath(doc: ReturnType<typeof parseDocument>, content: string, path
 function parseWorkflow(filePath: string, content: string, graph: IacGraph, ctx: Ctx): void {
   let doc;
   try {
-    doc = parseDocument(content);
+    // `merge: true` expands YAML merge keys (`<<: *anchor`) at parse time so a job that
+    // inherits `steps`/`needs` from an `&anchor` carries them, rather than leaving them
+    // under a literal `<<` property (mirrors the compose parser, add-docker-container-graph).
+    doc = parseDocument(maskExpressions(content), { merge: true });
   } catch {
     return;
   }
@@ -232,7 +251,7 @@ function parseWorkflow(filePath: string, content: string, graph: IacGraph, ctx: 
 function parseAction(filePath: string, content: string, graph: IacGraph, ctx: Ctx): void {
   let doc;
   try {
-    doc = parseDocument(content);
+    doc = parseDocument(maskExpressions(content), { merge: true });
   } catch {
     return;
   }

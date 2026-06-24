@@ -38,6 +38,27 @@ store (`call-graph.db`) the same way `analyze_impact` does — no test fixtures.
 - `uses: ./.github/actions/missing` (target not indexed) → no edge.
 - Recoverable-but-malformed workflow YAML → no node, no throw.
 
+## Adversarial e2e round (real-world workflow shapes)
+A second pass ran an adversarial harness of realistic workflows (matrix + container + services,
+remote reusable workflows, SHA pins with trailing comments, `docker://` actions, monorepo nested
+composite-action chains, `needs` diamonds, YAML anchors) and two independent review agents. It
+surfaced two genuine defects, both fixed here with regression tests:
+
+1. **Flow-mapping `${{ }}` dropped downstream jobs.** `with: { node-version: ${{ matrix.node }} }`
+   is valid GitHub syntax but breaks strict YAML 1.2 flow parsing; the parse error desynced and
+   silently dropped every job declared *after* it (the matrix CI fixture fell from the expected 9
+   nodes / 6 edges to 4 / 1). Fixed with a `${{ … }}` masking pre-pass (offset-preserving, keeps
+   dynamic-ref detection). The matrix fixture now recovers fully.
+2. **YAML merge keys lost inherited edges.** A job using `<<: *anchor` to inherit `steps`/`needs`
+   carried none of the anchored edges, because `parseDocument` ran without `{ merge: true }` (the
+   compose parser sets it). Fixed; an anchored job now inherits its edges.
+
+Verified-not-bugs in the same pass: `on:`→boolean coercion does not occur (yaml v2 is YAML 1.2),
+`needs` forward-references, SHA-pin comments, `docker://`/remote-reusable externals, and determinism
+across input file order (the projector sorts). Two edge cases left acceptable-as-documented: a
+duplicate-job-key file is dropped whole (GitHub rejects it too), and a repo-root action referenced as
+`uses: ./` is unresolved.
+
 ## Verdict
 The CI DAG is now a first-class part of the same graph as application code and the other ten IaC
 ecosystems, with zero MCP-tool or schema changes — the spec-07 projector carried it unchanged.

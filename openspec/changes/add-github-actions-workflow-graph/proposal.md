@@ -75,6 +75,16 @@ LLM.
      `./` local ref whose target file is not in the indexed set emit **no edge** —
      `TODO(spec-07-followup): dynamic …` — never a wrong one. Malformed-but-recoverable YAML is ignored
      rather than minting a garbage node (same posture as the compose parser).
+   - **Real-world syntax robustness** (hardened by adversarial e2e review — see DOGFOOD notes): a
+     `${{ … }}` expression-**masking** pre-pass (mirrors Helm's `{{ }}` masking) runs before YAML
+     parse — GitHub tolerates `${{ … }}` anywhere, but strict YAML 1.2 chokes on it inside a flow
+     mapping (`with: { x: ${{ y }} }`), and the parse error would otherwise desync and silently drop
+     every job after it. The mask preserves newline count (line numbers stay stable) and keeps the
+     value detectable as dynamic, so a partially-templated `org/action@${{ ver }}` still emits no edge.
+     YAML **merge keys** (`<<: *anchor`, the shared-job-config pattern) are expanded at parse time
+     (`merge: true`), so an anchored job inherits its `steps`/`needs` edges. Handles `.yml`/`.yaml`,
+     CRLF/`\` paths, SHA pins with trailing comments (`@<sha> # v4`), `docker://` actions, and
+     `needs:` in string or list form.
 
 3. **Detection in `classifyYaml` + the analyze-time `resolveLang` layer, not `detectLanguage`.**
    Consistent with every other IaC ecosystem: `detectLanguage` (which the incremental watcher consults)

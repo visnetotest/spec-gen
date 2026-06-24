@@ -153,6 +153,78 @@ describe('GitHub Actions extraction', () => {
     expect(orphan.references).toHaveLength(0);
   });
 
+  it('survives a flow-mapping with ${{ }} (masks expressions) and keeps downstream jobs', () => {
+    // `with: { x: ${{ … }} }` is valid GitHub syntax but breaks strict YAML 1.2 flow parsing;
+    // without masking the parse desyncs and silently drops every job after it.
+    const g = extractGitHubActions([{
+      path: '.github/workflows/m.yml',
+      content: [
+        'on: push',
+        'jobs:',
+        '  build:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - uses: actions/checkout@v4',
+        '      - uses: actions/setup-node@v4',
+        '        with: { node-version: ${{ matrix.node }} }',
+        '      - uses: ./.github/actions/build',
+        '  release:',
+        '    needs: build',
+        '    uses: ./.github/workflows/rel.yml',
+      ].join('\n'),
+    }, {
+      path: '.github/workflows/rel.yml',
+      content: 'on: workflow_call\njobs:\n  pub:\n    runs-on: ubuntu-latest\n    steps: []',
+    }, {
+      path: '.github/actions/build/action.yml',
+      content: 'runs:\n  using: composite\n  steps: []',
+    }]);
+    const refs = g.references.map(r => `${r.fromAddress} -${r.kind}-> ${r.toAddress}`);
+    // The job AFTER the flow-`${{ }}` step must survive, with all its edges.
+    expect(refs).toContain('.github/workflows/m.yml::job.build -references-> actions/checkout@v4');
+    expect(refs).toContain('.github/workflows/m.yml::job.build -references-> .github/actions/build/action.yml::action');
+    expect(refs).toContain('.github/workflows/m.yml::job.release -depends_on-> .github/workflows/m.yml::job.build');
+    expect(refs).toContain('.github/workflows/m.yml::job.release -references-> .github/workflows/rel.yml::workflow');
+  });
+
+  it('drops a partially-templated uses (org/action@${{ version }}) — no edge, no garbage node', () => {
+    const g = extractGitHubActions([{
+      path: '.github/workflows/p.yml',
+      content: [
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - uses: my-org/my-action@${{ env.VERSION }}',
+      ].join('\n'),
+    }]);
+    expect(g.references).toHaveLength(0);
+    expect(g.resources.some(r => r.isExternal)).toBe(false);
+  });
+
+  it('expands YAML merge keys so an anchored job inherits its steps/needs edges', () => {
+    const merged = extractGitHubActions([{
+      path: '.github/workflows/anchored.yml',
+      content: [
+        'on: push',
+        'jobs:',
+        '  build: &base',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - uses: actions/checkout@v4',
+        '  test:',
+        '    <<: *base',
+        '    needs: build',
+      ].join('\n'),
+    }]);
+    const refs = merged.references.map(r => `${r.fromAddress} -${r.kind}-> ${r.toAddress}`);
+    // `test` merges build's steps via the anchor → it must carry the checkout edge too.
+    expect(refs).toContain('.github/workflows/anchored.yml::job.test -references-> actions/checkout@v4');
+    expect(refs).toContain('.github/workflows/anchored.yml::job.build -references-> actions/checkout@v4');
+    expect(refs).toContain('.github/workflows/anchored.yml::job.test -depends_on-> .github/workflows/anchored.yml::job.build');
+  });
+
   it('ignores recoverable-but-malformed YAML rather than minting a garbage node', () => {
     const bad = extractGitHubActions([{
       path: '.github/workflows/bad.yml',
