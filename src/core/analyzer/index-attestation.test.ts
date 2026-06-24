@@ -230,19 +230,24 @@ describe('index-attestation: refreshAttestationCounts (keeps the verdict honest 
   beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'att-refresh-')); });
   afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 
-  const store = (counts: { files: number; functions: number; edges: number; classes: number }): AttestationCountSource => ({
+  const store = (
+    counts: { files: number; functions: number; edges: number; classes: number },
+    schemaVersion = SCHEMA,
+  ): AttestationCountSource => ({
     countFiles: () => counts.files, countNodes: () => counts.functions,
     countEdges: () => counts.edges, countClasses: () => counts.classes,
+    getSchemaVersion: () => schemaVersion,
   });
 
-  it('updates committed counts to the live store and preserves the build-time digest', async () => {
+  it('updates committed counts to the live store and preserves the build-time digest + schema', async () => {
     const built = computeAttestation(SCHEMA, ...Object.values(makeGraph(100, 5)) as [AttNode[], AttEdge[], AttClass[]]);
     await writeAttestation(dir, built);
     // Simulate the watcher deleting ~70% of nodes, then refreshing.
-    await refreshAttestationCounts(dir, store({ files: 3, functions: 30, edges: 29, classes: 1 }), SCHEMA);
+    await refreshAttestationCounts(dir, store({ files: 3, functions: 30, edges: 29, classes: 1 }));
     const after = await readAttestation(dir);
     expect(after?.committed).toEqual({ files: 3, functions: 30, edges: 29, classes: 1 });
-    expect(after?.digest).toBe(built.digest); // digest stamps the last full build, carried forward
+    expect(after?.digest).toBe(built.digest);             // digest stamps the last full build, carried forward
+    expect(after?.schemaVersion).toBe(built.schemaVersion); // schema carried forward, never re-stamped
     // The crux: a load now reconciles HEALTHY against the shrunken-but-current store,
     // instead of falsely `degraded` against the stale build-time counts.
     expect(reconcile(after!, { schemaVersion: SCHEMA, files: 3, functions: 30, edges: 29, classes: 1 }).verdict).toBe('healthy');
@@ -250,8 +255,22 @@ describe('index-attestation: refreshAttestationCounts (keeps the verdict honest 
     expect(reconcile(built, { schemaVersion: SCHEMA, files: 3, functions: 30, edges: 29, classes: 1 }).verdict).toBe('degraded');
   });
 
+  it('REFUSES to refresh across a schema boundary — never masks a mismatched verdict', async () => {
+    // Attestation written at the OLD schema; the live store has been wiped+re-stamped to a NEW schema
+    // (mid schema-bump rebuild). A refresh must NOT rewrite the schema to current and erase the drift.
+    const oldSchema = SCHEMA - 1;
+    const built = computeAttestation(oldSchema, ...Object.values(makeGraph(100, 5)) as [AttNode[], AttEdge[], AttClass[]]);
+    await writeAttestation(dir, built);
+    await refreshAttestationCounts(dir, store({ files: 3, functions: 30, edges: 29, classes: 1 }, SCHEMA));
+    const after = await readAttestation(dir);
+    expect(after?.schemaVersion).toBe(oldSchema);           // untouched
+    expect(after?.committed).toEqual(built.committed);      // counts untouched too — refresh was skipped
+    // So a load still sees the schema drift as `mismatched`:
+    expect(reconcile(after!, { schemaVersion: SCHEMA, files: 3, functions: 30, edges: 29, classes: 1 }).verdict).toBe('mismatched');
+  });
+
   it('no-ops when no attestation exists (a legacy/unverifiable index is never fabricated)', async () => {
-    await refreshAttestationCounts(dir, store({ files: 1, functions: 1, edges: 0, classes: 0 }), SCHEMA);
+    await refreshAttestationCounts(dir, store({ files: 1, functions: 1, edges: 0, classes: 0 }));
     expect(await readAttestation(dir)).toBeNull();
   });
 });

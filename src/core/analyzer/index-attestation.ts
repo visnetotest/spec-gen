@@ -167,6 +167,7 @@ export interface AttestationCountSource {
   countNodes(): number;
   countEdges(): number;
   countClasses(): number;
+  getSchemaVersion(): number;
 }
 
 /**
@@ -182,21 +183,27 @@ export interface AttestationCountSource {
  * meaning what it should: the store is materially smaller than the *most recent* persist,
  * i.e. real truncation/corruption — never ordinary incremental editing.
  *
+ * Refreshes COUNTS ONLY. The schema version and digest belong to the full build that wrote
+ * the attestation and are carried forward verbatim. Critically, the refresh REFUSES to
+ * cross a schema boundary: if the live store's schema has diverged from the attestation's
+ * (e.g. a watcher batch landing mid schema-bump rebuild), it leaves the attestation
+ * untouched so the load-time verdict still sees `mismatched` — a refresh must never silently
+ * "upgrade" an old-schema attestation and mask the very drift this feature exists to catch.
+ *
  * No-ops when no attestation exists (a legacy/unverifiable index stays unverifiable — we
- * never fabricate one from a partial incremental state). The `digest` is carried forward:
- * it stamps the last full build (it is not a load-time verdict driver), while the counts
- * track the live store. Best-effort and cheap; callers invoke it as additive fire-and-forget.
+ * never fabricate one from a partial incremental state). Best-effort and cheap; callers
+ * invoke it as additive fire-and-forget.
  */
 export async function refreshAttestationCounts(
   outputDir: string,
   store: AttestationCountSource,
-  schemaVersion: number,
 ): Promise<void> {
   const existing = await readAttestation(outputDir);
   if (!existing) return;
+  // Never refresh across a schema boundary — that would mask a `mismatched` verdict.
+  if (store.getSchemaVersion() !== existing.schemaVersion) return;
   await writeAttestation(outputDir, {
     ...existing,
-    schemaVersion,
     committed: {
       files: store.countFiles(),
       functions: store.countNodes(),

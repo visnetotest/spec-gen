@@ -539,12 +539,17 @@ export class EdgeStore {
   }
 
   /**
-   * Force-checkpoint the WAL into the main database file and recount-ready state.
-   * Used by the integrity check to rule out a WAL-lag false positive before
-   * declaring an index `degraded` (change: add-index-integrity-attestation).
+   * Fold a lagging write-ahead log into the main database so a recount sees the latest
+   * committed rows. Used by the integrity check to rule out a WAL-lag false positive
+   * before declaring an index `degraded` (change: add-index-integrity-attestation).
+   *
+   * PASSIVE, not TRUNCATE: this runs on the hot read path (readCachedContext), and the
+   * goal is only "recount against the folded-in WAL", not "shrink the file". PASSIVE
+   * checkpoints what it can without waiting on a writer, so it never blocks the read path
+   * up to busy_timeout when the watcher or a concurrent `analyze` holds the write lock.
    */
   checkpoint(): void {
-    try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* best-effort */ }
+    try { this.db.exec('PRAGMA wal_checkpoint(PASSIVE)'); } catch { /* best-effort */ }
   }
 
   // ── Node mutations ────────────────────────────────────────────────────────────

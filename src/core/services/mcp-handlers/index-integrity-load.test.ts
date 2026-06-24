@@ -16,7 +16,9 @@ import { computeAttestation, writeAttestation } from '../../analyzer/index-attes
 import { readCachedContext } from './utils.js';
 import { handleFindDeadCode } from './reachability.js';
 import { handleGetHealthMap } from './health-map.js';
-import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
+import { handleAnalyzeImpact } from './graph.js';
+import { handleSelectTests } from './test-impact.js';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT, ARTIFACT_INDEX_ATTESTATION } from '../../../constants.js';
 import type { FunctionNode, CallEdge, ClassNode } from '../../analyzer/call-graph.js';
 import type { ConfidenceBoundary } from './confidence-boundary.js';
 
@@ -140,6 +142,31 @@ describe('index integrity — surfaced to agents end-to-end', () => {
     const dir = await track(layIndex({ committed: TOTAL }));
     const res = await handleFindDeadCode({ directory: dir }) as { confidenceBoundary?: ConfidenceBoundary };
     expect(res.confidenceBoundary?.integrity).toBeUndefined();
+  });
+
+  it('analyze_impact over a degraded index carries the verdict and is not complete', async () => {
+    const dir = await track(layIndex({ committed: TOTAL, storedNodeCount: 5 }));
+    // fn1 is among the 5 nodes that landed in the store.
+    const res = await handleAnalyzeImpact(dir, 'fn1') as { confidenceBoundary?: ConfidenceBoundary };
+    expect(res.confidenceBoundary?.integrity?.verdict).toBe('degraded');
+    expect(res.confidenceBoundary?.complete).toBe(false);
+  });
+
+  it('select_tests over a degraded index carries the verdict', async () => {
+    const dir = await track(layIndex({ committed: TOTAL, storedNodeCount: 5 }));
+    const res = await handleSelectTests({ directory: dir, changedSymbols: ['fn1'] }) as { confidenceBoundary?: ConfidenceBoundary };
+    expect(res.confidenceBoundary?.integrity?.verdict).toBe('degraded');
+  });
+
+  it('a malformed attestation on disk loads as unverifiable, never a fabricated healthy', async () => {
+    const dir = await track(layIndex({ committed: TOTAL }));
+    // Corrupt the committed counts (the NaN→false-healthy trap) directly on disk.
+    const attPath = join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_INDEX_ATTESTATION);
+    const att = JSON.parse(await readFile(attPath, 'utf-8')) as Record<string, unknown>;
+    await writeFile(attPath, JSON.stringify({ ...att, committed: {} }));
+    const ctx = await readCachedContext(dir);
+    expect(ctx?.integrity).toBeUndefined(); // unverifiable, not healthy
+    ctx?.edgeStore?.close();
   });
 
   it('get_health_map discloses indexIntegrity on a degraded index, and omits it when healthy', async () => {

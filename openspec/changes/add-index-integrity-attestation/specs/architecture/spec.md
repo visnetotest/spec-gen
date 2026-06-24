@@ -48,9 +48,19 @@ attestation (e.g. a `committed` record missing numeric counts) SHALL be treated 
 size, consistent with untrusted-artifact deserialization safety.
 
 The incremental watcher SHALL keep the attestation's committed counts in lockstep with the store it
-mutates (a cheap recount; the build-time digest is carried forward), so that ordinary incremental
-editing — including bulk deletions — does not drive the persisted counts below the build-time baseline
-and falsely report `degraded`. When no attestation exists, the watcher SHALL NOT fabricate one.
+mutates (a cheap recount), so that ordinary incremental editing — including bulk deletions — does not
+drive the persisted counts below the build-time baseline and falsely report `degraded`. The refresh
+SHALL update COUNTS ONLY: the schema version and digest belong to the full build that wrote the
+attestation and SHALL be carried forward verbatim. The refresh SHALL REFUSE to cross a schema boundary —
+when the live store's schema differs from the attestation's, it SHALL leave the attestation untouched so
+the load-time verdict still observes `mismatched`; a refresh SHALL NEVER re-stamp the schema and mask
+that drift. When no attestation exists, the watcher SHALL NOT fabricate one.
+
+The verdict SHALL be computed at load (on a cache miss) and carried on the loaded context; it is not
+recomputed on every cached read. Because the watcher keeps the attestation in lockstep with the store it
+just persisted, a subsequent cold reconcile of a watcher-updated index stays `healthy`. Folding a lagging
+write-ahead log before a recount SHALL use a passive checkpoint, so the read path never blocks on a
+concurrent writer.
 
 #### Scenario: A half-built index is reported degraded, not healthy
 

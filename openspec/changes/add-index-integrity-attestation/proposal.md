@@ -116,7 +116,7 @@ signal emitted on non-healthy), and surfaced via `confidence-boundary.ts` (`asse
 `analyze_impact`, path tracing) and `health-map.ts`. EdgeStore gained `countFiles`/`countEdges`/
 `countClasses`/`getSchemaVersion`/`checkpoint` and an exported `SCHEMA_VERSION`.
 
-**Adversarial hardening pass (post-review, same PR):**
+**Adversarial hardening pass 1 (post-review, same PR):**
 - **Fail closed on a malformed attestation.** `readAttestation` now validates the `committed` counts are
   finite numbers and bounds the file size before reading (untrusted-artifact safety). Without the numeric
   check a `committed: {}` made the ratio `NaN` and `NaN < floor` `false` — silently fabricating `healthy`,
@@ -128,13 +128,34 @@ signal emitted on non-healthy), and surfaced via `confidence-boundary.ts` (`asse
   so the verdict reconciles against the *current* store. Verified on this repo: a 1,700-node deletion
   stays `healthy` after refresh.
 
+**Adversarial hardening pass 2 (deeper review, same PR):**
+- **Refresh must not mask a schema mismatch.** `refreshAttestationCounts` previously re-stamped the
+  attestation's `schemaVersion` to the current value. In the window after a schema-bump wipe (when the
+  store reports the new schema but the on-disk attestation is still old), a watcher batch would silently
+  "upgrade" the attestation — masking the `mismatched` verdict the feature exists to surface. It now
+  carries the existing schema forward and **refuses to refresh across a schema boundary** (leaves the
+  attestation untouched so the load still sees `mismatched`). Dogfooded: an old-schema attestation over a
+  current-schema store stays `mismatched`, not silently healthy.
+- **Passive WAL checkpoint on the read path.** The checkpoint-and-recount retry ran
+  `wal_checkpoint(TRUNCATE)` inside `readCachedContext` (a read path), which can block up to `busy_timeout`
+  on a concurrent writer — and the degraded case correlates with a concurrent `analyze`. Switched to
+  `wal_checkpoint(PASSIVE)`, which folds a lagging WAL without waiting on writers; degraded detection still
+  works (dogfooded).
+- **Verdict is a load-time/cache-miss property.** Documented that the verdict is computed on a cold load
+  and carried on the context; the watcher keeps the attestation in lockstep so a cold reconcile of a
+  watcher-updated index stays `healthy` (dogfooded against a real `watcher.handleChange`).
+
 Verified by: unit tests over the pure functions (`index-attestation.test.ts` — counts, determinism,
 order-independent digest, the three verdicts, small-repo + ratio-floor boundaries, `committed.edges===0`
-guard, read/write round-trip, foreign-version + malformed + oversized rejection, `refreshAttestationCounts`);
-a load-path + agent-surface e2e (`index-integrity-load.test.ts` — healthy / degraded partial-persist /
-mismatched schema / unverifiable-legacy / db-absent, plus `find_dead_code` and `get_health_map` carrying
-the verdict and the recoverable telemetry signal, all driving real handlers); the confidence-boundary
-wiring (`confidence-boundary-integrity.test.ts`); and direct EdgeStore method tests (`edge-store.test.ts`).
+guard, read/write round-trip, foreign-version + malformed + oversized rejection, `refreshAttestationCounts`
+including its **schema-boundary refusal**); a **build-side pipeline** test driving the real
+`writeEdgesToSQLite` and asserting the attestation counts the internal/non-test population and reconciles
+healthy with the store it wrote (`artifact-generator-attestation.test.ts` — the regression guard for the
+internal-vs-external count bug); a load-path + agent-surface e2e (`index-integrity-load.test.ts` — healthy /
+degraded partial-persist / mismatched schema / unverifiable-legacy / db-absent / **malformed-on-disk**, plus
+`find_dead_code`, `analyze_impact`, `select_tests` and `get_health_map` carrying the verdict and the
+recoverable telemetry signal, all driving real handlers); the confidence-boundary wiring
+(`confidence-boundary-integrity.test.ts`); and direct EdgeStore method tests (`edge-store.test.ts`).
 Dogfooded on this repo: a full `analyze` writes a deterministic attestation (byte-identical across two
 builds), the live index loads `healthy` (2534/2534 functions), a node-deleted clone loads `degraded`, a
 schema-bumped attestation loads `mismatched`, a malformed/oversized attestation loads `unverifiable`, and
