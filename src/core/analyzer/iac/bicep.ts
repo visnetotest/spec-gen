@@ -282,16 +282,18 @@ function scanRefSymbols(masked: string): string[] {
   while ((m = re.exec(masked)) !== null) {
     const start = m.index;
     const end = re.lastIndex;
-    // Skip `.property` accessors: an identifier immediately preceded by `.`.
+    // Skip member-access `.property` (a single `.`), but NOT the spread operator `...sym`
+    // (consecutive dots) — there `sym` is a real referenced symbol.
     let p = start - 1;
     while (p >= 0 && (masked[p] === ' ' || masked[p] === '\t')) p--;
-    if (p >= 0 && masked[p] === '.') continue;
-    // Skip object property keys: an identifier followed by `:` AND starting an object entry
-    // (preceded by `{`, `[`, `,`, a newline, or start). A ternary arm `c ? yes : no` is
-    // preceded by `?`, so `yes` is NOT treated as a key and stays a real reference.
+    if (p >= 0 && masked[p] === '.' && !(p >= 1 && masked[p - 1] === '.')) continue;
+    // Skip object property keys: an identifier followed by a single `:` that starts an object
+    // entry (preceded by `{`, `[`, `,`, a newline, or start). Two cases are NOT keys: the
+    // `::` nested-resource accessor (`vnet::subnet` — both sides are real refs), and a ternary
+    // arm `c ? yes : no` (preceded by `?`).
     let q = end;
     while (q < masked.length && (masked[q] === ' ' || masked[q] === '\t')) q++;
-    if (q < masked.length && masked[q] === ':') {
+    if (q < masked.length && masked[q] === ':' && masked[q + 1] !== ':') {
       const before = p < 0 ? '\n' : masked[p];
       if (before === '{' || before === '[' || before === ',' || before === '\n') continue;
     }

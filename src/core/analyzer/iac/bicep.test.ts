@@ -227,6 +227,45 @@ describe('extractBicep — robustness', () => {
     expect(g.references.some((r) => r.toAddress === 'x.bicep::other')).toBe(false);
   });
 
+  it('resolves both sides of the `::` nested-resource accessor', () => {
+    const content = [
+      "resource vnet 'Microsoft.Network/virtualNetworks@2023-01-01' = {",
+      "  name: 'vnet'",
+      "  resource subnet 'subnets' = {",
+      "    name: 'default'",
+      "  }",
+      "}",
+      "output subnetId string = vnet::subnet.id",
+    ].join('\n');
+    const g = extractBicep([{ path: 'x.bicep', content, language: 'Bicep' }]);
+    // `vnet::subnet` depends on both the parent and the nested child.
+    expect(hasRef(g, 'x.bicep::subnetId', 'x.bicep::vnet', 'references')).toBe(true);
+    expect(hasRef(g, 'x.bicep::subnetId', 'x.bicep::subnet', 'references')).toBe(true);
+  });
+
+  it('resolves spread sources in object and array spreads', () => {
+    const content = [
+      "var commonTags = { team: 'core' }",
+      "var base = [ 'a' ]",
+      "var extra = 'b'",
+      "var tags = { ...commonTags, env: 'prod' }",
+      "var arr = [ ...base, extra ]",
+    ].join('\n');
+    const g = extractBicep([{ path: 'x.bicep', content, language: 'Bicep' }]);
+    expect(hasRef(g, 'x.bicep::tags', 'x.bicep::commonTags', 'references')).toBe(true);
+    expect(hasRef(g, 'x.bicep::arr', 'x.bicep::base', 'references')).toBe(true);
+    expect(hasRef(g, 'x.bicep::arr', 'x.bicep::extra', 'references')).toBe(true);
+    // Member access is still excluded (regression guard for the spread fix).
+    expect(g.references.some((r) => r.toAddress === 'x.bicep::env')).toBe(false);
+  });
+
+  it('still excludes plain member access after the spread fix', () => {
+    const content = "param a string\nvar b = a.something.nested\n";
+    const g = extractBicep([{ path: 'x.bicep', content, language: 'Bicep' }]);
+    expect(hasRef(g, 'x.bicep::b', 'x.bicep::a', 'references')).toBe(true);
+    expect(g.references.some((r) => /::(something|nested)$/.test(r.toAddress))).toBe(false);
+  });
+
   it('is unfazed by decorators and CRLF line endings', () => {
     const content = [
       "@description('the location')",

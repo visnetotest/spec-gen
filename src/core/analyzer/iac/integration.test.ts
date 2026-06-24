@@ -51,6 +51,13 @@ describe('IaC ↔ existing graph integration', () => {
     const vnet = graph.nodes.find(n => n.name === 'vnet' && n.filePath === 'infra/modules/network.bicep')!;
     expect(graph.edges.some(e => e.callerId === networkMod.id && e.calleeId === vnet.id)).toBe(true);
 
+    // Spread (`allTags = { ...baseTags }`) and the `::` accessor (`stg::blob`) resolve end-to-end.
+    const nodeId = (name: string) => graph.nodes.find(n => n.name === name && n.filePath === 'infra/main.bicep')?.id;
+    const edge = (from?: string, to?: string) => graph.edges.some(e => e.callerId === from && e.calleeId === to);
+    expect(edge(nodeId('allTags'), nodeId('baseTags'))).toBe(true);
+    expect(edge(nodeId('blobName'), nodeId('stg'))).toBe(true);
+    expect(edge(nodeId('blobName'), nodeId('blob'))).toBe(true);
+
     // infra→infra edges exist (references / depends_on).
     const iacEdges = graph.edges.filter(e => e.kind === 'references' || e.kind === 'depends_on');
     expect(iacEdges.length).toBeGreaterThan(0);

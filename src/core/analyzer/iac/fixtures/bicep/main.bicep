@@ -6,9 +6,19 @@ param storageName string
 var prefix = 'app'
 var fullName = '${prefix}${storageName}'
 
+var baseTags = {
+  managedBy: 'bicep'
+}
+// Spread merge — the resource below references `baseTags` through the spread.
+var allTags = {
+  ...baseTags
+  app: prefix
+}
+
 resource stg 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   name: fullName
   location: location
+  tags: allTags
   sku: {
     name: 'Standard_LRS'
   }
@@ -59,3 +69,5 @@ module shared 'br/public:avm/res/network/virtual-network:0.1.0' = {
 
 output storageId string = stg.id
 output appName string = app.name
+// `::` nested-resource accessor — references both `stg` and its child `blob`.
+output blobName string = stg::blob.name
