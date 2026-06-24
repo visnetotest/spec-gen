@@ -39,6 +39,19 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
+// Task-scoped injection gate + render. This module is intentionally
+// dependency-light (its only runtime import is estimateTokens) so importing it
+// here does NOT drag the analyzer into the Pi host — orientation still comes
+// from the warm daemon over RPC (decision abee8e3e).
+import {
+  resolveInjectionConfig,
+  passesRelevanceGate,
+  renderInjectionBlock,
+  POINTER_LINE,
+  type LeanOrientResult,
+} from '../cli/commands/orient-inject-render.js';
+import type { ContextInjectionConfig } from '../types/index.js';
+
 // ── Config types & helpers ────────────────────────────────────────────────────
 
 interface OpenLoreConfig {
@@ -58,6 +71,8 @@ interface OpenLoreConfig {
     apiKey?: string;
     skipSslVerify?: boolean;
   };
+  /** Task-scoped context injection settings (gate + token budget + opt-out). */
+  contextInjection?: ContextInjectionConfig;
   createdAt: string;
   lastRun: string | null;
 }
@@ -976,12 +991,23 @@ export default function openlore(pi: ExtensionAPI): void {
     const specIndex = await readSpecIndex(sessionCwd);
     if (specIndex) blocks.push(specIndex);
 
+    // Task-scoped orientation: gate + token-budgeted render, the same pipeline
+    // `openlore orient --inject` uses for the Claude Code hook (change
+    // add-task-scoped-context-injection). The daemon does the orientation; the
+    // host only gates and renders. `mode: "off"` opts out (digest/spec index,
+    // Pi's own baseline grounding, are unaffected); a weak/absent match degrades
+    // to the single ignorable pointer line instead of dumping raw orient JSON.
     const daemon = await getDaemon(sessionCwd);
-    if (daemon && event.prompt) {
+    const cfg = resolveInjectionConfig((await readConfig(sessionCwd))?.contextInjection);
+    if (daemon && event.prompt && cfg.mode !== 'off') {
       const oriented = await callTool(daemon, 'orient', { task: event.prompt }, sessionCwd);
-      if (oriented && typeof oriented === 'object' && !('error' in (oriented as object))) {
-        blocks.push('# openlore orientation for this task\n\n' + truncate(JSON.stringify(oriented, null, 2), 6000));
-      }
+      const result =
+        oriented && typeof oriented === 'object' && !('error' in (oriented as object))
+          ? (oriented as LeanOrientResult)
+          : null;
+      blocks.push(result && passesRelevanceGate(result, cfg)
+        ? renderInjectionBlock(result, cfg)
+        : POINTER_LINE);
     }
 
     const suffix = blocks.length > 0
