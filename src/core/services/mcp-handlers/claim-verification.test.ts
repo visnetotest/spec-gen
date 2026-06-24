@@ -333,4 +333,54 @@ describe('verify_claim — decision-current', () => {
     };
     expect(r.verdict).toBe('confirmed');
   });
+
+  // A DECLINED supersession (the superseder was rejected) leaves the original standing —
+  // it must agree with isEffectiveSuperseder / the stale-decision-reference finding, which
+  // exclude rejected/phantom superseders. (regression: shared retirement semantics)
+  it('confirms the target when its only superseder was rejected (declined supersession)', async () => {
+    await writeStore([
+      decision({ id: 'a1b2c3d4', title: 'Standing approach' }),
+      decision({ id: 'b2c3d4e5', title: 'Declined replacement', status: 'rejected', supersedes: 'a1b2c3d4' }),
+    ]);
+    const r = await handleVerifyClaim({ directory: root, kind: 'decision-current', subject: 'a1b2c3d4' }) as {
+      verdict: string;
+    };
+    expect(r.verdict).toBe('confirmed');
+  });
+
+  it('confirms the target when its only superseder is a phantom', async () => {
+    await writeStore([
+      decision({ id: 'a1b2c3d4', title: 'Standing approach' }),
+      decision({ id: 'b2c3d4e5', title: 'Phantom replacement', status: 'phantom', supersedes: 'a1b2c3d4' }),
+    ]);
+    const r = await handleVerifyClaim({ directory: root, kind: 'decision-current', subject: 'a1b2c3d4' }) as {
+      verdict: string;
+    };
+    expect(r.verdict).toBe('confirmed');
+  });
+
+  // A decision that names its own id as `supersedes` retires nothing and must not refute itself.
+  it('does not refute a decision that supersedes itself', async () => {
+    await writeStore([decision({ id: 'a1b2c3d4', title: 'Self-referential', supersedes: 'a1b2c3d4' })]);
+    const r = await handleVerifyClaim({ directory: root, kind: 'decision-current', subject: 'a1b2c3d4' }) as {
+      verdict: string;
+    };
+    expect(r.verdict).toBe('confirmed');
+  });
+
+  // Two decisions superseding one target — the named superseder is deterministic
+  // (lexicographically smallest id), regardless of store order.
+  it('names a deterministic superseder when a target has multiple superseders', async () => {
+    await writeStore([
+      decision({ id: 'a1b2c3d4', title: 'Original' }),
+      decision({ id: 'ffffffff', title: 'Late superseder', supersedes: 'a1b2c3d4' }),
+      decision({ id: '11111111', title: 'Early superseder', supersedes: 'a1b2c3d4' }),
+    ]);
+    const r = await handleVerifyClaim({ directory: root, kind: 'decision-current', subject: 'a1b2c3d4' }) as {
+      verdict: string; reason: string; receipt?: { decision: { supersededBy?: string } };
+    };
+    expect(r.verdict).toBe('refuted');
+    expect(r.receipt?.decision.supersededBy).toBe('11111111');
+    expect(r.reason).toMatch(/cite 11111111 instead/);
+  });
 });
