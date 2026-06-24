@@ -71,3 +71,15 @@
 - [x] Validated all of the above e2e on a clean repo: keyword default (no warning), `embed --local`
       ignoring stale `EMBED_*`, incremental re-analyze staying dimension-safe, `embed --off`, and the
       missing-dep path producing a working keyword index with an honest `keyword` mode.
+
+## 8. Round-3 hardening (second adversarial review of PR #191)
+- [x] **Visible watch-mode deferral.** When `VectorIndex.updateFiles` refuses a vector update because the
+      embedding model changed, it now returns `deferred: 'model-changed'` and the watcher prints an
+      actionable notice ("vector update deferred … run analyze --force") instead of a misleading
+      "0 new, 0 reused" no-op line. Regression asserted in `vector-index-model-switch.test.ts`.
+- [x] **Clearer local model-load failure.** `LocalEmbeddingService.getExtractor` now wraps the
+      `pipeline()` call so a bad `--model` id / first-fetch network failure surfaces "Could not load the
+      local embedding model …" (distinct from the package-missing message), still degrading to keyword.
+- [x] Fresh e2e dogfood of previously-untested paths: `embed --local --model <nonexistent>` → graceful
+      keyword fallback; spec search under the local provider (`orient.matchingSpecs` populated,
+      `[local-semantic]` spec index); idempotent `embed --off`. Full suite 4696 passed / 2 skipped.

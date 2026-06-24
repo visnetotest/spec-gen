@@ -773,7 +773,7 @@ export class McpWatcher {
         ? changedNodes
         : (cg.nodes ?? []).filter((n) => changedFilePaths.has(n.filePath));
 
-      const { embedded, reused, total, hasEmbeddings } = await VectorIndex.updateFiles(
+      const { embedded, reused, total, hasEmbeddings, deferred } = await VectorIndex.updateFiles(
         this.outputPath,
         nodes,
         changedFilePaths,
@@ -784,7 +784,15 @@ export class McpWatcher {
         fileContents,
       );
 
-      if (this.debug) {
+      if (deferred === 'model-changed') {
+        // Honest signal, not a silent no-op: the embedding model changed, so the
+        // incremental vector update was refused to avoid mixing dimensions. The
+        // changed files' vectors are stale until a full rebuild. Surfaced even
+        // without --debug because it needs user action.
+        process.stderr.write(
+          `[mcp-watcher] embedding model changed — vector update deferred for ${changedFilePaths.size} file(s); run "openlore analyze --force" (or "openlore embed --local") to rebuild the semantic index\n`
+        );
+      } else if (this.debug) {
         process.stderr.write(
           hasEmbeddings
             ? `[mcp-watcher] re-embedded ${changedFilePaths.size} file(s): ${embedded} new, ${reused} reused\n`

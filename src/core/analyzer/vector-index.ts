@@ -552,7 +552,7 @@ export class VectorIndex {
     entryPointIds: Set<string>,
     embedSvc: Embedder | null | undefined,
     fileContents?: Map<string, string>,
-  ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean }> {
+  ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean; deferred?: 'model-changed' }> {
     if (!VectorIndex.exists(outputDir)) {
       return { embedded: 0, reused: 0, total: 0, hasEmbeddings: false };
     }
@@ -565,9 +565,10 @@ export class VectorIndex {
     // vector update (signatures still refresh on their own lane) and leave the index
     // dimension-consistent until a full `analyze --force` rebuilds it under the new
     // model. Watch-mode freshness is best-effort; correctness wins over staleness.
+    // `deferred` lets the caller surface this honestly rather than logging a no-op.
     if (embedSvc && existingMeta !== null && existingMeta.hasEmbeddings &&
         existingMeta.model !== embedSvc.modelName) {
-      return { embedded: 0, reused: 0, total: 0, hasEmbeddings: true };
+      return { embedded: 0, reused: 0, total: 0, hasEmbeddings: true, deferred: 'model-changed' };
     }
 
     // ── Build candidate records for the changed files' functions ──────────────

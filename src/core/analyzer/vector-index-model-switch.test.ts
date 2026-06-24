@@ -81,8 +81,10 @@ describe('VectorIndex — embedding model/dimension switch safety', () => {
     const res = await VectorIndex.updateFiles(
       tmpDir, NODES, new Set(['src/a.ts']), SIGS, new Set(), new Set(), fakeEmbedder('model-b', 8)
     );
-    // Refused: no rows added under the new model, index stays 4-dim and queryable.
+    // Refused: no rows added under the new model, index stays 4-dim and queryable,
+    // and the refusal is signalled honestly (so the watcher doesn't log a no-op).
     expect(res.embedded).toBe(0);
+    expect(res.deferred).toBe('model-changed');
     expect(await readMetaDim()).toBe(4);
     const results = await VectorIndex.search(tmpDir, 'alpha', fakeEmbedder('model-a', 4), { limit: 5 });
     expect(Array.isArray(results)).toBe(true);

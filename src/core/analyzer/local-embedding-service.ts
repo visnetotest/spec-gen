@@ -92,7 +92,18 @@ export class LocalEmbeddingService implements Embedder {
       // arbitrary local path. One-time download, cached for every later run.
       mod.env.cacheDir = LOCAL_MODEL_CACHE_DIR;
       mod.env.allowLocalModels = false;
-      return mod.pipeline('feature-extraction', this.model);
+      try {
+        return await mod.pipeline('feature-extraction', this.model);
+      } catch (err) {
+        // Distinguish a model-load failure (bad model id, or no network on first
+        // fetch) from the package-missing case above, so the surfaced message is
+        // actionable. Callers degrade to keyword (BM25) on any throw.
+        throw new Error(
+          `Could not load the local embedding model "${this.model}" (${(err as Error).message}). ` +
+            `Check the model id (--model) and your network for the one-time download. ` +
+            `Keyword (BM25) search continues to work without it.`
+        );
+      }
     })();
     return this.extractorPromise;
   }
