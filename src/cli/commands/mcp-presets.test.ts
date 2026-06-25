@@ -39,6 +39,26 @@ describe('MCP tool presets', () => {
     expect(new Set(tools)).toEqual(new Set(['orient', 'search_code', 'record_decision', 'detect_changes', 'check_spec_drift', 'get_health_map']));
   });
 
+  // change: add-parallel-work-plan — plan_parallel_work is opt-in via the `coordination`
+  // preset only; it must NOT leak into the lean/minimal/memory surfaces.
+  it('coordination preset exposes plan_parallel_work; lean/minimal/memory do not', () => {
+    const coord = selectActiveTools(TOOL_DEFINITIONS, { preset: 'coordination' }).map(t => t.name);
+    expect(new Set(coord)).toEqual(new Set(['orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'analyze_impact', 'find_path']));
+    for (const sel of [{}, { minimal: true }, { preset: 'memory' }, { preset: 'navigation' }] as const) {
+      expect(selectActiveTools(TOOL_DEFINITIONS, sel).map(t => t.name)).not.toContain('plan_parallel_work');
+    }
+  });
+
+  // change: add-cross-actor-interference-map — map_in_flight_conflicts is opt-in via the
+  // `coordination` AND `federation` presets; it must NOT leak into lean/minimal/memory.
+  it('map_in_flight_conflicts is in coordination + federation only, never lean/minimal/memory', () => {
+    expect(selectActiveTools(TOOL_DEFINITIONS, { preset: 'coordination' }).map(t => t.name)).toContain('map_in_flight_conflicts');
+    expect(selectActiveTools(TOOL_DEFINITIONS, { preset: 'federation' }).map(t => t.name)).toContain('map_in_flight_conflicts');
+    for (const sel of [{}, { minimal: true }, { preset: 'memory' }, { preset: 'navigation' }, { preset: 'verify' }] as const) {
+      expect(selectActiveTools(TOOL_DEFINITIONS, sel).map(t => t.name)).not.toContain('map_in_flight_conflicts');
+    }
+  });
+
   // Guard: the user-facing `--minimal` help text must match the actual preset — it
   // drifted to "5 tools" once after get_health_map was added to the 6-tool set.
   it('the --minimal help text matches the minimal preset (count + every member named)', () => {
@@ -117,7 +137,7 @@ describe('MCP tool presets', () => {
   it('federation_status is gated to the federation preset, never in default/minimal', () => {
     const fed = selectActiveTools(TOOL_DEFINITIONS, { preset: 'federation' }).map(t => t.name);
     expect(fed).toContain('federation_status');
-    expect(new Set(fed)).toEqual(new Set(['orient', 'federation_status', 'spec_store_status', 'working_set_context', 'change_impact_certificate', 'analyze_impact', 'find_dead_code', 'select_tests', 'find_path']));
+    expect(new Set(fed)).toEqual(new Set(['orient', 'federation_status', 'spec_store_status', 'working_set_context', 'change_impact_certificate', 'analyze_impact', 'find_dead_code', 'select_tests', 'find_path', 'map_in_flight_conflicts']));
 
     expect(selectActiveTools(TOOL_DEFINITIONS, { minimal: true }).map(t => t.name)).not.toContain('federation_status');
     // Default surface DOES list the four federation-aware tools, but federation_status
@@ -356,8 +376,23 @@ describe('tools/list payload budget (spec-28)', () => {
   // change: default-to-lean-tool-surface — the full surface is now opt-in, so the
   // full-budget assertion uses the explicit full selector (no-selector `{}` resolves
   // to the lean navigation default and is asserted separately below).
+  // Bumped 64_000 → 66_000 when the `plan_parallel_work` tool was added to the full surface
+  // (spec: add-parallel-work-plan) — a read-only parallel-work coordination tool whose schema
+  // carries a nested per-task descriptor array. It joins ONLY the new opt-in `coordination`
+  // preset; it stays OUT of minimal/navigation/memory. Description trimmed first; the residual
+  // is the genuine cost of the nested task-list schema. Conscious decision, not silent drift.
+  // Bumped 66_000 → 68_000 when the `map_in_flight_conflicts` tool was added to the full surface
+  // (spec: add-cross-actor-interference-map) — a read-only cross-actor interference map whose
+  // schema carries a nested agent-task array (mirroring plan_parallel_work) plus the federation
+  // opt-in params. It joins ONLY the opt-in `federation` and `coordination` presets; it stays OUT
+  // of minimal/navigation/memory. Description + task-item schema trimmed first; the residual is the
+  // genuine cost of the nested task-list + federation params. Conscious decision, not silent drift.
+  // Bumped 68_000 → 70_000 on the merge of footprint-escape-detection + cross-actor-interference-map
+  // into one surface: the two changes each bumped this budget independently (footprint-escape widened
+  // `structural_diff`'s schema with declaredFootprint/peerFootprints; cross-actor added the new tool),
+  // and the merge stacks both increments. No new tool here — just the realized combined surface cost.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(64_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(70_000);
   });
 
   it('the lean DEFAULT surface (no selector) is the lean navigation payload, not the full one', () => {

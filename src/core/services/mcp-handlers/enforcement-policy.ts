@@ -107,7 +107,7 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     source: 'impact-certificate',
     description: 'The change opens a new path into a declared covering surface marked `critical`.',
   },
-  // ── stale-decision-reference (this change) ──
+  // ── stale-decision-reference (add-finding-enforcement-policy) ──
   'stale-decision-reference': {
     defaultClass: 'advisory',
     source: 'stale-decision-reference',
@@ -128,6 +128,23 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     defaultClass: 'advisory',
     source: 'footprint-escape',
     description: 'A write declared `append` at plan time actually modified existing code (refuting the plan-time shared-append optimism).',
+  },
+  // ── plan_parallel_work (add-parallel-work-plan) ──
+  'parallel-work-conflict': {
+    defaultClass: 'advisory',
+    source: 'plan-parallel-work',
+    description: 'Two tasks proposed for concurrent work have a write-write (WAW) conflict; the plan schedules them into different waves.',
+  },
+  'parallel-work-cycle': {
+    defaultClass: 'advisory',
+    source: 'plan-parallel-work',
+    description: 'A set of proposed tasks forms an unorderable read-after-write cycle; no wave order satisfies all dependencies, so the members are scheduled mutually exclusive and the circular dependency should be resolved.',
+  },
+  // ── cross-actor interference map (add-cross-actor-interference-map) ──
+  'cross-actor-conflict': {
+    defaultClass: 'advisory',
+    source: 'interference-map',
+    description: 'Two in-flight changes (branches/PRs/agent tasks, within or across a federation) have a write-write (WAW) conflict on a shared symbol; they must not land concurrently. A CI check can name this code to warn when a new PR collides with an open one.',
   },
 };
 
