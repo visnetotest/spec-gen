@@ -7,6 +7,21 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Added
 
+- **Declarative language-support registry + `get_language_support`** — the per-language knowledge
+  OpenLore already encodes (call-graph extractor, CFG `SPECS` table, signature extractor, type-inference
+  engine, IaC projector) is now consolidated behind one declarative capability registry
+  (`src/core/analyzer/language-support.ts`), and per-language coverage is observable. Capabilities:
+  `signatures`, `callGraph`, `imports`, `cfgOverlay`, `typeInference`, `styleFingerprint`,
+  `iacProjection`. The registry is **derived** from the live extractor structures (not hand-listed), so
+  the coverage matrix cannot silently over-claim — a behavioral test cross-checks every cell against the
+  real extractor (every member of every capability set, including each `IAC_LANGUAGES` ecosystem run
+  through the real analyze pipeline, plus an exact predicate assertion for `cfgOverlay`/`iacProjection`). Two
+  surfaces: a **Language coverage** matrix in `.openlore/analysis/CODEBASE.md`, and the opt-in
+  `get_language_support` MCP conclusion tool (repo-detected languages, or a named language as a pure
+  registry lookup — fail-soft for unknown languages). Makes a quiet structural result interpretable
+  ("calls unsupported for L" vs. "no callers"). No extraction-output change, no new dependency, no LLM.
+  Full surface count 64 → 65. Canonical reference + "add a language" checklist: `docs/language-support.md`.
+
 - **`map_in_flight_conflicts` — cross-actor interference map** (PARALLEL-WORK proposal 4). The team
   version of `plan_parallel_work`: instead of a caller-supplied task list it harvests every change in
   flight — local branches (git), open PRs (`gh`), and any supplied agent task descriptors — as
@@ -127,6 +142,13 @@ All notable changes to OpenLore are documented here. This project adheres to
   malformed host config rather than risk clobbering it.
 
 ### Fixed
+
+- **Provenance `gh` enrichment can no longer hang or flake CI.** `enrichWithGh` short-circuits to
+  the empty map when the path is not a git repository (a non-git dir can have no GitHub remote, so
+  there is nothing to enrich), and bounds the `gh pr list` subprocess with a hard 10s timeout. This
+  honors the documented "best-effort, never required" contract — a stalled or absent `gh` degrades
+  gracefully instead of blocking analyze — and removes a flaky 5s test timeout in CI where the
+  graceful-degradation test occasionally spawned a slow `gh` in a remote-less temp dir.
 
 - **Incremental watch now converges with `analyze --force` (substrate correctness).**
   With `--watch-auto`, each save re-resolves the changed file's reverse-dependency
