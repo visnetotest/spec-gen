@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { detectDuplicates } from './duplicate-detector.js';
+import { detectDuplicates, findClones } from './duplicate-detector.js';
 import type { DuplicateDetectionResult } from './duplicate-detector.js';
 import type { CallGraphResult, FunctionNode } from './call-graph.js';
 
@@ -543,5 +543,196 @@ describe('detectDuplicates — C++ functions', () => {
 
     expect(result.cloneGroups).toHaveLength(1);
     expect(result.cloneGroups[0].type).toBe('structural');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findClones — one-vs-all clone query
+// ---------------------------------------------------------------------------
+
+describe('findClones — one-vs-all query', () => {
+  const queryBody = `function computeTotal(items) {
+  let sum = 0;
+  for (const item of items) {
+    sum += item.price;
+  }
+  return sum;
+}`;
+
+  // An exact clone (only comments/whitespace differ), a structural clone (renamed),
+  // and an unrelated function.
+  const exactVariant = `function computeTotal(items) {
+  /* recalc */
+  let  sum = 0;
+  for (const item of items) {
+    sum += item.price;
+  }
+  return sum;
+}`;
+  const structuralVariant = `function addUp(values) {
+  let acc = 0;
+  for (const value of values) {
+    acc += value.cost;
+  }
+  return acc;
+}`;
+  const unrelated = `function greet(name) {
+  const msg = 'hello ' + name;
+  console.log(msg);
+  console.log(msg);
+  return msg;
+}`;
+
+  function fixture() {
+    const fExact = buildFile([exactVariant]);
+    const fStruct = buildFile([structuralVariant]);
+    const fOther = buildFile([unrelated]);
+    const fSelf = buildFile([queryBody]);
+    const files = [
+      { path: '/exact.ts', content: fExact.content },
+      { path: '/struct.ts', content: fStruct.content },
+      { path: '/other.ts', content: fOther.content },
+      { path: '/self.ts', content: fSelf.content },
+    ];
+    const nodes: FunctionNode[] = [
+      makeNode({ id: 'e', name: 'computeTotal', filePath: '/exact.ts', startIndex: fExact.offsets[0].start, endIndex: fExact.offsets[0].end }),
+      makeNode({ id: 's', name: 'addUp', filePath: '/struct.ts', startIndex: fStruct.offsets[0].start, endIndex: fStruct.offsets[0].end }),
+      makeNode({ id: 'o', name: 'greet', filePath: '/other.ts', startIndex: fOther.offsets[0].start, endIndex: fOther.offsets[0].end }),
+      makeNode({ id: 'self', name: 'computeTotal', filePath: '/self.ts', startIndex: fSelf.offsets[0].start, endIndex: fSelf.offsets[0].end }),
+    ];
+    return { files, nodes, fSelf };
+  }
+
+  it('classifies exact, structural, and near matches and ranks exact first', () => {
+    const { files, nodes } = fixture();
+    const res = findClones(queryBody, 7, files, nodes);
+    const exact = res.matches.filter(m => m.type === 'exact');
+    const structural = res.matches.filter(m => m.type === 'structural');
+    expect(exact.map(m => m.file)).toContain('/exact.ts');
+    expect(structural.map(m => m.file)).toContain('/struct.ts');
+    // Unrelated function must not appear.
+    expect(res.matches.map(m => m.file)).not.toContain('/other.ts');
+    // exact ranks before structural.
+    expect(res.matches[0].type).toBe('exact');
+    expect(res.belowThreshold).toBe(false);
+  });
+
+  it('excludes the query\'s own instance (symbol mode) by byte range', () => {
+    const { files, nodes, fSelf } = fixture();
+    const res = findClones(queryBody, 7, files, nodes, {
+      exclude: { filePath: '/self.ts', startIndex: fSelf.offsets[0].start, endIndex: fSelf.offsets[0].end },
+    });
+    expect(res.matches.map(m => m.file)).not.toContain('/self.ts');
+    // The /self.ts node would otherwise be an exact self-match; only /exact.ts remains exact.
+    expect(res.matches.filter(m => m.type === 'exact').map(m => m.file)).toEqual(['/exact.ts']);
+  });
+
+  it('coerces a non-finite similarity floor to the default (NaN-safe)', () => {
+    const { files, nodes } = fixture();
+    // A NaN floor must NOT silently drop every near match or report a NaN/null floor.
+    const nan = findClones(queryBody, 7, files, nodes, { minSimilarity: NaN });
+    expect(nan.similarityFloor).toBe(0.7);
+    expect(Number.isFinite(nan.similarityFloor)).toBe(true);
+    // Infinity is also non-finite → falls back to the default floor (not clamped to 1).
+    const inf = findClones(queryBody, 7, files, nodes, { minSimilarity: Infinity });
+    expect(inf.similarityFloor).toBe(0.7);
+    // The default-floor result still finds the structural clone.
+    expect(nan.matches.some(m => m.type === 'structural')).toBe(true);
+  });
+
+  it('tie-break is fully deterministic for distinct matches on the same line', () => {
+    // Two structurally-identical functions sharing a startLine (different files) must order by file,
+    // not by input iteration order.
+    const body = `function alpha(items) {
+  let acc = 0;
+  for (const it of items) {
+    acc += it.v;
+  }
+  return acc;
+}`;
+    const fa = buildFile([body]);
+    const fb = buildFile([body]);
+    const files = [
+      { path: '/z.ts', content: fb.content },
+      { path: '/a.ts', content: fa.content },
+    ];
+    const fwd: FunctionNode[] = [
+      makeNode({ id: 'z', name: 'beta', filePath: '/z.ts', startIndex: fb.offsets[0].start, endIndex: fb.offsets[0].end }),
+      makeNode({ id: 'a', name: 'gamma', filePath: '/a.ts', startIndex: fa.offsets[0].start, endIndex: fa.offsets[0].end }),
+    ];
+    const rev: FunctionNode[] = [...fwd].reverse();
+    const r1 = findClones(body, 7, files, fwd);
+    const r2 = findClones(body, 7, files, rev);
+    expect(r1.matches.map(m => m.file)).toEqual(['/a.ts', '/z.ts']);
+    expect(JSON.stringify(r1.matches)).toBe(JSON.stringify(r2.matches));
+  });
+
+  it('reports belowThreshold for a too-small query without comparing', () => {
+    const { files, nodes } = fixture();
+    const tiny = `function t(x) {\n  return x;\n}`;
+    const res = findClones(tiny, 3, files, nodes);
+    expect(res.belowThreshold).toBe(true);
+    expect(res.matches).toHaveLength(0);
+    expect(res.comparedAgainst).toBe(0);
+  });
+
+  it('is deterministic — byte-identical across runs', () => {
+    const { files, nodes } = fixture();
+    const a = findClones(queryBody, 7, files, nodes);
+    const b = findClones(queryBody, 7, files, nodes);
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+
+  it('honors the similarity floor and reports it', () => {
+    const { files, nodes } = fixture();
+    const high = findClones(queryBody, 7, files, nodes, { minSimilarity: 0.99 });
+    expect(high.similarityFloor).toBe(0.99);
+    // exact/structural still included regardless of the near floor.
+    expect(high.matches.some(m => m.type === 'exact')).toBe(true);
+    // A floor above 1 is clamped to 1; below 0.1 is clamped to 0.1.
+    expect(findClones(queryBody, 7, files, nodes, { minSimilarity: 5 }).similarityFloor).toBe(1);
+    expect(findClones(queryBody, 7, files, nodes, { minSimilarity: 0 }).similarityFloor).toBe(0.1);
+  });
+
+  it('respects the limit', () => {
+    const { files, nodes } = fixture();
+    const res = findClones(queryBody, 7, files, nodes, { limit: 1 });
+    expect(res.matches).toHaveLength(1);
+  });
+
+  it('carries each match\'s source language (so cross-language matches are visible)', () => {
+    const { files, nodes } = fixture();
+    const res = findClones(queryBody, 7, files, nodes);
+    expect(res.matches.length).toBeGreaterThan(0);
+    expect(res.matches.every(m => m.language === 'TypeScript')).toBe(true);
+  });
+
+  it('surfaces a cross-language clone with its OWN language (query TS, clone C++)', () => {
+    // A C-family body that is byte-identical in TypeScript and C++ — a real cross-language clone the
+    // language-agnostic normalization will match. The match must report C++, not the query's language.
+    const body = `function process(items) {
+  let total = 0;
+  for (const item of items) {
+    total += item.value;
+  }
+  return total;
+}`;
+    const fts = buildFile([body]);
+    const fcpp = buildFile([body]);
+    const files = [
+      { path: '/a.ts', content: fts.content },
+      { path: '/b.cpp', content: fcpp.content },
+    ];
+    const nodes: FunctionNode[] = [
+      makeNode({ id: 'ts', name: 'process', filePath: '/a.ts', language: 'TypeScript', startIndex: fts.offsets[0].start, endIndex: fts.offsets[0].end }),
+      makeNode({ id: 'cpp', name: 'process', filePath: '/b.cpp', language: 'C++', startIndex: fcpp.offsets[0].start, endIndex: fcpp.offsets[0].end }),
+    ];
+    // Query is the TS function; exclude its own instance. The C++ clone must surface, labeled C++.
+    const res = findClones(body, 7, files, nodes, {
+      exclude: { filePath: '/a.ts', startIndex: fts.offsets[0].start, endIndex: fts.offsets[0].end },
+    });
+    const cpp = res.matches.find(m => m.file === '/b.cpp');
+    expect(cpp).toBeDefined();
+    expect(cpp!.language).toBe('C++');
   });
 });
