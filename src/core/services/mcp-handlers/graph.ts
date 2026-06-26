@@ -6,9 +6,10 @@
  */
 
 import { validateDirectory, readCachedContext } from './utils.js';
-import { resolveFederationScope, findCrossRepoConsumersBatch } from '../../federation/resolver.js';
+import { resolveFederationScope, findCrossRepoConsumersBatch, findCrossRepoClientCallers } from '../../federation/resolver.js';
+import { extractRoutesFromFile, normalizeUrl, type RouteDefinition, type RouteInventory } from '../../analyzer/http-route-parser.js';
 import type { CachedContext } from './utils.js';
-import { join } from 'node:path';
+import { join, resolve, isAbsolute } from 'node:path';
 import {
   RISK_SCORE_FAN_IN_WEIGHT,
   RISK_SCORE_FAN_OUT_WEIGHT,
@@ -34,6 +35,7 @@ import {
   HUB_HIGH_FAN_OUT_THRESHOLD,
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
+  ARTIFACT_ROUTE_INVENTORY,
   TRACE_PATH_DEFAULT_MAX_DEPTH,
   TRACE_PATH_MAX_PATHS,
 } from '../../../constants.js';
@@ -743,13 +745,30 @@ export async function handleAnalyzeImpact(
     const seedNames = [...new Set(seeds.map(s => s.name))];
     const batch = await findCrossRepoConsumersBatch(fedScope, seedNames);
     const consumers = seedNames.flatMap(n => batch.bySymbol.get(n) ?? []);
+
+    // Cross-service: if a seed is a route handler, surface client call sites in OTHER
+    // repos that target its endpoint — the cross-repo blast radius of an API change.
+    // Name-based federation can't see these (the call references a URL, not the
+    // handler's symbol), so match on the handler's normalized route key instead.
+    const homeRoutes = await deriveSeedRoutes(seeds, absDir);
+    const crossSvc = homeRoutes.length > 0
+      ? await findCrossRepoClientCallers(fedScope, homeRoutes)
+      : undefined;
+
     federationBlock = {
       consumers: consumers.map(c => ({ repo: c.repo, caller: c.caller.name, file: c.caller.file, symbol: c.symbol })),
       consumerCount: consumers.length,
+      ...(crossSvc && crossSvc.callers.length > 0 ? {
+        crossServiceConsumers: crossSvc.callers.map(c => ({
+          repo: c.repo, caller: c.caller.name, file: c.caller.file, method: c.method, path: c.path,
+        })),
+        crossServiceConsumerCount: crossSvc.callers.length,
+      } : {}),
       reposConsulted: batch.coverage.reposConsulted.map(r => r.name),
       reposSkipped: batch.coverage.reposSkipped.map(r => ({ name: r.name, state: r.state, reason: r.reason })),
       ...(batch.truncated > 0 ? { truncated: batch.truncated } : {}),
-      caveats: batch.coverage.caveats,
+      ...(crossSvc && crossSvc.truncated > 0 ? { crossServiceTruncated: crossSvc.truncated } : {}),
+      caveats: [...batch.coverage.caveats, ...(crossSvc?.coverage.caveats ?? [])],
     };
   }
   const fedOut = federationBlock ? { federation: federationBlock } : {};
@@ -758,6 +777,65 @@ export async function handleAnalyzeImpact(
     return { ...results[0], confidenceBoundary, ...fedOut };
   }
   return { matches: results, confidenceBoundary, ...fedOut };
+}
+
+/**
+ * Derive the route definition(s) each seed handler serves, so the federation bridge
+ * can match other repos' client call sites against them. Deduped on method+path; a
+ * seed that registers no route contributes nothing, so a non-handler analyze_impact
+ * does no extra work.
+ *
+ * Primary source: the home repo's persisted route inventory (`route-inventory.json`).
+ * It lists EVERY route (method, raw path, handler), so a handler whose route is
+ * registered in a DIFFERENT file than its definition — Django (`urls.py`→`views.py`),
+ * a dedicated Express routes file — is still found, matching the single-repo
+ * `http_endpoint` projection. Falls back to parsing each seed's own file when the
+ * inventory artifact is absent (an older index).
+ */
+async function deriveSeedRoutes(
+  seeds: Array<{ name: string; filePath: string }>,
+  absDir: string,
+): Promise<RouteDefinition[]> {
+  const seedNames = new Set(seeds.map(s => s.name));
+  const seen = new Set<string>();
+  const out: RouteDefinition[] = [];
+  const add = (method: string, rawPath: string, handler: string, file: string, framework: string): void => {
+    const normalizedPath = normalizeUrl(rawPath);
+    const key = `${method}\0${normalizedPath}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ file, method, path: rawPath, normalizedPath, handlerName: handler, framework, line: 0, contractSource: 'none' });
+  };
+
+  try {
+    const invPath = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_ROUTE_INVENTORY);
+    const { readFile } = await import('node:fs/promises');
+    const inv = JSON.parse(await readFile(invPath, 'utf-8')) as RouteInventory;
+    if (Array.isArray(inv?.routes)) {
+      for (const r of inv.routes) {
+        const simple = (r.handler ?? '').split('.').pop() ?? r.handler;
+        if (simple && seedNames.has(simple)) add(r.method, r.path, r.handler, r.file, r.framework);
+      }
+      return out; // the inventory is complete — no per-file fallback needed
+    }
+  } catch { /* no/unreadable inventory → fall back to per-seed-file extraction below */ }
+
+  const byFile = new Map<string, Set<string>>(); // file → seed handler names in it
+  for (const s of seeds) {
+    if (!byFile.has(s.filePath)) byFile.set(s.filePath, new Set());
+    byFile.get(s.filePath)!.add(s.name);
+  }
+  for (const [file, names] of byFile) {
+    const abs = isAbsolute(file) ? file : resolve(absDir, file);
+    let routes;
+    try { routes = await extractRoutesFromFile(abs); }
+    catch { continue; }
+    for (const r of routes) {
+      const simple = r.handlerName.split('.').pop() ?? r.handlerName;
+      if (names.has(simple)) add(r.method, r.path, r.handlerName, r.file, r.framework);
+    }
+  }
+  return out;
 }
 
 /**

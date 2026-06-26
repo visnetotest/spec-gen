@@ -90,6 +90,16 @@ export interface HttpEdge {
   confidence: 'exact' | 'path' | 'fuzzy';
 }
 
+// The cross-service HTTP capability surface (which languages contribute client
+// call sites / server routes) lives in a dependency-free leaf module so the
+// language-support registry can derive its column without importing this module
+// (several tests vi.mock it). Re-exported here for the public extraction API.
+export {
+  HTTP_CLIENT_LANGUAGES,
+  HTTP_ROUTE_LANGUAGES,
+  CROSS_SERVICE_HTTP_LANGUAGES,
+} from './http-capability.js';
+
 // ============================================================================
 // NORMALISATION HELPERS
 // ============================================================================
@@ -171,15 +181,17 @@ export async function extractHttpCalls(filePath: string): Promise<HttpCall[]> {
 
   const calls: HttpCall[] = [];
 
-  // Strip comments to avoid false matches.
-  // The line-comment regex must NOT match `://` inside URLs — we only strip
-  // `//` that is preceded by whitespace, punctuation, brackets, or the start
-  // of the line (i.e. genuine JS/TS comments, not protocol separators).
-  // The character class intentionally includes ) and ] so that patterns like
-  // `fetch('/api/items') // comment` are correctly stripped.
+  // Mask comments (to avoid false matches) LENGTH-PRESERVINGLY: blank them to spaces
+  // and keep newlines, so `clean` stays byte-aligned with `content` and every
+  // regex `m.index` below feeds getLine() the correct line. Removing comment text
+  // instead (the old behavior) shifted offsets, so a call AFTER any comment got a
+  // wrong (earlier) line — which then mis-resolved or dropped its enclosing-function
+  // edge in the call-graph HTTP pass. The line-comment regex must NOT match `://`
+  // inside URLs — only `//` preceded by whitespace, punctuation, brackets, or the
+  // start of line (the prefix char is preserved; only the comment body is blanked).
   const clean = content
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[\s,;()[\]{}])\/\/.*$/gm, '$1');
+    .replace(/\/\*[\s\S]*?\*\//g, blankKeepNewlines)
+    .replace(/(^|[\s,;()[\]{}])(\/\/.*)$/gm, (_m, prefix, comment) => prefix + ' '.repeat(comment.length));
 
   const lines = content.split('\n'); // keep original for line numbers
 
@@ -408,11 +420,20 @@ export async function extractRouteDefinitions(filePath: string): Promise<RouteDe
   // matched against a Django route will receive confidence='path' at best —
   // never 'exact'. This may produce false-positive edges when multiple HTTP
   // methods share the same URL pattern. Filter by confidence if this matters.
+  // Match `path(...)` (Django 2.0+ simple converters) AND `re_path(...)` / the legacy
+  // `url(...)` (regex routes). `\bpath` alone never matched `re_path` (the `_` blocks
+  // the word boundary), so regex routes were silently unextracted.
   const djangoPathRegex =
-    /\bpath\s*\(\s*r?(['"])(.*?)\1\s*,\s*([\w.]+)/gm;
+    /\b(re_path|path|url)\s*\(\s*r?(['"])(.*?)\2\s*,\s*([\w.]+)/gm;
   while ((m = djangoPathRegex.exec(clean)) !== null) {
-    const path = '/' + m[2].replace(/\$$/, '').replace(/^\^/, '');
-    const handlerName = m[3].split('.').pop() ?? m[3];
+    const keyword = m[1];
+    const rawPattern = m[3];
+    // `path()` uses simple `<int:pk>` converters (normalizeUrl handles those);
+    // `re_path()`/`url()` use a regex — convert capture groups to a path template.
+    const path = keyword === 'path'
+      ? '/' + rawPattern.replace(/\$$/, '').replace(/^\^/, '')
+      : djangoRegexToTemplate(rawPattern);
+    const handlerName = m[4].split('.').pop() ?? m[4];
     const lineNum = getLine(lines, m.index);
     routes.push({
       file: filePath,
@@ -680,6 +701,20 @@ export async function extractJavaRouteDefinitions(filePath: string): Promise<Rou
 // ============================================================================
 
 /**
+ * Extract server route definitions from one file, dispatching by extension to the
+ * language's route extractor (Python / Java / TS-JS). Returns `[]` for a file no
+ * route extractor handles. Used to recover the route key a single handler serves —
+ * e.g. to drive cross-repo client→handler matching under federation.
+ */
+export async function extractRoutesFromFile(filePath: string): Promise<RouteDefinition[]> {
+  const ext = extname(filePath).toLowerCase();
+  if (['.py', '.pyw'].includes(ext)) return extractRouteDefinitions(filePath);
+  if (ext === '.java') return extractJavaRouteDefinitions(filePath);
+  if (['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(ext)) return extractTsRouteDefinitions(filePath);
+  return [];
+}
+
+/**
  * Match HTTP calls from JS/TS files against route definitions from Python files
  * and return cross-language edges.
  *
@@ -710,17 +745,25 @@ export function buildHttpEdges(
       if (!matchingRoutes) continue;
 
       for (const route of matchingRoutes) {
-        // Determine confidence
-        let confidence: HttpEdge['confidence'];
         const methodsKnown = call.method !== 'UNKNOWN' && route.method !== 'UNKNOWN';
         const methodsMatch = call.method === route.method;
 
+        // Both methods known and different → genuinely different endpoints (a client
+        // `GET /users` and a `POST /users` handler are distinct operations, usually
+        // distinct functions). Emit NOTHING rather than a phantom 'path' edge that
+        // would mis-link the client to the wrong handler. A match still requires only
+        // method compatibility (equal, or at least one UNKNOWN — a bare `fetch`, or a
+        // Django route that dispatches methods internally).
+        if (methodsKnown && !methodsMatch) continue;
+
+        // Determine confidence.
+        let confidence: HttpEdge['confidence'];
         if (methodsKnown && methodsMatch && candidate === call.normalizedUrl) {
           confidence = 'exact';
-        } else if (!methodsKnown || !methodsMatch) {
-          confidence = candidate !== call.normalizedUrl ? 'fuzzy' : 'path';
+        } else if (candidate !== call.normalizedUrl) {
+          confidence = 'fuzzy';
         } else {
-          confidence = candidate !== call.normalizedUrl ? 'fuzzy' : 'exact';
+          confidence = 'path';
         }
 
         edges.push({
@@ -747,6 +790,9 @@ export function buildHttpEdges(
         );
         if (!allMatch) continue;
         for (const route of routeList) {
+          // Same method-compatibility rule as the exact/prefix path above: both
+          // methods known and different → not a match, even on a fuzzy segment hit.
+          if (call.method !== 'UNKNOWN' && route.method !== 'UNKNOWN' && call.method !== route.method) continue;
           edges.push({
             callerFile: call.file,
             handlerFile: route.file,
@@ -785,24 +831,36 @@ export async function extractAllHttpEdges(filePaths: string[]): Promise<{
   routes: RouteDefinition[];
   edges: HttpEdge[];
 }> {
-  const allCalls: HttpCall[] = [];
-  const allRoutes: RouteDefinition[] = [];
-
-  await Promise.all(
-    filePaths.map(async fp => {
+  // Collect per-file results and flatten in filePaths order. `Promise.all` resolves
+  // in INPUT order regardless of completion order, so the aggregated calls/routes
+  // (and therefore the edges) are a deterministic function of the file list — NOT of
+  // filesystem I/O timing. Pushing into shared arrays inside the callbacks would
+  // append in completion order, a latent byte-determinism hazard the spec forbids
+  // (and the shareable-bundle digest relies on).
+  const perFile = await Promise.all(
+    filePaths.map(async (fp): Promise<{ calls: HttpCall[]; routes: RouteDefinition[] }> => {
       const ext = extname(fp).toLowerCase();
       if (['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(ext)) {
-        const calls = await extractHttpCalls(fp);
-        allCalls.push(...calls);
+        // A JS/TS file can be a client (fetch/axios calls), a server (route
+        // registrations), or both (a full-stack monorepo). Extract BOTH so a
+        // SAME-LANGUAGE client→server link (TS frontend → TS Express/NestJS/Next
+        // backend) is matched — not only the cross-language JS/TS→Python/Java
+        // case. Routes in .py/.java files are already extracted below.
+        const [calls, routes] = await Promise.all([
+          extractHttpCalls(fp),
+          extractTsRouteDefinitions(fp),
+        ]);
+        return { calls, routes };
       } else if (['.py', '.pyw'].includes(ext)) {
-        const routes = await extractRouteDefinitions(fp);
-        allRoutes.push(...routes);
+        return { calls: [], routes: await extractRouteDefinitions(fp) };
       } else if (ext === '.java') {
-        const routes = await extractJavaRouteDefinitions(fp);
-        allRoutes.push(...routes);
+        return { calls: [], routes: await extractJavaRouteDefinitions(fp) };
       }
+      return { calls: [], routes: [] };
     })
   );
+  const allCalls: HttpCall[] = perFile.flatMap(r => r.calls);
+  const allRoutes: RouteDefinition[] = perFile.flatMap(r => r.routes);
 
   const edges = buildHttpEdges(allCalls, allRoutes);
   return { calls: allCalls, routes: allRoutes, edges };
@@ -811,6 +869,23 @@ export async function extractAllHttpEdges(filePaths: string[]): Promise<{
 // ============================================================================
 // PRIVATE UTILITIES
 // ============================================================================
+
+/**
+ * Convert a Django `re_path`/`url` regex pattern to a comparable path template:
+ * strip the `^`/`$` anchors, replace each capture group (named `(?P<pk>…)`,
+ * non-capturing `(?:…)`, or plain `(…)`) with a `:param` placeholder, and unescape
+ * `\.`/`\/`. e.g. `^api/items/(?P<pk>[0-9]+)/$` → `/api/items/:param/`. Best-effort:
+ * a nested-group pattern degrades to a partial template (over-masking only drops a
+ * potential match, never invents one).
+ */
+function djangoRegexToTemplate(re: string): string {
+  let p = re.replace(/^\^/, '').replace(/\$$/, '');
+  p = p.replace(/\(\?P<[^>]+>[^)]*\)/g, ':param'); // named group
+  p = p.replace(/\(\?:[^)]*\)/g, ':param');        // non-capturing group
+  p = p.replace(/\([^)]*\)/g, ':param');           // plain group
+  p = p.replace(/\\([./])/g, '$1');                // unescape \. and \/
+  return '/' + p.replace(/^\/+/, '');
+}
 
 /** Replace every non-newline char of `match` with a space (length- and line-preserving). */
 function blankKeepNewlines(match: string): string {
@@ -999,8 +1074,12 @@ export async function extractTsRouteDefinitions(filePath: string): Promise<Route
 
   // ── Next.js App Router ────────────────────────────────────────────────────
   if (framework === 'nextjs-app') {
-    // Derive path from file location: app/users/route.ts → /users
-    const rel = filePath.replace(/\\/g, '/');
+    // Derive path from file location: app/users/route.ts → /users.
+    // Force a leading slash first: the analyze pipeline passes REPO-RELATIVE paths
+    // (e.g. `app/api/posts/route.ts`), and `lastIndexOf('/app/')` would miss the
+    // leading `app/` segment — collapsing the route to `/` and breaking both the
+    // route inventory and the cross-service edge. The absolute form is unaffected.
+    const rel = '/' + filePath.replace(/\\/g, '/').replace(/^\/+/, '');
     const appIdx = rel.lastIndexOf('/app/');
     let routePath = '/';
     if (appIdx >= 0) {
@@ -1089,8 +1168,18 @@ export async function extractTsRouteDefinitions(filePath: string): Promise<Route
       path = `${prefixes[0]}/${path}`;
     }
 
-    // Find the handler name from the same line
-    const lineText = lines[lineOf(m.index) - 1] ?? '';
+    // EXPRESS_ROUTE_RE opens with `(?:^|[\s;(,])` so the match can start on the
+    // character BEFORE the receiver — and when a route registration begins a line
+    // (the common top-level `app.get(...)` idiom), that leading char is the prior
+    // line's newline, so `m.index` lands one line early. Advance to the actual
+    // receiver token before computing the line, or the handler-name lookup reads
+    // the previous line (e.g. a `function h(req, res)` def → grabs `res`) and the
+    // cross-service edge / route-handler synthesis silently fails to wire.
+    const recOffset = Math.max(0, m[0].search(/(?:app|router|server|api|fastify|r)\s*\./));
+    const routeLine = lineOf(m.index + recOffset);
+
+    // Find the handler name from the route registration line
+    const lineText = lines[routeLine - 1] ?? '';
     const handlerMatch = lineText.match(/,\s*(?:async\s+)?(?:function\s+)?(\w+)\s*[,)]/);
     const handlerName = handlerMatch?.[1] ?? 'handler';
 
@@ -1105,7 +1194,7 @@ export async function extractTsRouteDefinitions(filePath: string): Promise<Route
       normalizedPath: normalizeUrl(path),
       handlerName,
       framework,
-      line: lineOf(m.index),
+      line: routeLine,
       ...contract,
     });
   }

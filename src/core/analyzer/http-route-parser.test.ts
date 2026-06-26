@@ -263,6 +263,27 @@ describe('extractHttpCalls', () => {
     expect(await extractHttpCalls(filePath)).toHaveLength(0);
   });
 
+  it('reports correct line numbers for calls AFTER a comment (length-preserving mask)', async () => {
+    // A line comment earlier in the file must not shift the reported line of a later
+    // call — comment masking is length/line preserving. Regression: a non-preserving
+    // strip drifted later calls one line early, breaking enclosing-function resolution.
+    const src = [
+      'export async function a() {',                       // 1
+      "  return fetch('/api/a');   // an inline comment",  // 2
+      '}',                                                 // 3
+      '/* a block',                                        // 4
+      '   comment */',                                     // 5
+      'export async function b() {',                       // 6
+      "  return fetch('/api/b');",                         // 7
+      '}',                                                 // 8
+    ].join('\n');
+    const filePath = await createFile(tempDir, 'client.ts', src);
+    const calls = await extractHttpCalls(filePath);
+    const byUrl = new Map(calls.map(c => [c.normalizedUrl, c.line]));
+    expect(byUrl.get('/api/a')).toBe(2);
+    expect(byUrl.get('/api/b')).toBe(7); // not 6 — the comment lines didn't shift it
+  });
+
   it('should return empty for file with no HTTP calls', async () => {
     const filePath = await createFile(tempDir, 'utils.ts', 'export const add = (a: number, b: number) => a + b;');
     expect(await extractHttpCalls(filePath)).toHaveLength(0);
@@ -650,6 +671,21 @@ describe('extractRouteDefinitions', () => {
       const routes = await extractRouteDefinitions(filePath);
       expect(routes.every(r => r.framework === 'django')).toBe(true);
     });
+
+    it('should detect re_path()/url() regex routes (not just path())', async () => {
+      const src = [
+        'urlpatterns = [',
+        "    re_path(r'^api/items/(?P<pk>[0-9]+)/$', views.item_detail),",
+        "    url(r'^api/legacy/$', views.legacy_view),",
+        ']',
+      ].join('\n');
+      const filePath = await createFile(tempDir, 'urls.py', src);
+      const routes = await extractRouteDefinitions(filePath);
+      const byHandler = new Map(routes.map(r => [r.handlerName, r.normalizedPath]));
+      // named capture group → :param; anchors stripped
+      expect(byHandler.get('item_detail')).toBe('/api/items/:param');
+      expect(byHandler.get('legacy_view')).toBe('/api/legacy');
+    });
   });
 
   // ── Non-code masking: docstrings & comments ──────────────────────────────────
@@ -842,16 +878,34 @@ describe('buildHttpEdges', () => {
     expect(edges[0].route).toBe(route);
   });
 
-  it('should create one edge per (caller, handler, method, path) combination', () => {
+  it('should pair each method to its own handler, never cross-link GET↔POST', () => {
     const getCall = makeCall({ file: '/front/api.ts', url: '/items', method: 'GET' });
     const postCall = makeCall({ file: '/front/api.ts', url: '/items', method: 'POST' });
-    const getRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET' });
-    const postRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'POST' });
+    const getRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET', handlerName: 'listItems' });
+    const postRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'POST', handlerName: 'createItem' });
 
     const edges = buildHttpEdges([getCall, postCall], [getRoute, postRoute]);
     expect(edges).toHaveLength(2);
-    expect(edges.map(e => e.method)).toContain('GET');
-    expect(edges.map(e => e.method)).toContain('POST');
+    // The GET call links to the GET handler and the POST call to the POST handler —
+    // no phantom cross-link from a method mismatch on a shared path.
+    const byCall = new Map(edges.map(e => [e.call.method, e.route.handlerName]));
+    expect(byCall.get('GET')).toBe('listItems');
+    expect(byCall.get('POST')).toBe('createItem');
+  });
+
+  it('emits no edge when both methods are known and differ (no phantom path link)', () => {
+    const postCall = makeCall({ file: '/front/api.ts', url: '/items', method: 'POST' });
+    const getRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET', handlerName: 'listItems' });
+    // A POST client and a GET-only route on the same path are different endpoints.
+    expect(buildHttpEdges([postCall], [getRoute])).toHaveLength(0);
+  });
+
+  it('still links when one side has an UNKNOWN method (bare fetch / Django)', () => {
+    const bareCall = makeCall({ file: '/front/api.ts', url: '/items', method: 'UNKNOWN' });
+    const postRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'POST', handlerName: 'createItem' });
+    const edges = buildHttpEdges([bareCall], [postRoute]);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].confidence).toBe('path');
   });
 });
 
@@ -878,6 +932,15 @@ describe('extractAllHttpEdges', () => {
     expect(result.calls).toHaveLength(1);
     expect(result.routes).toHaveLength(0);
     expect(result.edges).toHaveLength(0);
+  });
+
+  it('aggregates calls in filePaths order, not I/O completion order (determinism)', async () => {
+    const a = await createFile(tempDir, 'a.ts', `export function fa() { return fetch('/api/a'); }`);
+    const b = await createFile(tempDir, 'b.ts', `export function fb() { return fetch('/api/b'); }`);
+    // Result order follows the INPUT order regardless of which read finishes first,
+    // so re-analysis is byte-stable. Swapping inputs swaps the output order.
+    expect((await extractAllHttpEdges([a, b])).calls.map(c => c.normalizedUrl)).toEqual(['/api/a', '/api/b']);
+    expect((await extractAllHttpEdges([b, a])).calls.map(c => c.normalizedUrl)).toEqual(['/api/b', '/api/a']);
   });
 
   it('should find no edges when there are only backend files', async () => {
