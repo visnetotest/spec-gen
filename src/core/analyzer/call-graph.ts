@@ -703,6 +703,108 @@ async function getSwiftParser(): Promise<{ parser: Parser; lang: object } | null
  * Given a list of function nodes (with startIndex/endIndex) and a call position,
  * find the narrowest enclosing function node.
  */
+/**
+ * Give NESTED functions a unique, STABLE node id so same-named nested functions —
+ * or a nested function colliding with a same-named top-level one — are not collapsed
+ * into a single node at id aggregation (`allNodes.set(node.id, …)`, last-write-wins),
+ * which silently drops a real function and merges its edges/metrics.
+ *
+ * A node is re-keyed ONLY when its bare id collides AND it is byte-CONTAINED within
+ * another function node (a genuinely nested function). Its id becomes the immediate
+ * enclosing function's id segment + `/name` (`file::A.m1/helper`) — a discriminator
+ * derived from the enclosing scope, NOT a byte offset, so it is STABLE across edits to
+ * surrounding code (a positional offset would shift and read as removed+added on every
+ * diff). Same-scope twins get a deterministic document-order ordinal (`…/helper#2`).
+ *
+ * Sibling collisions (non-contained nodes sharing an id — a re-assigned member
+ * `obj.fn = …; obj.fn = …`, a same-file container homonym across namespaces) are left
+ * collapsed: that is an intentional, separately-tested behavior. Nodes are processed
+ * outermost→innermost (by span) so an enclosing function's id is final before a child
+ * is qualified against it, composing across multiple nesting levels.
+ *
+ * MUST run after node extraction and BEFORE call extraction, so findEnclosingFunction
+ * returns the disambiguated node and the rawEdge it produces carries the unique
+ * callerId. Deterministic; a no-op when no bare id collides (the common case).
+ * (change: add-stable-nested-function-identity.)
+ */
+function ensureUniqueNodeIds(nodes: FunctionNode[]): void {
+  const counts = new Map<string, number>();
+  for (const n of nodes) counts.set(n.id, (counts.get(n.id) ?? 0) + 1);
+  let anyCollision = false;
+  for (const c of counts.values()) if (c > 1) { anyCollision = true; break; }
+  if (!anyCollision) return;
+
+  // Immediate enclosing function node = the smallest OTHER node strictly containing n.
+  const enclosingOf = (n: FunctionNode): FunctionNode | undefined => {
+    let best: FunctionNode | undefined;
+    let bestSize = Infinity;
+    for (const m of nodes) {
+      if (m === n) continue;
+      const contains =
+        m.startIndex <= n.startIndex &&
+        n.endIndex <= m.endIndex &&
+        (m.startIndex !== n.startIndex || m.endIndex !== n.endIndex);
+      if (!contains) continue;
+      const size = m.endIndex - m.startIndex;
+      if (size < bestSize) { bestSize = size; best = m; }
+    }
+    return best;
+  };
+
+  // Outermost→innermost AND document order for siblings: a container has a smaller (or
+  // equal-start, larger) span, so it sorts first; same-scope twins keep source order.
+  const order = [...nodes].sort(
+    (a, b) => a.startIndex - b.startIndex || b.endIndex - a.endIndex,
+  );
+  const taken = new Set(nodes.map(n => n.id));
+  for (const n of order) {
+    if ((counts.get(n.id) ?? 0) < 2) continue; // bare id is unique — leave it
+    const m = enclosingOf(n);
+    // Skip a sibling collision (no container — an intentional collapse) AND a
+    // same-id container, which is the SAME logical function matched twice: an
+    // `export function` / decorated-definition wrapper byte-contains its inner
+    // declaration, both carry the same id, and they are MEANT to collapse. Only a
+    // container with a DIFFERENT id is a genuine enclosing function.
+    if (!m || m.id === n.id) continue;
+    const sep = m.id.indexOf('::');
+    const filePrefix = sep >= 0 ? m.id.slice(0, sep + 2) : '';
+    const scope = sep >= 0 ? m.id.slice(sep + 2) : m.id;
+    let qualified = `${filePrefix}${scope}/${n.name}`;
+    if (taken.has(qualified)) {
+      let ord = 2;
+      while (taken.has(`${qualified}#${ord}`)) ord++;
+      qualified = `${qualified}#${ord}`;
+    }
+    n.id = qualified;
+    taken.add(qualified);
+  }
+}
+
+/**
+ * Materialize the function-id → CFG overlay map AFTER `ensureUniqueNodeIds` may have
+ * re-keyed nested function nodes. CFGs MUST be collected during extraction keyed by the
+ * node's start byte (`fnNode.startIndex` — unique per AST function node, and unchanged by
+ * re-keying) rather than by the function id, because the bare id is non-unique for a
+ * nested collision: a same-id `cfg.set(id, …)` would last-write-wins one CFG away before
+ * disambiguation, and the surviving CFG would then orphan under the pre-disambiguation id
+ * (no node carries it). Re-attaching by start byte to the FINAL node id keeps every
+ * re-keyed nested function's CFG overlay addressable by its node id — the form every
+ * downstream consumer (def-use dataflow, analyze_error_propagation) looks it up by.
+ * (change: add-stable-nested-function-identity.)
+ */
+function materializeCfgByNodeId(
+  nodes: FunctionNode[],
+  cfgByStart: Map<number, FunctionCfg>,
+): Map<string, FunctionCfg> {
+  const cfg = new Map<string, FunctionCfg>();
+  if (cfgByStart.size === 0) return cfg;
+  for (const n of nodes) {
+    const c = cfgByStart.get(n.startIndex);
+    if (c) cfg.set(n.id, c);
+  }
+  return cfg;
+}
+
 function findEnclosingFunction(
   nodes: FunctionNode[],
   callPos: number
@@ -1116,7 +1218,7 @@ async function extractTSGraph(
 
   // --- Extract function nodes ---
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   const fnMatches = fnQuery.matches(tree.rootNode);
 
   for (const match of fnMatches) {
@@ -1206,10 +1308,11 @@ async function extractTSGraph(
     });
 
     const fnCfg = buildCfgFor(fnNode, 'TypeScript');
-    if (fnCfg) cfg.set(id, fnCfg);
+    if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
   }
 
   // --- Extract calls ---
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
   const callMatches = callQuery.matches(tree.rootNode);
 
@@ -1245,6 +1348,7 @@ async function extractTSGraph(
   }
 
   const style = tallyStyle('TypeScript', tree, nodes, filePath);
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg, style };
 }
 
@@ -1297,7 +1401,7 @@ async function extractPyGraph(
 
   // --- Extract function nodes ---
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   const seen = new Set<number>(); // avoid duplicates from decorated_definition + function_definition
   const fnMatches = fnQuery.matches(tree.rootNode);
 
@@ -1351,10 +1455,11 @@ async function extractPyGraph(
     });
 
     const fnCfg = buildCfgFor(fnNode, 'Python');
-    if (fnCfg) cfg.set(id, fnCfg);
+    if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
   }
 
   // --- Extract calls ---
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
 
   const directCallQuery = new _NativeQuery!(lang as unknown as Parser.Language, PY_DIRECT_CALL_QUERY);
@@ -1410,6 +1515,7 @@ async function extractPyGraph(
   }
 
   const style = tallyStyle('Python', tree, nodes, filePath);
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg, style };
 }
 
@@ -1448,7 +1554,7 @@ async function extractGoGraph(
   const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, GO_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1482,9 +1588,10 @@ async function extractGoGraph(
     });
 
     const fnCfg = buildCfgFor(fnNode, 'Go');
-    if (fnCfg) cfg.set(id, fnCfg);
+    if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
   }
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
   for (const match of callQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'call.name');
@@ -1502,6 +1609,7 @@ async function extractGoGraph(
   }
 
   const style = tallyStyle('Go', tree, nodes, filePath);
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg, style };
 }
 
@@ -1537,7 +1645,7 @@ async function extractRustGraph(
   const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUST_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1580,9 +1688,10 @@ async function extractRustGraph(
     });
 
     const fnCfg = buildCfgFor(fnNode, 'Rust');
-    if (fnCfg) cfg.set(id, fnCfg);
+    if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
   }
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
   for (const match of callQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'call.name');
@@ -1599,6 +1708,7 @@ async function extractRustGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objectCapture?.node.text });
   }
 
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg };
 }
 
@@ -1646,7 +1756,7 @@ async function extractRubyGraph(
   const barewordQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUBY_BAREWORD_QUERY);
 
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1680,7 +1790,7 @@ async function extractRubyGraph(
     });
 
     const fnCfg = buildCfgFor(fnNode, 'Ruby');
-    if (fnCfg) cfg.set(id, fnCfg);
+    if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
   }
 
   // Explicit calls: fn(), obj.method(). RUBY_CALL_QUERY has the same two-pattern
@@ -1702,6 +1812,7 @@ async function extractRubyGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nameCapture.node.startPosition.row + 1 });
   }
 
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg };
 }
 
@@ -1774,6 +1885,7 @@ function dedupeOverlappingCalls(
     }
   }
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
   for (const call of callByNode.values()) {
     if (isIgnoredCallee(call.calleeName, language)) continue;
@@ -1848,7 +1960,7 @@ async function extractJavaGraph(
   const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, JAVA_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1891,7 +2003,7 @@ async function extractJavaGraph(
     });
 
     const fnCfg = buildCfgFor(fnNode, 'Java');
-    if (fnCfg) cfg.set(id, fnCfg);
+    if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
   }
 
   // JAVA_CALL_QUERY has two patterns: a qualified `object.name(...)` pattern and a
@@ -1905,6 +2017,7 @@ async function extractJavaGraph(
   // super(...) constructor-chain edges (this(...) intentionally omitted).
   rawEdges.push(...synthesizeJavaSuperCalls(tree.rootNode, nodes, lang));
 
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg };
 }
 
@@ -1974,7 +2087,7 @@ async function extractCppGraph(
   const tree = (parser as Parser).parse(content);
 
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   const seen = new Set<number>(); // deduplicate by name-node start position
 
   for (const queryStr of [CPP_FN_BASIC_QUERY, CPP_FN_QUALIFIED_QUERY]) {
@@ -2030,10 +2143,11 @@ async function extractCppGraph(
       });
 
       const fnCfg = buildCfgFor(fnNode, 'C++');
-      if (fnCfg) cfg.set(id, fnCfg);
+      if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
     }
   }
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
 
   // Plain calls: foo()
@@ -2067,6 +2181,7 @@ async function extractCppGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objectCapture?.node.text });
   }
 
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg };
 }
 
@@ -2145,6 +2260,7 @@ async function extractSwiftGraph(
     });
   }
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
 
   // Direct calls: foo()
@@ -2394,7 +2510,7 @@ async function extractByQueries(
 
   return handle.withTree(content, (_root, runQuery) => {
     const nodes: FunctionNode[] = [];
-    const cfg = new Map<string, FunctionCfg>();
+    const cfgByStart = new Map<number, FunctionCfg>();
     for (const match of runQuery(spec.fnQuery)) {
       const nameCapture = match.captures.find(c => c.name === 'fn.name');
       const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -2404,12 +2520,25 @@ async function extractByQueries(
       const className = (spec.classTypes.size ? enclosingGroupName(fnNode, spec.classTypes) : undefined)
         ?? spec.extraClassName?.(fnNode);
       const id = className ? `${filePath}::${className}.${name}` : `${filePath}::${name}`;
-      if (nodes.some(n => n.id === id)) continue; // collapse multi-clause/overloads to one node
+      if (nodes.some(n => n.id === id)) {
+        // A colliding id is normally a multi-clause definition / overload and collapses
+        // to one node. But a genuinely NESTED function — byte-contained in an already-seen
+        // function with a DIFFERENT id — must survive so ensureUniqueNodeIds can re-key it
+        // to a distinct scope-qualified id (change: add-stable-nested-function-identity).
+        // Without this, query-spec languages (C#/Kotlin/Scala/…) keep merging same-named
+        // nested twins and misrouting their calls — the exact bug this change fixes for the
+        // dedicated extractors. The enclosing function is matched before its nested child
+        // (document order), so it is present here. A same-id container (the same function
+        // matched twice) has no different-id container and still collapses.
+        const container = nodes.find(n =>
+          n.id !== id && n.startIndex <= fnNode.startIndex && fnNode.endIndex <= n.endIndex);
+        if (!container) continue; // true sibling overload / multi-clause — collapse to one node
+      }
       // CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay) for
       // spec-08 languages that have a CfgLangSpec; others fail soft to no overlay.
       // Built inside withTree while the (possibly WASM) tree is live.
       const fnCfg = buildCfgFor(fnNode as unknown as CfgNode, spec.language);
-      if (fnCfg) cfg.set(id, fnCfg);
+      if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
       nodes.push({
         id, name, filePath, className,
         isAsync: false,
@@ -2422,6 +2551,7 @@ async function extractByQueries(
     }
 
     const definedNames = new Set(nodes.map(n => n.name));
+    ensureUniqueNodeIds(nodes);
     const rawEdges: RawEdge[] = [];
     const seen = new Set<string>();
     for (const match of runQuery(spec.callQuery)) {
@@ -2440,6 +2570,7 @@ async function extractByQueries(
       seen.add(key);
       rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject });
     }
+    const cfg = materializeCfgByNodeId(nodes, cfgByStart);
     return { nodes, rawEdges, cfg };
   });
 }
@@ -2645,6 +2776,7 @@ async function extractDartGraph(
   };
   collectFns(root);
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
   const seen = new Set<string>();
   const collectCalls = (n: TsNodeLike): void => {
@@ -2750,6 +2882,7 @@ async function extractElixirGraph(
   };
   walk(root, undefined);
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
   const seen = new Set<string>();
   for (const c of calls) {
@@ -4757,7 +4890,24 @@ export class CallGraphBuilder {
           calleeNode = getOrCreateExternalNode(raw.calleeName, allNodes);
           confidence = 'external';
         } else {
-          const sameFile = candidates.find(c => c.filePath === callerNode.filePath);
+          const sameFileCands = candidates.filter(c => c.filePath === callerNode.filePath);
+          // Lexical preference: a call to a same-named function resolves to the twin
+          // NESTED within the caller's own span (byte-contained), not merely the first
+          // same-file homonym. Two same-named nested functions are now distinct nodes
+          // (change: add-stable-nested-function-identity); without this a nested call
+          // would bind to whichever twin sorts first and misroute into a sibling scope
+          // (e.g. processB()'s validate() resolving to processA's). Among contained
+          // candidates prefer the NARROWEST (most-local) enclosing definition; the
+          // caller itself is excluded so genuine recursion still falls through.
+          const nested = sameFileCands
+            .filter(c => c !== callerNode && c.startIndex >= callerNode.startIndex && c.endIndex <= callerNode.endIndex)
+            .sort((a, b) => (a.endIndex - a.startIndex) - (b.endIndex - b.startIndex));
+          // A function nested in the caller shadows the caller's own name, so it wins;
+          // otherwise a self-named candidate is a recursive call and binds to the caller
+          // itself (a nested `visit(){ … visit() … }` recurses, it does not jump to a
+          // sibling scope's `visit`); only then fall back to the first same-file homonym.
+          const recursive = sameFileCands.find(c => c === callerNode);
+          const sameFile = nested[0] ?? recursive ?? sameFileCands[0];
           if (sameFile) { calleeNode = sameFile; confidence = 'same_file'; }
           else { calleeNode = candidates[0]; confidence = 'name_only'; }
         }

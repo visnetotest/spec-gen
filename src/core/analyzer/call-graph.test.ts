@@ -324,6 +324,161 @@ describe('CallGraphBuilder — TypeScript', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Nested-function identity (change: add-stable-nested-function-identity)
+// ---------------------------------------------------------------------------
+
+describe('CallGraphBuilder — stable nested-function identity', () => {
+  const NESTED = `
+    function helper() { return 'top'; }
+    class A {
+      m1() { function helper() { sideEffect1(); } return helper(); }
+      m2() { function helper() { sideEffect2(); } return helper(); }
+    }
+    function sideEffect1() {}
+    function sideEffect2() {}
+  `;
+
+  it('gives same-named nested functions distinct, scope-qualified ids (no merge)', async () => {
+    const result = await new CallGraphBuilder().build([{ path: 'src/n.ts', language: 'TypeScript', content: NESTED }]);
+    const helperIds = Array.from(result.nodes.values()).filter(n => n.name === 'helper').map(n => n.id).sort();
+    // top-level keeps the bare id; each nested helper is qualified by its enclosing method.
+    expect(helperIds).toEqual([
+      'src/n.ts::A.m1/helper',
+      'src/n.ts::A.m2/helper',
+      'src/n.ts::helper',
+    ]);
+    // Each nested helper keeps its OWN outgoing edge — not merged.
+    expect(edgePairs(result)).toContain('helper→sideEffect1');
+    expect(edgePairs(result)).toContain('helper→sideEffect2');
+  });
+
+  it('keeps nested-function ids STABLE when unrelated code shifts above them', async () => {
+    const a = await new CallGraphBuilder().build([{ path: 'src/n.ts', language: 'TypeScript', content: NESTED }]);
+    const b = await new CallGraphBuilder().build([{ path: 'src/n.ts', language: 'TypeScript', content: `const X = 1;\nfunction unrelated(){}\n${NESTED}` }]);
+    const ids = (r: Awaited<ReturnType<CallGraphBuilder['build']>>) =>
+      Array.from(r.nodes.values()).filter(n => n.name === 'helper').map(n => n.id).sort();
+    // Scope-qualified (not byte-offset) → unchanged by an unrelated edit.
+    expect(ids(b)).toEqual(ids(a));
+  });
+
+  it('disambiguates two same-named functions in the SAME scope by document-order ordinal', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/d.ts', language: 'TypeScript',
+      content: `function outer() { function dup(){} function dup(){} }`,
+    }]);
+    const ids = Array.from(result.nodes.values()).filter(n => n.name === 'dup').map(n => n.id).sort();
+    expect(ids).toEqual(['src/d.ts::outer/dup', 'src/d.ts::outer/dup#2']);
+  });
+
+  // Scope contract: a same-id container is the SAME function matched twice (export
+  // wrapper / decorator), NOT a nested function — it must still collapse to one node.
+  it('does NOT split an `export function` double-match into a nested node', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/e.ts', language: 'TypeScript',
+      content: `export async function createOrder() { return 1; }`,
+    }]);
+    const ids = Array.from(result.nodes.values()).filter(n => n.name === 'createOrder').map(n => n.id);
+    expect(ids).toEqual(['src/e.ts::createOrder']); // one node, no `createOrder/createOrder`
+  });
+
+  // A call to a same-named function must bind to the twin nested in the CALLER's own
+  // scope, not merely the first same-file homonym. The node-split makes the two `validate`
+  // distinct nodes; the resolver must then route each method's `validate()` call to its own
+  // nested validate (else processB would misroute into processA's scope).
+  it('routes a nested call to the twin in the callers own scope (lexical resolution)', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/svc.ts', language: 'TypeScript',
+      content:
+        `class Service {\n` +
+        `  processA() { function validate(x: number) { return sinkA(x); } return validate(1); }\n` +
+        `  processB() { function validate(y: string) { return sinkB(y); } return validate('z'); }\n` +
+        `}\n` +
+        `function sinkA(n: number){ return n; }\nfunction sinkB(s: string){ return s; }`,
+    }]);
+    const byId = new Map(Array.from(result.nodes.values()).map(n => [n.id, n]));
+    const edgeFrom = (callerId: string, calleeName: string) =>
+      result.edges.find(e => e.callerId === callerId && byId.get(e.calleeId)?.name === calleeName);
+    // Each method calls ITS OWN nested validate, not the first one.
+    expect(edgeFrom('src/svc.ts::Service.processA', 'validate')?.calleeId).toBe('src/svc.ts::Service.processA/validate');
+    expect(edgeFrom('src/svc.ts::Service.processB', 'validate')?.calleeId).toBe('src/svc.ts::Service.processB/validate');
+    // And each validate keeps its own distinct downstream (no cross-wiring).
+    expect(edgePairs(result)).toContain('validate→sinkA');
+    expect(edgePairs(result)).toContain('validate→sinkB');
+  });
+
+  it('binds a recursive nested function to ITSELF, not a same-named sibling-scope twin', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/rec.ts', language: 'TypeScript',
+      content:
+        `class T {\n` +
+        `  a() { function visit(n: number){ if (n) visit(n - 1); } return visit(3); }\n` +
+        `  b() { function visit(n: number){ if (n) visit(n - 1); } return visit(3); }\n` +
+        `}`,
+    }]);
+    const recursesToSelf = (id: string) =>
+      result.edges.some(e => e.callerId === id && e.calleeId === id);
+    expect(recursesToSelf('src/rec.ts::T.a/visit')).toBe(true);
+    expect(recursesToSelf('src/rec.ts::T.b/visit')).toBe(true);
+    // The recursive call must NOT cross into the other method's visit.
+    expect(result.edges.some(e =>
+      e.callerId === 'src/rec.ts::T.b/visit' && e.calleeId === 'src/rec.ts::T.a/visit')).toBe(false);
+  });
+
+  // The shared query-spec extractor (C#/Kotlin/Scala/…) dedupes colliding ids at
+  // extraction; a genuinely NESTED twin must still survive to be re-keyed (it used to be
+  // dropped before disambiguation, leaving those languages merging nested twins) while a
+  // true overload at the same scope must still collapse to one node.
+  it('disambiguates nested twins in a query-spec language (C#) yet still collapses overloads', async () => {
+    const nested = await new CallGraphBuilder().build([{
+      path: 'x.cs', language: 'C#',
+      content:
+        `class Order {\n` +
+        `  void Process() { void Validate() { SinkA(); } Validate(); }\n` +
+        `  void Submit() { void Validate() { SinkB(); } Validate(); }\n` +
+        `  void SinkA() {} void SinkB() {}\n` +
+        `}`,
+    }]);
+    const vids = Array.from(nested.nodes.values()).filter(n => n.name === 'Validate').map(n => n.id).sort();
+    expect(vids).toEqual(['x.cs::Order.Process/Validate', 'x.cs::Order.Submit/Validate']);
+    const byId = new Map(Array.from(nested.nodes.values()).map(n => [n.id, n]));
+    const edge = (caller: string) => nested.edges.find(e => e.callerId === caller && byId.get(e.calleeId)?.name === 'Validate')?.calleeId;
+    expect(edge('x.cs::Order.Process')).toBe('x.cs::Order.Process/Validate');
+    expect(edge('x.cs::Order.Submit')).toBe('x.cs::Order.Submit/Validate');
+
+    // Overloads (same id at class scope, not nested) MUST still collapse to one node.
+    const overload = await new CallGraphBuilder().build([{
+      path: 'o.cs', language: 'C#',
+      content:
+        `class Calc {\n` +
+        `  int Add(int a, int b) { return a + b; }\n` +
+        `  string Add(string a, string b) { return a + b; }\n` +
+        `}`,
+    }]);
+    expect(Array.from(overload.nodes.values()).filter(n => n.name === 'Add').map(n => n.id)).toEqual(['o.cs::Calc.Add']);
+  });
+
+  // Re-keying a nested node must carry its CFG overlay with it. The CFG is collected by
+  // start byte during extraction and re-attached to the FINAL node id, so a re-keyed
+  // nested function is NOT left without a CFG (and no stale CFG orphans under the
+  // pre-disambiguation bare id). Guards the def-use / analyze_error_propagation consumers.
+  it('keeps each re-keyed nested function reachable by its CFG overlay (no orphan, no loss)', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/cfg.ts', language: 'TypeScript',
+      content:
+        `function outer(){ function helper(){ if (Math.random() > 0.5) { return 1; } return 2; } return helper(); }\n` +
+        `function other(){ function helper(){ for (let i = 0; i < 3; i++) {} return 3; } return helper(); }`,
+    }]);
+    const nodeIds = new Set(Array.from(result.nodes.values()).map(n => n.id));
+    const nested = [...nodeIds].filter(id => id === 'src/cfg.ts::outer/helper' || id === 'src/cfg.ts::other/helper');
+    expect(nested.sort()).toEqual(['src/cfg.ts::other/helper', 'src/cfg.ts::outer/helper']);
+    // BOTH nested helpers keep their OWN CFG (not collapsed to one by last-write-wins).
+    for (const id of nested) expect(result.cfgs?.has(id)).toBe(true);
+    // No CFG keyed under an id that no node carries (the stale bare `::helper`).
+    for (const key of result.cfgs?.keys() ?? []) expect(nodeIds.has(key)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // JavaScript
 // ---------------------------------------------------------------------------
 
