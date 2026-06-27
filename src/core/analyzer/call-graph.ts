@@ -28,326 +28,72 @@ import {
 import { buildProjectedIac } from './iac/index.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
-import { buildFunctionCfg, type FunctionCfg, type CfgNode } from './cfg.js';
+import { type FunctionCfg, type CfgNode } from './cfg.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
 import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
 import { logger } from '../../utils/logger.js';
 import { tallyFileStyle, type FileStyleRaw, type StyleAstNode } from './style-fingerprint.js';
 
 // ============================================================================
-// TYPES
+// TYPES — extracted to ./call-graph-types.ts and re-exported here so this file
+// remains the stable public barrel (change: modularize-call-graph-builder;
+// analyzer: StableCallGraphBarrel). Every name importable from call-graph.ts
+// before the split stays importable from call-graph.ts.
 // ============================================================================
 
-export type EdgeConfidence =
-  | 'self_cls'       // intra-class call via self/cls
-  | 'type_inference' // receiver type resolved via type inference
-  | 'import'         // callee was imported from a known file
-  | 're_export'      // callee resolved through a re-export/barrel chain to its true definition (change: add-call-resolution-recall)
-  | 'http_endpoint'  // cross-language HTTP route match
-  | 'same_file'      // multiple candidates; same-file wins
-  | 'name_only'      // last-resort: pick first candidate by name
-  | 'type_name'      // Swift/C++ capitalized receiver treated as type name
-  | 'synthesized'    // dynamic-dispatch edge recovered by AST pattern synthesis (not direct name resolution)
-  | 'external';      // unresolved external/stdlib call (synthetic leaf node)
+// Internal bindings used by the builder below. RawEdge (and CALL_DISTANCE_FALLBACK)
+// are intentionally NOT re-exported — they were never on call-graph.ts's surface.
+import type {
+  RawEdge,
+  FunctionNode,
+  CallEdge,
+  EdgeConfidence,
+  CallType,
+  LayerViolation,
+  ClassNode,
+  InheritanceEdge,
+  CallGraphResult,
+  SerializedCallGraph,
+} from './call-graph-types.js';
+import { classifyLayerEdge } from './call-graph-types.js';
 
-/** Broad relationship kind */
-export type EdgeKind =
-  | 'calls'
-  | 'overrides'      // base method → overriding method (CHA; spec: add-type-hierarchy-resolved-dispatch)
-  | 'tested_by'
-  | 'references'
-  | 'depends_on'
-  | 'affects'        // decision → governed file (spec-16)
-  | 'authored_by'    // file → person, from local git history (spec-18)
-  | 'changed_in_pr'; // file → pull request, from local git/gh (spec-18)
+// Docstring/declaration extraction helpers — extracted to ./call-graph-extract.ts
+// (internal, not re-exported; see the banner at the original section site below).
+import { extractDocstringBefore, extractDeclaration } from './call-graph-extract.js';
 
-/** Semantic nature of the call at the call site */
-export type CallType =
-  | 'direct'       // foo()
-  | 'method'       // obj.method()
-  | 'awaited'      // await foo() or await obj.method()
-  | 'constructor'; // new Foo()
+// External-node helper — extracted to ./call-graph-external.ts (internal, not
+// re-exported; classifyExternal + the EXTERNAL_* tables stay private to that module).
+import { getOrCreateExternalNode } from './call-graph-external.js';
 
-/** Internal raw edge before resolution */
-interface RawEdge {
-  callerId: string;
-  calleeName: string;
-  line: number;
-  /** Receiver variable name in `obj.method()` calls */
-  calleeObject?: string;
-  /** Call type detected from AST shape at extraction time */
-  callType?: CallType;
-}
+// Cyclomatic-complexity estimator — extracted to ./call-graph-complexity.ts. Used
+// internally AND re-exported below (it was on call-graph.ts's public surface).
+import { computeCyclomaticComplexity } from './call-graph-complexity.js';
 
-export interface FunctionNode {
-  /** Unique ID: "filepath::ClassName.methodName" or "filepath::functionName" */
-  id: string;
-  name: string;
-  filePath: string;
-  className?: string;
-  isAsync: boolean;
-  language: string;
-  /** Byte offset range in source (for call attribution) */
-  startIndex: number;
-  endIndex: number;
-  fanIn: number;
-  fanOut: number;
-  /** First meaningful line of the doc comment / docstring, extracted from AST positions */
-  docstring?: string;
-  /** Declaration line(s) up to opening brace/colon, whitespace-normalized */
-  signature?: string;
-  /** True for synthetic nodes representing unresolved external/stdlib calls (e.g. fetch, https.request) */
-  isExternal?: boolean;
-  /** Classification of external node — used to filter stdlib noise from views */
-  externalKind?: ExternalKind;
-  /** True for nodes whose source file is a test file (*.test.ts, *_test.py, etc.) */
-  isTest?: boolean;
-  /** 1-based line number of the function start (computed from startIndex at build time) */
-  startLine?: number;
-  /** 1-based line number of the function end (computed from endIndex at build time) */
-  endLine?: number;
-  /** Label-propagation community ID (canonical node id of the community representative) */
-  communityId?: string;
-  /** Human-readable community label (name of the hub function in the community) */
-  communityLabel?: string;
-  /** McCabe cyclomatic complexity computed from AST body slice (1 = linear, ≥10 = complex) */
-  cyclomaticComplexity?: number;
-  /**
-   * Content-addressed, location-independent stable identity (change:
-   * add-content-addressed-stable-symbol-ids). Derived from the qualified name +
-   * signature shape, excluding the file path — so it survives a rename/move.
-   * Additive: the path-based `id` remains the canonical key. Absent for
-   * anonymous/synthetic symbols with no derivable descriptor.
-   */
-  stableId?: string;
-}
+// CFG / data-flow overlay helper — extracted to ./call-graph-cfg.ts (internal, not
+// re-exported); wraps buildFunctionCfg with body-resolution + fail-soft.
+import { buildCfgFor } from './call-graph-cfg.js';
 
-/** Broad category of an external (unresolved) call */
-export type ExternalKind = 'http' | 'database' | 'filesystem' | 'stdlib' | 'unknown';
+// Callee-ignore predicates — extracted to ./call-graph-builtins.ts (internal, not
+// re-exported; the *_IGNORED tables stay private to that module).
+import { isIgnoredCallee, isSelfReceiver } from './call-graph-builtins.js';
 
-export interface CallEdge {
-  callerId: string;
-  /** Resolved callee ID */
-  calleeId: string;
-  /** Raw name as it appears in source */
-  calleeName: string;
-  line?: number;
-  confidence: EdgeConfidence;
-  /** Broad relationship kind — omitted on legacy/pre-existing edges, treated as 'calls' */
-  kind?: EdgeKind;
-  /** Semantic call type; only set when kind === 'calls' */
-  callType?: CallType;
-  /**
-   * Name of the synthesis rule that produced this edge (e.g. 'event-channel',
-   * 'route-handler'). Set only when `confidence === 'synthesized'`; absent on
-   * directly-resolved edges. Lets every consumer and agent see which conclusions
-   * lean on a heuristic and which rest on direct name resolution.
-   */
-  synthesizedBy?: string;
-}
-
-/**
- * Deterministic call-distance cost per edge resolution confidence. A lower cost
- * means a structurally *nearer* (more strongly resolved) edge. Used by
- * {@link callDistance} and the weighted traversal that scopes context by nearest
- * neighbour instead of by a fixed neighbour count.
- *
- * `external` is `Infinity`: external nodes are synthetic stdlib/HTTP leaves and
- * are never traversed *through* for internal scoping (see `weightedBfs`).
- */
-export const CALL_DISTANCE_COSTS: Record<EdgeConfidence, number> = {
-  // Strongly resolved — concrete symbol/route match.
-  import: 1,
-  // Re-export-resolved — a proven concrete definition reached through a barrel;
-  // as strongly resolved as a direct import (the chain was followed statically).
-  re_export: 1,
-  same_file: 1,
-  self_cls: 1,
-  http_endpoint: 1,
-  // Moderately resolved — receiver type inferred or treated as a type name.
-  type_inference: 2,
-  type_name: 2,
-  // Heuristic — last-resort first-candidate-by-name match.
-  name_only: 3,
-  // Synthesized dynamic-dispatch edge — deliberately costlier than ANY directly-
-  // resolved confidence so find_path / call-distance scoping prefer a directly-
-  // resolved route when one exists, falling back to synthesized only when needed.
-  synthesized: 4,
-  // Unresolved external/stdlib leaf — excluded from internal traversal.
-  external: Infinity,
-};
-
-/** Fallback cost for a malformed/legacy confidence value not in the enum. */
-const CALL_DISTANCE_FALLBACK = 3;
-
-/**
- * Deterministic distance cost for a single call edge, derived solely from its
- * resolution confidence — a pure function of static analysis, no learned or
- * stochastic component. The switch is exhaustive over {@link EdgeConfidence}
- * (the `never` assignment fails compilation if a member is added without a
- * cost); the runtime `default` defends against malformed/legacy edge data.
- */
-export function callDistance(edge: CallEdge): number {
-  switch (edge.confidence) {
-    case 'import':
-    case 're_export':
-    case 'same_file':
-    case 'self_cls':
-    case 'http_endpoint':
-      return 1;
-    case 'type_inference':
-    case 'type_name':
-      return 2;
-    case 'name_only':
-      return 3;
-    case 'synthesized':
-      return 4;
-    case 'external':
-      return Infinity;
-    default: {
-      const _exhaustive: never = edge.confidence;
-      void _exhaustive;
-      return CALL_DISTANCE_FALLBACK;
-    }
-  }
-}
-
-export interface LayerViolation {
-  callerId: string;
-  calleeId: string;
-  callerLayer: string;
-  calleeLayer: string;
-  reason: string;
-}
-
-/**
- * The layer a file belongs to, by the first matching prefix in declared order.
- * Shared by the call-graph layer detector and the architecture guardrail (spec-23)
- * so both agree on one layering convention.
- */
-export function layerOf(filePath: string, layers: Record<string, string[]>): string | undefined {
-  for (const [layerName, prefixes] of Object.entries(layers)) {
-    // Path-prefix match, not substring: `src/cli` must not classify
-    // `src/clinic/x.ts` or `src/api-deprecated/y.ts` into a neighbouring layer.
-    if (prefixes.some(p => { const q = p.endsWith('/') ? p : p + '/'; return filePath === p || filePath.startsWith(q); }))
-      return layerName;
-  }
-  return undefined;
-}
-
-/**
- * Classify a single directed edge (from → to) against a layer ordering. Declared
- * key order is top → bottom; a lower layer depending on an upper layer is a
- * violation. Returns the offending layer pair, or null when the edge is legal,
- * unclassified, or intra-layer. The canonical layer-direction primitive — reused
- * by `detectLayerViolations` (call edges) and the spec-23 architecture checker
- * (file dependency edges).
- */
-export function classifyLayerEdge(
-  fromFile: string,
-  toFile: string,
-  layers: Record<string, string[]>
-): { fromLayer: string; toLayer: string } | null {
-  const order = Object.keys(layers);
-  const fromLayer = layerOf(fromFile, layers);
-  const toLayer = layerOf(toFile, layers);
-  if (!fromLayer || !toLayer || fromLayer === toLayer) return null;
-  const fi = order.indexOf(fromLayer);
-  const ti = order.indexOf(toLayer);
-  if (fi === -1 || ti === -1) return null;
-  return fi > ti ? { fromLayer, toLayer } : null;
-}
-
-/**
- * A class or interface as a structural unit, grouping its methods.
- * Derived from FunctionNode.className after the call graph is built.
- */
-export interface ClassNode {
-  /** Unique ID: first filePath where the class is seen + "::" + className */
-  id: string;
-  name: string;
-  filePath: string;
-  language: string;
-  /** Direct parent class names (from `extends` / Python base / C++ base) */
-  parentClasses: string[];
-  /** Implemented interfaces (TypeScript `implements`, Java `implements`) */
-  interfaces: string[];
-  /** IDs of FunctionNode members that belong to this class */
-  methodIds: string[];
-  /** Sum of method fanIn values */
-  fanIn: number;
-  /** Sum of method fanOut values */
-  fanOut: number;
-  /** True for synthetic file-level module nodes (free functions grouped by file) */
-  isModule?: boolean;
-  /**
-   * Content-addressed, location-independent stable identity (change:
-   * add-content-addressed-stable-symbol-ids); the escaped class name, excluding
-   * the file path. Absent for synthetic module groupings. Additive — `id`
-   * remains canonical.
-   */
-  stableId?: string;
-}
-
-/**
- * An inheritance or implementation edge between two ClassNodes in the graph.
- */
-export interface InheritanceEdge {
-  id: string;
-  /** ClassNode id of the parent / base / interface */
-  parentId: string;
-  /** ClassNode id of the child / derived / implementor */
-  childId: string;
-  kind: 'extends' | 'implements' | 'embeds' | 'overrides';
-}
-
-export interface CallGraphResult {
-  nodes: Map<string, FunctionNode>;
-  edges: CallEdge[];
-  /**
-   * Per-function intra-procedural control-flow + reaching-definitions overlay
-   * (spec: add-intraprocedural-cfg-dataflow-overlay), keyed by function id.
-   * Transient build-time data: persisted to the disposable SQLite store but
-   * deliberately NOT carried into {@link SerializedCallGraph}/the resident graph,
-   * so in-memory footprint is unchanged. Absent for unsupported languages.
-   */
-  cfgs?: Map<string, FunctionCfg>;
-  /** Class-level structural nodes, derived from FunctionNode.className grouping */
-  classes: ClassNode[];
-  /** Inheritance / implementation edges between ClassNodes */
-  inheritanceEdges: InheritanceEdge[];
-  /** Functions with fanIn >= HUB_THRESHOLD */
-  hubFunctions: FunctionNode[];
-  /** Functions with no internal callers (fanIn === 0) */
-  entryPoints: FunctionNode[];
-  layerViolations: LayerViolation[];
-  stats: {
-    totalNodes: number;
-    totalEdges: number;
-    avgFanIn: number;
-    avgFanOut: number;
-  };
-  /**
-   * Raw per-file style idiom counters (change: add-codebase-style-fingerprint), keyed by file
-   * path. Tallied in the same per-file AST walk that extracts nodes/edges — no second parse.
-   * Present only for languages with a declared counter set (fail-soft otherwise). Transient
-   * build-time data: rolled up into the persisted `style-fingerprint.json` by the artifact
-   * generator, not carried into {@link SerializedCallGraph}.
-   */
-  styleByFile?: Map<string, FileStyleRaw>;
-}
-
-/** Serializable version (Maps replaced by arrays) for JSON storage */
-export interface SerializedCallGraph {
-  nodes: FunctionNode[];
-  edges: CallEdge[];
-  classes: ClassNode[];
-  inheritanceEdges: InheritanceEdge[];
-  hubFunctions: FunctionNode[];
-  entryPoints: FunctionNode[];
-  layerViolations: LayerViolation[];
-  stats: CallGraphResult['stats'];
-}
+// Stable barrel: re-export the full public type/edge model + distance/layer helpers.
+export type {
+  EdgeConfidence,
+  EdgeKind,
+  CallType,
+  FunctionNode,
+  ExternalKind,
+  CallEdge,
+  LayerViolation,
+  ClassNode,
+  InheritanceEdge,
+  CallGraphResult,
+  SerializedCallGraph,
+} from './call-graph-types.js';
+export { CALL_DISTANCE_COSTS, callDistance, layerOf, classifyLayerEdge } from './call-graph-types.js';
+// Re-export the extracted complexity estimator so it stays importable from call-graph.ts.
+export { computeCyclomaticComplexity } from './call-graph-complexity.js';
 
 // ============================================================================
 // CONSTANTS
@@ -355,119 +101,10 @@ export interface SerializedCallGraph {
 
 const HUB_THRESHOLD = 5;
 
-// Builtins / stdlib names to ignore as call targets, partitioned BY LANGUAGE.
-// This used to be one global set applied to every language, which dropped
-// legitimate calls: a Java `repo.find(id)`, `list.contains(x)`, or
-// `cache.remove(k)` vanished because `find`/`contains`/`remove` are C++ STL /
-// Swift names. Each language now only ignores its own builtins; unknown
-// languages fall back to the union (legacy behavior) — see isIgnoredCallee.
-
-const PYTHON_IGNORED = new Set([
-  'print', 'len', 'range', 'str', 'int', 'float', 'list', 'dict', 'set', 'tuple',
-  'bool', 'type', 'isinstance', 'issubclass', 'hasattr', 'getattr', 'setattr',
-  'enumerate', 'zip', 'map', 'filter', 'sorted', 'reversed', 'sum', 'min', 'max',
-  'open', 'input', 'format', 'repr', 'id', 'hash', 'abs', 'round', 'pow',
-  'super', 'object', 'property', 'staticmethod', 'classmethod',
-  'assert', 'raise', 'return', 'yield', 'await', 'pass', 'del',
-]);
-
-const JS_IGNORED = new Set([
-  'console', 'log', 'error', 'warn', 'JSON', 'parse', 'stringify',
-  'Promise', 'resolve', 'reject', 'then', 'catch', 'finally',
-  'Array', 'Object', 'String', 'Number', 'Boolean', 'Math', 'Date',
-  'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
-  'require', 'import', 'exports',
-  'map', 'filter', 'reduce', 'forEach',
-  // Node.js
-  'readFile', 'writeFile', 'mkdir', 'join', 'resolve', 'basename', 'dirname',
-  'existsSync', 'readFileSync', 'writeFileSync',
-]);
-
-const GO_IGNORED = new Set([
-  'make', 'new', 'append', 'copy', 'delete', 'close', 'panic', 'recover',
-  'println', 'printf', 'sprintf', 'errorf', 'fprintf', 'print',
-]);
-
-const RUST_IGNORED = new Set([
-  'println', 'eprintln', 'format', 'vec', 'assert', 'unwrap', 'expect',
-  'ok', 'err', 'some', 'none',
-]);
-
-const RUBY_IGNORED = new Set([
-  'puts', 'print', 'p', 'raise', 'require', 'require_relative', 'include',
-  'extend', 'attr_accessor', 'attr_reader', 'attr_writer',
-]);
-
-// JVM family (Java/Kotlin/Scala) + C# share these Object/print builtins. Note:
-// generic collection methods (find/insert/remove/contains/size/...) are NOT
-// ignored here — they are legitimate, frequently user-defined method names.
-const JVM_IGNORED = new Set([
-  'toString', 'equals', 'hashCode', 'getClass', 'println', 'printf', 'print',
-]);
-
-const SWIFT_IGNORED = new Set([
-  'print', 'debugPrint', 'dump', 'fatalError', 'precondition', 'preconditionFailure',
-  'assert', 'assertionFailure', 'withUnsafePointer', 'withUnsafeMutablePointer',
-  'DispatchQueue', 'main', 'async', 'sync', 'append', 'remove', 'insert', 'contains',
-  'map', 'filter', 'reduce', 'forEach', 'compactMap', 'flatMap', 'sorted', 'first', 'last',
-]);
-
-const CFAMILY_IGNORED = new Set([
-  'cout', 'cin', 'cerr', 'endl', 'malloc', 'free', 'memcpy', 'memset', 'memcmp',
-  'strlen', 'strcpy', 'strcat', 'strcmp', 'sprintf', 'snprintf', 'fprintf', 'printf',
-  'push_back', 'pop_back', 'emplace_back', 'begin', 'end', 'size', 'empty',
-  'find', 'insert', 'erase', 'at', 'front', 'back', 'clear', 'reserve', 'resize',
-  'make_shared', 'make_unique', 'move', 'forward', 'swap',
-  'static_cast', 'dynamic_cast', 'reinterpret_cast', 'const_cast',
-]);
-
-const IGNORED_BY_LANGUAGE: Record<string, Set<string>> = {
-  Python: PYTHON_IGNORED,
-  TypeScript: JS_IGNORED,
-  JavaScript: JS_IGNORED,
-  Go: GO_IGNORED,
-  Rust: RUST_IGNORED,
-  Ruby: RUBY_IGNORED,
-  Java: JVM_IGNORED,
-  Kotlin: JVM_IGNORED,
-  Scala: JVM_IGNORED,
-  'C#': JVM_IGNORED,
-  Swift: SWIFT_IGNORED,
-  'C++': CFAMILY_IGNORED,
-  C: CFAMILY_IGNORED,
-};
-
-// Union of every language's set — the fallback for callers that pass no
-// language (and languages without a dedicated set), preserving legacy behavior.
-const ALL_IGNORED_CALLEES = new Set<string>(
-  Object.values(IGNORED_BY_LANGUAGE).flatMap(s => Array.from(s))
-);
-
-/**
- * Returns true if the name should be skipped as a call target.
- * Pass the source `language` so only that language's builtins are ignored;
- * omit it (or pass an unmapped language) to fall back to the cross-language
- * union (legacy behavior).
- */
-function isIgnoredCallee(name: string, language?: string): boolean {
-  // ALL_CAPS names (3+ chars) are almost certainly C/C++ macros (or constants),
-  // not function calls — skip regardless of language.
-  if (/^[A-Z][A-Z0-9_]{2,}$/.test(name)) return true;
-  const set = language ? IGNORED_BY_LANGUAGE[language] : undefined;
-  if (set) return set.has(name);
-  if (ALL_IGNORED_CALLEES.has(name)) return true;
-  return false;
-}
-
-/** Receivers that denote the enclosing object/class — a member call through one is
- *  an intra-object method call, not the arbitrary-receiver noise (`arr.map()`,
- *  `JSON.parse()`) the ignore-list targets. So `this.parse()` / `self.map()` must
- *  bypass the name-only ignore filter: the class may genuinely define that method,
- *  and the resolver will bind it (or drop it if not). */
-const SELF_CALL_RECEIVERS: ReadonlySet<string> = new Set(['this', 'super', 'self', 'cls']);
-function isSelfReceiver(receiver: string | undefined): boolean {
-  return receiver !== undefined && SELF_CALL_RECEIVERS.has(receiver);
-}
+// Callee-ignore tables (PYTHON_IGNORED…CFAMILY_IGNORED, IGNORED_BY_LANGUAGE,
+// ALL_IGNORED_CALLEES) and the isIgnoredCallee / isSelfReceiver predicates were
+// extracted to ./call-graph-builtins.ts (change: modularize-call-graph-builder);
+// imported at the top of this file and used by the language extractors.
 
 /**
  * Tally the style fingerprint for one file over its already-parsed tree (no second parse). Reuses
@@ -890,256 +527,16 @@ function linkCodeToInfra(
 }
 
 // ============================================================================
-// DOCSTRING / SIGNATURE EXTRACTION HELPERS
+// DOCSTRING / SIGNATURE EXTRACTION HELPERS — extracted to ./call-graph-extract.ts
+// (change: modularize-call-graph-builder). Internal helpers (never on the public
+// surface); imported at the top of this file and used by the language extractors.
 // ============================================================================
 
-/**
- * Scan backward from `startIndex` in `source` to find the doc comment
- * immediately preceding the function declaration. Skip blank lines.
- *
- * For Python, docstrings are INSIDE the function body — scan forward from
- * `startIndex` past the `def name(...):` colon to find the triple-quoted string.
- *
- * Returns the first meaningful (non-empty, non-decorator) line of the comment.
- */
-function extractDocstringBefore(
-  source: string,
-  startIndex: number,
-  language: string
-): string | undefined {
-  // ── Python: scan forward past the colon into the function body ──────────
-  if (language === 'Python') {
-    // Find the colon that ends the `def` line. Track bracket depth so a colon
-    // inside a parameter annotation (`def f(x: int) -> T:`) doesn't end the scan
-    // prematurely — mirrors the depth handling in extractDeclaration below.
-    let i = startIndex;
-    let depth = 0;
-    while (i < source.length) {
-      const c = source[i];
-      if (c === '(' || c === '[' || c === '{') depth++;
-      else if (c === ')' || c === ']' || c === '}') depth--;
-      else if (c === ':' && depth === 0) break;
-      i++;
-    }
-    // Skip past the colon
-    i++;
-    // Skip whitespace / newline
-    while (i < source.length && (source[i] === ' ' || source[i] === '\t' || source[i] === '\n' || source[i] === '\r')) i++;
-    // Check for triple-quoted docstring
-    const tripleDouble = source.startsWith('"""', i);
-    const tripleSingle = source.startsWith("'''", i);
-    if (tripleDouble || tripleSingle) {
-      const quote = tripleDouble ? '"""' : "'''";
-      const bodyStart = i + 3;
-      const closeIdx = source.indexOf(quote, bodyStart);
-      if (closeIdx === -1) return undefined;
-      const inner = source.slice(bodyStart, closeIdx);
-      const firstLine = inner.split('\n').map(l => l.trim()).find(l => l.length > 0);
-      return firstLine ?? undefined;
-    }
-    return undefined;
-  }
-
-  // ── All other languages: scan backward from startIndex ─────────────────
-  // Move to the character just before startIndex
-  let pos = startIndex - 1;
-
-  // Skip trailing whitespace / newlines before the declaration
-  while (pos >= 0 && (source[pos] === ' ' || source[pos] === '\t' || source[pos] === '\n' || source[pos] === '\r')) {
-    pos--;
-  }
-
-  if (pos < 0) return undefined;
-
-  // ── TypeScript / JavaScript / Java / C++: JSDoc block /** ... */ ────────
-  if (
-    language === 'TypeScript' || language === 'JavaScript' ||
-    language === 'Java' || language === 'C++'
-  ) {
-    // Expect closing */ of a JSDoc block
-    if (source[pos] === '/' && pos > 0 && source[pos - 1] === '*') {
-      const closePos = pos - 1; // points at '*' of closing '*/'
-      // Find opening /**
-      const openIdx = source.lastIndexOf('/**', closePos);
-      if (openIdx === -1) return undefined;
-      const inner = source.slice(openIdx + 3, closePos - 0);
-      // Remove leading * on each line, find first non-empty, non-@ line
-      const firstLine = inner
-        .split('\n')
-        .map(l => l.replace(/^\s*\*\s?/, '').trim())
-        .find(l => l.length > 0 && !l.startsWith('@'));
-      return firstLine ?? undefined;
-    }
-    return undefined;
-  }
-
-  // ── Go: // comment lines immediately before ──────────────────────────────
-  if (language === 'Go') {
-    const lines: string[] = [];
-    // Walk backward line by line
-    let lineEnd = pos;
-    while (lineEnd >= 0) {
-      // Find start of this line
-      let lineStart = lineEnd;
-      while (lineStart > 0 && source[lineStart - 1] !== '\n') lineStart--;
-      const line = source.slice(lineStart, lineEnd + 1).trimEnd();
-      const trimmed = line.trim();
-      if (trimmed.startsWith('//')) {
-        lines.unshift(trimmed.slice(2).trim());
-        lineEnd = lineStart - 1;
-        // Skip over the newline
-        while (lineEnd >= 0 && (source[lineEnd] === '\n' || source[lineEnd] === '\r')) lineEnd--;
-      } else {
-        break;
-      }
-    }
-    return lines.find(l => l.length > 0) ?? undefined;
-  }
-
-  // ── Rust / Swift: /// doc comment lines immediately before ─────────────
-  if (language === 'Rust' || language === 'Swift') {
-    const lines: string[] = [];
-    let lineEnd = pos;
-    while (lineEnd >= 0) {
-      let lineStart = lineEnd;
-      while (lineStart > 0 && source[lineStart - 1] !== '\n') lineStart--;
-      const line = source.slice(lineStart, lineEnd + 1).trimEnd();
-      const trimmed = line.trim();
-      if (trimmed.startsWith('///')) {
-        lines.unshift(trimmed.slice(3).trim());
-        lineEnd = lineStart - 1;
-        while (lineEnd >= 0 && (source[lineEnd] === '\n' || source[lineEnd] === '\r')) lineEnd--;
-      } else {
-        break;
-      }
-    }
-    return lines.find(l => l.length > 0) ?? undefined;
-  }
-
-  // ── Ruby: # comment lines immediately before ─────────────────────────────
-  if (language === 'Ruby') {
-    const lines: string[] = [];
-    let lineEnd = pos;
-    while (lineEnd >= 0) {
-      let lineStart = lineEnd;
-      while (lineStart > 0 && source[lineStart - 1] !== '\n') lineStart--;
-      const line = source.slice(lineStart, lineEnd + 1).trimEnd();
-      const trimmed = line.trim();
-      if (trimmed.startsWith('#')) {
-        lines.unshift(trimmed.slice(1).trim());
-        lineEnd = lineStart - 1;
-        while (lineEnd >= 0 && (source[lineEnd] === '\n' || source[lineEnd] === '\r')) lineEnd--;
-      } else {
-        break;
-      }
-    }
-    return lines.find(l => l.length > 0) ?? undefined;
-  }
-
-  return undefined;
-}
-
-/**
- * Extract the function declaration (signature without body) from
- * `source.slice(startIndex, endIndex)`.
- *
- * Strategy:
- * - TS/JS/Java/C++/Go/Rust/Ruby: take everything up to the first `{` at depth 0
- * - Python: take everything up to the first `:` that ends the `def` line
- *
- * Whitespace is normalized (multiple spaces/newlines → single space).
- * Limited to 300 characters max.
- */
-function extractDeclaration(
-  source: string,
-  startIndex: number,
-  endIndex: number,
-  language: string
-): string {
-  const slice = source.slice(startIndex, Math.min(endIndex, startIndex + 1500));
-
-  let decl: string;
-
-  if (language === 'Python') {
-    // Take up to (not including) the first `:` that ends the def line
-    // We scan for `:` while tracking parenthesis depth to avoid matching
-    // colons inside type annotations (e.g., def f(x: int) -> dict[str, int]:)
-    let depth = 0;
-    let end = -1;
-    for (let i = 0; i < slice.length; i++) {
-      const ch = slice[i];
-      if (ch === '(' || ch === '[' || ch === '{') depth++;
-      else if (ch === ')' || ch === ']' || ch === '}') depth--;
-      else if (ch === ':' && depth === 0) {
-        end = i;
-        break;
-      }
-    }
-    decl = end !== -1 ? slice.slice(0, end) : slice.slice(0, 300);
-  } else {
-    // Find first `{` at brace depth 0
-    let depth = 0;
-    let end = -1;
-    for (let i = 0; i < slice.length; i++) {
-      const ch = slice[i];
-      if (ch === '{') {
-        if (depth === 0) { end = i; break; }
-        depth++;
-      } else if (ch === '}') {
-        depth--;
-      }
-    }
-    decl = end !== -1 ? slice.slice(0, end) : slice.slice(0, 300);
-  }
-
-  // Normalize whitespace
-  return decl.replace(/\s+/g, ' ').trim().slice(0, 300);
-}
-
 // ============================================================================
-// CFG / DATA-FLOW OVERLAY HELPER (spec: add-intraprocedural-cfg-dataflow-overlay)
+// CFG / DATA-FLOW OVERLAY HELPER — buildCfgFor extracted to ./call-graph-cfg.ts
+// (change: modularize-call-graph-builder; spec: add-intraprocedural-cfg-dataflow-overlay).
+// Imported at the top of this file; file-internal, not re-exported.
 // ============================================================================
-
-/**
- * Build the per-function CFG + reaching-definitions overlay for one function
- * while its parse tree is still live. `fnNode` is the node captured as the
- * function (may be a declaration wrapper, e.g. a `const f = () => {}`
- * lexical_declaration); this resolves to the node that actually owns the body
- * so arrow/function-expression bodies and params are analyzed too. Fail-soft:
- * returns undefined for unsupported languages or any analysis surprise.
- */
-function buildCfgFor(fnNode: CfgNode, language: string): FunctionCfg | undefined {
-  // The overlay is strictly additive: a CFG-builder surprise (an unexpected
-  // grammar shape, a partially-loaded optional grammar after the tree-sitter
-  // deps became optional) must never propagate and drop the function's node/edge
-  // data from the call graph — or, in watch mode, roll back the per-file swap.
-  // Fail soft to no overlay; the base call graph is unaffected.
-  try {
-    let target = fnNode;
-    if (!fnNode.childForFieldName('body')) {
-      // Dig (breadth-first) for the node that actually owns the body: a TS arrow/
-      // function-expression assigned to a variable, or — crucially — the inner
-      // `function_definition` of a Python `@decorator`'d function, whose captured
-      // node is the `decorated_definition` wrapper (no `body` field of its own).
-      const stack = [...fnNode.namedChildren];
-      while (stack.length) {
-        const n = stack.shift()!;
-        if (
-          (n.type === 'arrow_function' || n.type === 'function_expression' ||
-           n.type === 'function' || n.type === 'function_definition') &&
-          n.childForFieldName('body')
-        ) { target = n; break; }
-        stack.push(...n.namedChildren);
-      }
-    }
-    return buildFunctionCfg(target as unknown as CfgNode, language);
-  } catch (error) {
-    if (process.env.DEBUG) {
-      console.debug(`[cfg] overlay skipped for a ${language} function: ${(error as Error).message}`);
-    }
-    return undefined;
-  }
-}
 
 // ============================================================================
 // TYPESCRIPT EXTRACTOR
@@ -3357,7 +2754,10 @@ function buildClassNodes(
 }
 
 // ============================================================================
-// EXTERNAL NODE HELPER
+// EXTERNAL NODE HELPER — classifyExternal + getOrCreateExternalNode extracted to
+// ./call-graph-external.ts (change: modularize-call-graph-builder); imported at the
+// top of this file. (The isTestFile note below documents a top-level import and is
+// unrelated to the external-node helpers — kept in place.)
 // ============================================================================
 
 // isTestFile is imported at the top of the file from ./test-file.js — the shared
@@ -3366,91 +2766,11 @@ function buildClassNodes(
 // tests/, __tests__/, *Spec.kt, etc. leak into the production graph and dropped
 // `tested_by` edges for those layouts.)
 
-const EXTERNAL_HTTP_RE = /^(fetch|axios|got|superagent|node-fetch|ky|request|https?|xmlhttprequest|grpc|undici|requests|aiohttp|httpx|urllib|urllib2|urllib3|curl|curleasy|pycurl|http|httpclient|httpurlconnection|reqwest|hyper|ureq|isahc|surf|net|faraday|httparty|rest|typhoeus|excon|okhttp|retrofit|feign|resttemplate|webclient|urlsession|alamofire|moya)$/;
-const EXTERNAL_DB_RE = /^(pg|mysql|mysql2|sqlite|sqlite3|redis|ioredis|mongoose|mongo|mongodb|prisma|knex|sequelize|typeorm|drizzle|cassandra|dynamodb|firestore|supabase|neo4j|influxdb|clickhouse|kysely|psycopg2|psycopg|sqlalchemy|pymysql|asyncpg|motor|aiomysql|tortoise|sql|gorm|sqlx|pgx|bun|diesel|seaorm|rusqlite|activerecord|sequel|jdbc|hibernate|jpa|entitymanager|datasource|jdbctemplate|r2dbc|coredata|grdb|realm)$/;
-const EXTERNAL_FS_RE = /^(fs|fsp|readfile|writefile|readdir|stat|mkdir|unlink|rename|copyfile|createreadstream|createwritestream|open|fopen|fread|fwrite|fclose|remove|ifstream|ofstream|fstream|os|path|file)$/;
-const EXTERNAL_STDLIB_BASES = new Set([
-  // JavaScript / Node.js
-  'array', 'object', 'string', 'number', 'math', 'json', 'date', 'regexp',
-  'promise', 'map', 'set', 'weakmap', 'weakset', 'symbol', 'reflect', 'proxy',
-  'console', 'error', 'buffer', 'process', 'int8array', 'uint8array',
-  // Python
-  'os', 'sys', 're', 'io', 'abc', 'ast', 'csv', 'copy', 'enum', 'glob',
-  'gzip', 'hmac', 'html', 'http', 'logging', 'operator', 'pathlib', 'pickle',
-  'pprint', 'queue', 'random', 'shutil', 'signal', 'socket', 'ssl', 'struct',
-  'subprocess', 'tempfile', 'threading', 'time', 'traceback', 'typing', 'uuid',
-  'warnings', 'collections', 'functools', 'itertools', 'contextlib',
-  'dataclasses', 'unittest', 'hashlib', 'base64', 'binascii', 'codecs',
-  'inspect', 'importlib', 'weakref', 'gc', 'platform', 'shlex', 'textwrap',
-  // C / C++
-  'std', 'printf', 'fprintf', 'sprintf', 'snprintf', 'scanf', 'malloc',
-  'calloc', 'realloc', 'free', 'memcpy', 'memmove', 'memset', 'memcmp',
-  'strlen', 'strcpy', 'strncpy', 'strcat', 'strcmp', 'strncmp', 'strstr',
-  'assert', 'abort', 'exit', 'atexit',
-  // Go
-  'fmt', 'log', 'sort', 'sync', 'atomic', 'bytes', 'errors', 'context',
-  'reflect', 'runtime', 'bufio', 'unicode', 'strings', 'strconv', 'math',
-  'rand', 'time', 'flag', 'testing',
-  // Rust
-  'vec', 'option', 'result', 'iter', 'collections', 'thread', 'env',
-  'cell', 'rc', 'arc', 'mutex', 'rwlock', 'channel', 'mpsc',
-  // Ruby
-  'integer', 'float', 'numeric', 'enumerable', 'comparable', 'kernel',
-  'module', 'class', 'basicobject', 'nilclass', 'trueclass', 'falseclass',
-  'symbol', 'regexp', 'range', 'proc', 'method', 'encoding',
-  // Java
-  'system', 'integer', 'long', 'double', 'boolean', 'character',
-  'list', 'arraylist', 'linkedlist', 'hashmap', 'treemap', 'hashset', 'treeset',
-  'optional', 'stream', 'arrays', 'collections', 'objects', 'math',
-  'thread', 'runnable', 'exception', 'runtimeexception', 'illegalargumentexception',
-  'stringbuilder', 'stringbuffer', 'scanner',
-  // Swift
-  'int', 'double', 'bool', 'dictionary', 'swift', 'foundation',
-  'dispatchqueue', 'notificationcenter', 'nsstring', 'nsarray', 'nsdictionary',
-]);
-const EXTERNAL_NOISE_RECEIVERS = new Set([
-  'response', 'body', 't', 'err', 'error', 'buf', 'str', 'res', 'req', 'data', 'result',
-]);
-
-function classifyExternal(name: string): ExternalKind {
-  const base = name.split('.')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
-  if (EXTERNAL_HTTP_RE.test(base)) return 'http';
-  if (EXTERNAL_DB_RE.test(base)) return 'database';
-  if (EXTERNAL_FS_RE.test(base)) return 'filesystem';
-  if (EXTERNAL_STDLIB_BASES.has(base)) return 'stdlib';
-  if (name.includes('.') && EXTERNAL_NOISE_RECEIVERS.has(name.split('.')[0].toLowerCase())) return 'stdlib';
-  return 'unknown';
-}
-
-function getOrCreateExternalNode(name: string, nodes: Map<string, FunctionNode>): FunctionNode {
-  const id = `external::${name}`;
-  if (!nodes.has(id)) {
-    nodes.set(id, {
-      id, name, filePath: 'external', isExternal: true,
-      externalKind: classifyExternal(name),
-      isAsync: false, language: 'external',
-      startIndex: 0, endIndex: 0, fanIn: 0, fanOut: 0,
-    });
-  }
-  return nodes.get(id)!;
-}
-
 // ============================================================================
-// CYCLOMATIC COMPLEXITY
+// CYCLOMATIC COMPLEXITY — extracted to ./call-graph-complexity.ts
+// (change: modularize-call-graph-builder). computeCyclomaticComplexity is imported
+// at the top of this file and re-exported there to keep the public surface stable.
 // ============================================================================
-
-const CC_PATTERN_PYTHON = /\bif\s|\belif\s|\bwhile\s|\bfor\s|\bexcept\b|\band\s|\bor\s/g;
-const CC_PATTERN_DEFAULT = /\bif\s*\(|\bwhile\s*\(|\bfor\s*[(]|\bdo\s*[{]|\bcase\s+|\bcatch\s*\(|&&|\|\|/g;
-
-/**
- * McCabe cyclomatic complexity via regex over function body.
- * CC = 1 + decision points (if, while, for, case, catch, &&, ||).
- * Approximate (regex, not AST), suitable for triage/ranking.
- */
-export function computeCyclomaticComplexity(body: string, language: string): number {
-  const source = language === 'Python' ? CC_PATTERN_PYTHON.source : CC_PATTERN_DEFAULT.source;
-  return 1 + (body.match(new RegExp(source, 'g'))?.length ?? 0);
-}
 
 // ============================================================================
 // CALL GRAPH BUILDER

@@ -48,6 +48,7 @@ import { readPanicState, mutatePanicStateLocked, getPanicSignalText } from '../.
 import { emit } from '../../core/services/telemetry.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { MCP_TOOL_MAX_BYTES, LEAN_DEFAULT_PRESET, FULL_PRESET, FULL_PRESET_ALIAS } from '../../constants.js';
+import { capabilityFamily, groupToolsByFamily } from '../../core/services/mcp-handlers/tool-contract.js';
 import {
   handleGetCallGraph,
   handleGetSubgraph,
@@ -277,6 +278,8 @@ export const TOOL_DEFINITIONS = [
       'Detects Type 1 (exact clones — identical after whitespace/comment normalization), ' +
       'Type 2 (structural clones — same structure with renamed variables), and ' +
       'Type 3 (near-clones with Jaccard similarity ≥ 0.7 on token n-grams). ' +
+      'This is the WHOLE-REPO audit of every clone group; for the pre-write "does a near-duplicate ' +
+      'of THIS function already exist?" one-vs-all query, use find_clones instead. ' +
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
@@ -517,7 +520,9 @@ export const TOOL_DEFINITIONS = [
       'Walks the call graph BACKWARD from the change to every test that transitively reaches it, ' +
       'with the reaching path per test. Deterministic, offline, no test run. ' +
       'It is an over-approximate PRIORITIZER (run these first), not a sound replacement for the full ' +
-      'suite — the response states its confidence and coverage. Run analyze_codebase first.',
+      'suite — the response states its confidence and coverage. The exact inverse of report_coverage_gaps ' +
+      '(which finds important code NO test reaches); this finds the reaching tests FOR a change. ' +
+      'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -547,7 +552,9 @@ export const TOOL_DEFINITIONS = [
       'conclusion-shaped briefing: affected callers and layers crossed (analyze_impact), the tests ' +
       'to run (select_tests), the anchored memories/decisions the diff will turn drifted/orphaned and ' +
       'the specs it will make stale (check_spec_drift). No LLM, no new analysis — pure orchestration. ' +
-      'Advisory: it informs, you act. Run analyze_codebase first.',
+      'Advisory: it informs, you act. Distinct from its change-family siblings: structural_diff is the raw ' +
+      'graph delta + newly-stale callers, change_impact_certificate certifies the paths a diff newly opens ' +
+      'into a sensitive surface; this is the all-in-one pre-commit briefing. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -614,7 +621,9 @@ export const TOOL_DEFINITIONS = [
       '"whose callers are now stale?". A graph diff (complement to git diff) between two states ' +
       '(working tree vs a ref, or two refs): functions/edges added & removed, signature changes, ' +
       'and the existing callers now STALE because a callee signature moved under them. ' +
-      'Rename/move ambiguity is flagged, not guessed. Deterministic, offline. Run analyze_codebase ' +
+      'Rename/move ambiguity is flagged, not guessed. Deterministic, offline. This is the raw graph delta; ' +
+      'for the all-in-one pre-commit briefing use blast_radius, and for paths a diff newly opens into a ' +
+      'sensitive surface use change_impact_certificate. Run analyze_codebase ' +
       'first for stale-caller analysis. Opt-in escape check: pass declaredFootprint to also flag ' +
       'symbols modified OUTSIDE the declared write-set and conflicts they open against peerFootprints.',
     inputSchema: {
@@ -1487,7 +1496,9 @@ export const TOOL_DEFINITIONS = [
       'Certify what the current diff touches before it lands. ONE conclusion-shaped certificate: blast ' +
       'radius, the paths the change NEWLY OPENS into each declared covering surface (reachable after but ' +
       'not before — computed differentially), drifted specs, and tests to run. Decays via the freshness ' +
-      'lease; advisory, never blocks. Declare surfaces under "impactCertificate.surfaces". No LLM.',
+      'lease; advisory, never blocks. Declare surfaces under "impactCertificate.surfaces". Unlike its ' +
+      'change-family siblings — blast_radius (all-in-one pre-commit briefing) and structural_diff (raw graph ' +
+      'delta + stale callers) — this certifies the paths a diff NEWLY OPENS into a sensitive surface. No LLM.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1507,7 +1518,9 @@ export const TOOL_DEFINITIONS = [
       'symbols/files each), returns the plan: a hazard-typed conflict graph (WAW/shared-append/RAW/WAR/' +
       'soft-coupling), a wave schedule (wave 1 = dispatch now), and the critical path (minimum rounds ' +
       'with unlimited agents). Stateless, advisory; re-invoke with remaining tasks to re-plan. Mark ' +
-      'registration-site touches writeMode:"append" so they are not falsely serialized. Run ' +
+      'registration-site touches writeMode:"append" so they are not falsely serialized. Same hazard ' +
+      'classifier as map_in_flight_conflicts, different input: this plans a caller-supplied task list, ' +
+      'map_in_flight_conflicts harvests changes already in flight (branches/PRs). Run ' +
       'analyze_codebase first.',
     inputSchema: {
       type: 'object',
@@ -1543,7 +1556,9 @@ export const TOOL_DEFINITIONS = [
       '(WAW/RAW/shared-append/WAR) then runs across all nodes. Returns per conflict: the two actors, ' +
       'hazard, shared symbols, suggested landing order. A change whose diff can\'t be fetched or whose ' +
       'symbols don\'t resolve is "not assessed", never "no conflict". Read-only, stateless, advisory; ' +
-      'opt-in federation matches across repos by stable id. Run analyze_codebase first.',
+      'opt-in federation matches across repos by stable id. Same hazard classifier as plan_parallel_work, ' +
+      'different input: this harvests changes already in flight, plan_parallel_work plans a caller-supplied ' +
+      'task list. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2051,13 +2066,52 @@ function toolTitle(name: string): string {
   return name.split('_').map(w => (w ? w[0].toUpperCase() + w.slice(1) : w)).join(' ');
 }
 
-/** Full MCP `annotations` for a tool: read/write hints + title + openWorldHint (spec-11). */
+/**
+ * Full MCP `annotations` for a tool: read/write hints + title + openWorldHint
+ * (spec-11) + capability family (mcp-quality: CapabilityFamilyTaxonomy). The
+ * `family` is the machine-readable grouping key that makes the full surface
+ * discoverable by family rather than as a flat list, so a client can present
+ * ~6 families and a handful of tools per family.
+ */
 export function toolAnnotations(name: string): Record<string, unknown> {
   return {
     title: toolTitle(name),
     ...(TOOL_ANNOTATIONS[name] ?? _RO),
     openWorldHint: OPEN_WORLD_TOOLS.has(name),
+    ...(capabilityFamily(name) ? { family: capabilityFamily(name) } : {}),
   };
+}
+
+/**
+ * Render a tool surface grouped by capability family, for `openlore mcp --list-tools`
+ * (mcp-quality: CapabilityFamilyTaxonomy — "the full surface SHALL be discoverable by
+ * family"). This is the human-facing counterpart to the machine-readable
+ * `annotations.family` carried on the wire: an operator inspecting the surface sees ~6
+ * family groups and the tools within one, not a flat list. Pure; returns the text.
+ */
+export function renderToolSurfaceByFamily(tools: Array<{ name: string }>, presetLabel: string): string {
+  const groups = groupToolsByFamily(tools);
+  const toolWord = tools.length === 1 ? 'tool' : 'tools';
+  const familyWord = groups.length === 1 ? 'family' : 'families';
+  const lines: string[] = [`OpenLore MCP tool surface — ${presetLabel} (${tools.length} ${toolWord}, ${groups.length} ${familyWord}):`];
+  for (const { label, tools: familyTools } of groups) {
+    lines.push('');
+    lines.push(label);
+    for (const t of familyTools) lines.push(`  - ${t.name}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Resolve the active tool surface for a selector and render it grouped by family,
+ * for `openlore mcp --list-tools`. Pure (throws on an unknown preset, exactly as
+ * `selectActiveTools` does) so the grouping + selection composition is unit-testable
+ * without driving the CLI process. The short-circuit in `startMcpServer` is thin glue
+ * over this.
+ */
+export function renderActiveToolSurface(selectorOpts: { minimal?: boolean; preset?: string; allTools?: boolean }): string {
+  const tools = selectActiveTools(TOOL_DEFINITIONS, selectorOpts);
+  return renderToolSurfaceByFamily(tools, resolvePresetName(selectorOpts));
 }
 
 const MINIMAL_TOOLS = new Set([
@@ -2111,6 +2165,22 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
   // add-cross-actor-interference-map).
   coordination: new Set([
     'orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'analyze_impact', 'find_path',
+  ]),
+  // Both faces of the substrate (change: unify-navigation-and-governance-substrate;
+  // architecture: UnifiedStructuralSubstrate). The `navigation` graph-traversal core
+  // PLUS the three highest-value governance *reads* — recall (what is known about the
+  // code I'm touching), verify_claim (settle an assertion before it reaches a human),
+  // blast_radius (weigh a diff). So an out-of-box agent gets the value of the WHOLE
+  // substrate — navigate, recall, verify, weigh — not navigation alone. Holds governance
+  // READS only: no remember/record_decision write, no commit gate. The *active* default
+  // stays `navigation` until the agent benchmark shows `substrate` does not regress
+  // selection accuracy or token economy (ADR-0022 evidence-backed default); until then
+  // this ships as a selectable preset.
+  substrate: new Set([
+    'orient', 'search_code', 'get_subgraph', 'trace_execution_path',
+    'analyze_impact', 'suggest_insertion_points', 'get_function_skeleton',
+    'get_landmarks', 'get_map', 'find_path',
+    'recall', 'verify_claim', 'blast_radius',
   ]),
 };
 
@@ -2167,6 +2237,9 @@ interface McpServerOptions {
   minimal?: boolean;
   preset?: string;
   allTools?: boolean;
+  /** Print the active tool surface grouped by capability family to stdout and exit,
+   * without starting the JSON-RPC transport (change: unify-navigation-and-governance-substrate). */
+  listTools?: boolean;
 }
 
 /**
@@ -2179,10 +2252,11 @@ interface McpServerOptions {
  */
 export const BREADTH_POINTER =
   'OpenLore is running its lean default tool surface (the navigation core). ' +
-  'More tools are available behind named presets — governance (`--preset minimal`), ' +
-  'memory (`--preset memory`), claim verification (`--preset verify`), ' +
-  'multi-repo federation (`--preset federation`), or the full surface ' +
-  '(`--preset full`). Re-wire with `openlore install --preset <name>`.';
+  'More tools are available behind named presets — both faces of the substrate ' +
+  '(`--preset substrate` = navigation + recall + verify_claim + blast_radius), ' +
+  'governance (`--preset minimal`), memory (`--preset memory`), claim verification ' +
+  '(`--preset verify`), multi-repo federation (`--preset federation`), or the full ' +
+  'surface (`--preset full`). Re-wire with `openlore install --preset <name>`.';
 
 /**
  * True when the active surface IS the lean default (the `navigation` preset) —
@@ -2199,6 +2273,24 @@ export function leanDefaultActive(opts: { minimal?: boolean; preset?: string; al
 }
 
 async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
+  // --list-tools: print the active surface grouped by capability family and exit,
+  // WITHOUT starting the JSON-RPC transport. This runs before the stdout→stderr
+  // redirection below precisely because here stdout is a normal terminal, not the
+  // protocol stream (mcp-quality: CapabilityFamilyTaxonomy discoverability).
+  if (options.listTools) {
+    const selectorOpts = { minimal: options.minimal, preset: options.preset, allTools: options.allTools };
+    let surface: string;
+    try {
+      surface = renderActiveToolSurface(selectorOpts);
+    } catch (e) {
+      // Unknown preset: fail like a CLI usage error (clean message, exit 2), never start the server.
+      process.stderr.write(`${(e as Error).message}\n`);
+      process.exit(2);
+    }
+    process.stdout.write(surface + '\n');
+    return;
+  }
+
   // The MCP stdio transport uses stdout EXCLUSIVELY for the JSON-RPC stream.
   // Any stray write to stdout — e.g. logger.success("Successfully validated
   // directory…") from validateDirectory(), which runs on nearly every tool
@@ -2589,6 +2681,7 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the lean "navigation" surface — the benchmark-winning graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) — NOT the full registry. "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + analyze_impact + find_path; "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
+  .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the lean "navigation" surface — the benchmark-winning graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) — NOT the full registry. "substrate" = the navigation core + recall + verify_claim + blast_radius (both faces of the substrate; the evidence-gated wider default); "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + analyze_impact + find_path; "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
   .option('--all-tools', `Expose the full surface — all ${TOOL_DEFINITIONS.length} tools (alias for --preset full). Opt-in breadth; the lean navigation default is recommended.`)
+  .option('--list-tools', 'Print the active tool surface grouped by capability family (navigate/change/remember/verify/coordinate/federate) and exit — does not start the server. Respects --preset / --all-tools.')
   .action((options: McpServerOptions) => startMcpServer(options));

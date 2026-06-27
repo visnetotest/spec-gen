@@ -105,7 +105,10 @@ export async function buildIndex(cwd: string): Promise<void> {
     const { analyzeCommand } = await import('../commands/analyze.js');
     logger.discovery('Building search index (BM25; no network required)…');
     console.log = toStderr;
-    await analyzeCommand.parseAsync([], { from: 'user' });
+    // `--embedded`: install does the agent wiring (CLAUDE.md/.mcp.json/hooks) itself,
+    // so analyze must NOT also print its agent-onboarding tips or the "run generate"
+    // next-step — those contradict install's own output on the first-run path.
+    await analyzeCommand.parseAsync(['--embedded'], { from: 'user' });
     console.log = origLog;
     logger.success('Index built — orient() will return results in your next session.');
   } catch (err) {
@@ -291,7 +294,7 @@ export const installCommand = new Command('install')
     'to call orient(), then build the index so orient works on your first session.'
   )
   .option('--agent <name>', 'Install only for a specific surface (claude-code, cursor, cline, continue, agents-md)')
-  .option('--preset <name>', 'Wire the registered MCP server to a tool preset (minimal, navigation, memory, verify, federation, or full). Default (no preset) wires the lean navigation surface; pass "full" to wire all 62 tools (the prior default).')
+  .option('--preset <name>', 'Wire the registered MCP server to a tool preset (navigation, substrate, minimal, memory, verify, federation, coordination, or full). Default (no preset) wires the lean navigation surface; "substrate" adds the governance reads recall + verify_claim + blast_radius; pass "full" to wire the full surface (the prior default).')
   .option('--all-tools', 'Wire the full surface (alias of --preset full). Matches `openlore mcp --all-tools`.')
   .option('--dry-run', 'Print the planned changes without writing any files', false)
   .option('--force', 'Overwrite OpenLore-managed blocks even if hand-edited', false)

@@ -7,7 +7,7 @@
  * surface), and the selector's precedence/error behaviour must hold.
  */
 import { describe, it, expect } from 'vitest';
-import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS, mcpCommand, BREADTH_POINTER, leanDefaultActive, resolvePresetName } from './mcp.js';
+import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS, mcpCommand, BREADTH_POINTER, leanDefaultActive, resolvePresetName, renderToolSurfaceByFamily, renderActiveToolSurface } from './mcp.js';
 import { LEAN_DEFAULT_PRESET } from '../../constants.js';
 
 const NAV = [
@@ -57,6 +57,85 @@ describe('MCP tool presets', () => {
     for (const sel of [{}, { minimal: true }, { preset: 'memory' }, { preset: 'navigation' }, { preset: 'verify' }] as const) {
       expect(selectActiveTools(TOOL_DEFINITIONS, sel).map(t => t.name)).not.toContain('map_in_flight_conflicts');
     }
+  });
+
+  // change: unify-navigation-and-governance-substrate — the `substrate` preset spans BOTH
+  // faces: the navigation graph-traversal core plus the three highest-value governance
+  // READS (recall, verify_claim, blast_radius). It holds reads only — no remember /
+  // record_decision write, no commit gate. The active default stays `navigation` until the
+  // benchmark clears `substrate` (ADR-0022 evidence-backed default), so `substrate` must
+  // NOT be the no-selector default surface.
+  it('substrate preset = navigation core + recall + verify_claim + blast_radius (reads only)', () => {
+    const tools = selectActiveTools(TOOL_DEFINITIONS, { preset: 'substrate' }).map(t => t.name);
+    expect(new Set(tools)).toEqual(new Set([...NAV, 'recall', 'verify_claim', 'blast_radius']));
+    // governance WRITES / gate must never be in the both-faces reads preset
+    for (const write of ['remember', 'record_decision', 'approve_decision', 'sync_decisions']) {
+      expect(tools).not.toContain(write);
+    }
+  });
+
+  it('substrate is a selectable preset, never the no-selector default (default stays navigation)', () => {
+    // Until the benchmark clears the wider default, no-selector resolves to navigation.
+    expect(resolvePresetName({})).toBe(LEAN_DEFAULT_PRESET);
+    expect(LEAN_DEFAULT_PRESET).toBe('navigation');
+    expect(selectActiveTools(TOOL_DEFINITIONS, {}).map(t => t.name)).not.toContain('recall');
+    expect(selectActiveTools(TOOL_DEFINITIONS, {}).map(t => t.name)).not.toContain('verify_claim');
+  });
+
+  // change: unify-navigation-and-governance-substrate — `--list-tools` renders the active
+  // surface grouped by capability family (the human-facing counterpart to the on-the-wire
+  // annotations.family). It is the production consumer of groupToolsByFamily.
+  it('renderToolSurfaceByFamily groups the substrate surface by family, covering every tool', () => {
+    const tools = selectActiveTools(TOOL_DEFINITIONS, { preset: 'substrate' });
+    const text = renderToolSurfaceByFamily(tools, 'substrate');
+    // Header states the surface, tool count, and family count (both faces → 4 families).
+    expect(text).toMatch(/substrate \(13 tools, 4 families\)/);
+    // Family group headers appear, in canonical order; every tool is listed exactly once.
+    expect(text).toContain('Navigate —');
+    expect(text).toContain('Change —');
+    expect(text).toContain('Remember —');
+    expect(text).toContain('Verify —');
+    for (const t of tools) expect(text).toContain(`  - ${t.name}`);
+    const listed = [...text.matchAll(/^ {2}- (.+)$/gm)].map(m => m[1]).sort();
+    expect(listed).toEqual(tools.map(t => t.name).sort());
+  });
+
+  it('renderToolSurfaceByFamily pluralizes a single-family surface correctly', () => {
+    const navTools = selectActiveTools(TOOL_DEFINITIONS, { preset: 'navigation' });
+    const text = renderToolSurfaceByFamily(navTools, 'navigation');
+    expect(text).toMatch(/navigation \(10 tools, 1 family\)/); // "family", not "families"
+  });
+
+  it('renderToolSurfaceByFamily lists all six families for the full surface', () => {
+    const text = renderToolSurfaceByFamily(TOOL_DEFINITIONS, 'full');
+    expect(text).toMatch(/full \(\d+ tools, 6 families\)/);
+    for (const label of ['Navigate —', 'Change —', 'Remember —', 'Verify —', 'Coordinate —', 'Federate —']) {
+      expect(text).toContain(label);
+    }
+  });
+
+  // renderActiveToolSurface is the testable core of `--list-tools`: it composes the
+  // preset selection with the family grouping, so a regression in either is caught in CI
+  // (the CLI short-circuit in startMcpServer is thin glue over it).
+  it('renderActiveToolSurface groups a multi-family preset (minimal spans navigate+change+remember)', () => {
+    const text = renderActiveToolSurface({ minimal: true });
+    expect(text).toMatch(/minimal \(6 tools, 3 families\)/);
+    expect(text).toContain('Navigate —');
+    expect(text).toContain('Change —'); // detect_changes
+    expect(text).toContain('Remember —'); // record_decision
+    // Tool placement follows the capability taxonomy, not the preset name.
+    expect(text).toMatch(/Change —[\s\S]*- detect_changes/);
+    expect(text).toMatch(/Remember —[\s\S]*- record_decision/);
+  });
+
+  it('renderActiveToolSurface throws on an unknown preset (so --list-tools exits 2, never starts the server)', () => {
+    expect(() => renderActiveToolSurface({ preset: 'bogus' })).toThrow(/Unknown --preset/);
+  });
+
+  // Guard the CLI wiring itself: the `--list-tools` option must stay registered, mirroring
+  // the existing --minimal/--preset guards. Without this, dropping the option line ships green.
+  it('mcp command registers the --list-tools option', () => {
+    expect(mcpCommand.options.find(o => o.long === '--list-tools')).toBeDefined();
   });
 
   // change: add-declarative-language-support-registry — get_language_support is FULL-surface
@@ -452,20 +531,38 @@ describe('tools/list payload budget (spec-28)', () => {
   // configuration analogue of analyze_impact: "what breaks if I remove this env var?"). It joins ONLY
   // the opt-in `full` surface; it stays OUT of the lean navigation default, so the lean prefix is
   // unchanged. The residual is the genuine cost of its schema. Conscious decision, not silent drift.
+  // Bumped 84_000 → 86_000 when the capability-family taxonomy (change:
+  // unify-navigation-and-governance-substrate) added a `family` annotation to every
+  // tool (~20 B × 72) plus the NoRedundantConclusions sibling cross-references on five
+  // adjacent tools' descriptions. The family key is the machine-readable grouping that
+  // makes the full surface discoverable by family rather than as a flat list — a
+  // conscious budget decision, not silent drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(84_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(86_000);
   });
 
   it('the lean DEFAULT surface (no selector) is the lean navigation payload, not the full one', () => {
     // No selector now pays the navigation budget, not the ~46 KB full prefix —
-    // this is the per-session byte win the change ships.
+    // this is the per-session byte win the change ships. Nav ceiling bumped
+    // 13_300 → 13_700 when the `family` annotation was added to every tool (the lean
+    // surface's 10 tools each carry `"family":"navigate"`) — conscious decision.
     expect(payloadBytes({})).toBe(payloadBytes({ preset: 'navigation' }));
-    expect(payloadBytes({})).toBeLessThan(13_300);
+    expect(payloadBytes({})).toBeLessThan(13_700);
     expect(payloadBytes({})).toBeLessThan(payloadBytes({ preset: 'full' }));
   });
 
   it('navigation preset stays lean (the low-overhead surface that wins the benchmark)', () => {
-    expect(payloadBytes({ preset: 'navigation' })).toBeLessThan(13_300);
+    expect(payloadBytes({ preset: 'navigation' })).toBeLessThan(13_700);
+  });
+
+  // change: unify-navigation-and-governance-substrate — the `substrate` both-faces
+  // preset is the navigation core + the three governance reads. It stays well under
+  // the full surface (governance reads only, no inventories/specs/coordination), so
+  // an out-of-box agent that opts into both faces still pays a small prefix.
+  it('substrate preset (both faces) stays well under the full surface', () => {
+    expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(20_000);
+    expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(payloadBytes({ preset: 'full' }));
+    expect(payloadBytes({ preset: 'substrate' })).toBeGreaterThan(payloadBytes({ preset: 'navigation' }));
   });
 
   // Lossless-dedup invariant: the `directory` input is shared by every tool, so its

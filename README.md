@@ -1,9 +1,9 @@
 <h1 align="center">OpenLore</h1>
 
 <p align="center">
-  <strong>A local-first, deterministic intelligence graph that eliminates repetitive file reads for AI coding agents</strong><br>
-  tracks context freshness, and unifies code, infrastructure, and architectural decisions<br>
-  into a single, safety-gated governance runtime.
+  <strong>Deterministic, local-first memory &amp; governance for AI coding agents.</strong><br>
+  Stop your agent re-reading the same files every task — one call returns the code a task touches and<br>
+  the risk of changing it. No API key, no LLM in the hot path.
 </p>
 
 <p align="center">
@@ -14,20 +14,16 @@
   <br>
   <img src="https://img.shields.io/badge/MCP-ready-7c3aed?logo=anthropic&logoColor=white" alt="MCP ready">
   <img src="https://img.shields.io/badge/languages-18%20%2B%2012%20IaC-f97316" alt="18 languages + 12 IaC ecosystems">
-  <img src="https://img.shields.io/badge/tests-5400%2B-success" alt="5400+ tests">
+  <img src="https://img.shields.io/badge/tests-5500%2B-success" alt="5500+ tests">
   <img src="https://img.shields.io/badge/API_key-not_required-0ea5e9" alt="No API key required">
   <a href="https://github.com/clay-good/OpenLore/stargazers"><img src="https://img.shields.io/github/stars/clay-good/OpenLore?style=social" alt="GitHub stars"></a>
 </p>
 
 <p align="center">
-  <img src="docs/openlore-gallery.png" alt="OpenLore — memory & knowledge graph for AI agents" width="640">
+  <img src="docs/openlore-demo.gif" alt="A real terminal recording (no edits, no narration) of the full lifecycle on a real Rust repo: `openlore install` sets it up in one command with no API key, `openlore orient` finds the code a task touches, `openlore blast-radius` flags a risky change before commit, and `openlore prove` estimates a ~84% cost / ~82% round-trip saving on this repo (a deterministic projection; the measured agent benchmark is ~26% fewer round-trips)" width="100%">
 </p>
 
-<p align="center">
-  <img src="docs/openlore-demo.gif" alt="OpenLore on Django (7,066 files): onboard once, then one deterministic orient() call replaces grepping and reading 75 files to find a function's 160-caller blast radius" width="100%">
-</p>
-
-<p align="center"><em>Onboard a 7,066-file repo once, then replace "grep 75 files and hope" with one deterministic call that returns the exact blast radius.</em></p>
+<p align="center"><em>The whole lifecycle on a real repo, straight from the terminal — no edits, no narration. <strong>Set up</strong> in one command (<code>openlore install</code>, no API key); then <strong>memory</strong> — <code>orient</code> finds the code a task touches; <strong>governance</strong> — <code>blast-radius</code> flags a risky change before you commit; <strong>proof</strong> — <code>prove</code> projects the payoff on your own repo (here a deterministic estimate: <strong>−84% cost / −82% round-trips</strong>; the <a href="#value-scorecard--does-it-pay-for-itself">measured agent benchmark</a> is <strong>−26% round-trips</strong>). Deterministic and local.</em></p>
 
 ---
 
@@ -260,7 +256,7 @@ One graph query replaces most exploratory file reads. The agent knows exactly wh
 
 ## Agent Cheat Sheet
 
-The default MCP surface is the lean **`navigation`** preset — 10 tools, the Spec 14 benchmark winner; the full surface of 72 tools is opt-in via `--preset full` (or `--all-tools`). Day-to-day work needs a handful — reach for the right one by situation:
+The default MCP surface is the lean **`navigation`** preset — 10 tools, the Spec 14 benchmark winner; the full surface of 72 tools is opt-in via `--preset full` (or `--all-tools`). For both faces of the substrate out of the box, `--preset substrate` adds the three highest-value governance *reads* — `recall`, `verify_claim`, `blast_radius` — to the navigation core (the active default stays `navigation` until a benchmark clears the wider one). Every tool also declares one of six **capability families** — `navigate` · `change` · `remember` · `verify` · `coordinate` · `federate` — surfaced in its MCP `annotations.family` and via `openlore mcp --list-tools`, so a wide surface stays discoverable by family rather than as a flat list. Day-to-day work needs a handful — reach for the right one by situation:
 
 | Situation | Tool |
 |-----------|------|
@@ -472,7 +468,7 @@ An optional layer built on the same EpistemicLease tracker that detects behavior
 
 Mode ladder, all **off by default**: `off` (zero overhead) · `observe` (score + record, no intervention) · `advisory` (surface a signal at L2+) · `experimental_blocking` (emit a runtime block signal at L4, `advisory:true` always present — the runtime decides; OpenLore never mandates). Commands: `panic-check` (PreToolUse hook consumer, always exits 0), `panic-level` (status line), `panic-validate` (the accuracy gate), `panic-hotspots` (per-module destabilization → memory), `panic-replay` / `panic-calibrate` (replay + accuracy measurement). Optional `gryph-watch` observes agents working purely via Bash/Edit/Read (fail-open when the `gryph` binary is absent).
 
-> **The gate**: a panic signal is a *judgment*, and a wrong one costs the tokens OpenLore exists to save. So **no interventional posture ships enabled-by-default until its accuracy is validated on data** — not asserted in code. `openlore panic-validate` reports the false-positive proxy, per-trigger attribution, and intervention follow-through from real `observe`-mode telemetry; `openlore panic-calibrate` measures discrimination against a labeled ground-truth corpus (and honestly documents where the signal is over-sensitive). The default is, and stays, `off`. See [`openspec/changes/adopt-agent-behavioral-governance/`](openspec/changes/adopt-agent-behavioral-governance/).
+> **The gate**: a panic signal is a *judgment*, and a wrong one costs the tokens OpenLore exists to save. So **no interventional posture ships enabled-by-default until its accuracy is validated on data** — not asserted in code. `openlore panic-validate` reports the false-positive proxy, per-trigger attribution, and intervention follow-through from real `observe`-mode telemetry; `openlore panic-calibrate` measures discrimination against a labeled ground-truth corpus (and honestly documents where the signal is over-sensitive). The default is, and stays, `off`. See [`openspec/changes/archive/adopt-agent-behavioral-governance/`](openspec/changes/archive/adopt-agent-behavioral-governance/).
 
 ---
 
@@ -665,7 +661,6 @@ Because OpenLore requires Node ≥22.5 while OpenSpec runs on ≥20.19, a delega
 | Agentic workflows (BMAD, Vibe, GSD, spec-kit) | [docs/agentic-workflows.md](docs/agentic-workflows.md) |
 | Troubleshooting | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 | Philosophy | [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) |
-| Telemetry & cognitive metrics | [docs/telemetry.md](docs/telemetry.md) |
 
 ---
 
@@ -710,9 +705,11 @@ Because OpenLore requires Node ≥22.5 while OpenSpec runs on ≥20.19, a delega
 ```bash
 npm install
 npm run build
-npm test          # 5400+ unit tests
+npm run test:run  # 5500+ unit tests, one-shot (npm test is watch mode)
 npm run typecheck
 ```
+
+New contributor? See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full setup, the agent-context / MCP wiring, and the commit gate. Please also read our [Code of Conduct](CODE_OF_CONDUCT.md); to report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ---
 
