@@ -26,7 +26,7 @@
 <p align="center"><em>The whole lifecycle on a real repo, straight from the terminal — no edits, no narration. <strong>Install</strong> in one command (no API key) → <strong>orient</strong> finds the code a task touches → <strong>blast-radius</strong> flags a risky change before you commit → <strong>prove</strong> projects the payoff on <em>your</em> repo. Deterministic and local.</em></p>
 
 <p align="center">
-  <strong><a href="#install-in-one-command">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#does-it-pay-for-itself">Benchmarks</a> · <a href="#governance--guardrails-on-what-your-agent-changes">Governance</a> · <a href="#how-it-works">How it works</a> · <a href="#openlore-vs-alternatives">vs. Alternatives</a> · <a href="#documentation">Docs</a></strong>
+  <strong><a href="#install-in-one-command">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#value-scorecard--does-it-pay-for-itself">Benchmarks</a> · <a href="#governance--guardrails-on-what-your-agent-changes">Governance</a> · <a href="#how-it-works">How it works</a> · <a href="#openlore-vs-alternatives">vs. Alternatives</a> · <a href="#documentation">Docs</a></strong>
 </p>
 
 ---
@@ -125,7 +125,7 @@ No LLM, no API key — the same grounded answer every run. Advisory by default; 
 
 ---
 
-## Does it pay for itself?
+## Value Scorecard — does it pay for itself?
 
 OpenLore only earns its place if an agent **with** it reaches a correct answer for less total cost than the same agent **without** it. We measure that inequality and publish it — wins **and** losses. Numbers are from the Spec 14 agent benchmark (`claude -p`, sonnet, N=4 medians, pinned SHAs, `--strict-mcp-config` isolating each arm), measured **2026-06-01**.
 
@@ -133,6 +133,8 @@ OpenLore only earns its place if an agent **with** it reaches a correct answer f
 |---|---|---|---|---|
 | **Large/unfamiliar repo · deep "how does X flow through Y"** *(its target)* | **−7% to −21%** | **−26%** | 100% = 100% | ✅ helps — and the win grows with repo size |
 | Small/familiar repo · shallow "who calls X" | **task-dependent** *(Round 1: +43%)* | **+38%** | 100% = 100% | ❌ often adds overhead — measure with `openlore prove` |
+
+> **Re-confirmed live 2026-06-03 (N=2):** the deep-task win **reproduces** — okhttp **−13%**. The small/familiar case is **task-dependent, not a flat loss**: same repo class, opposite outcomes (chalk **−32%** win vs express **+59%** loss). Don't guess from our repos — run **`openlore prove`** on yours.
 
 Deep-trace detail — the win scales with codebase size (cost Δ; round-trips WITHOUT → WITH):
 
@@ -290,7 +292,7 @@ The 8 multi-agent **workflow** skills (brainstorm, plan-refactor, write-tests, r
 | Long-session confidence decay (Epistemic Lease) | ❌ | ❌ | ✓ |
 | Offline structural analysis, no LLM in the hot path | ❌ | ❌ | ✓ |
 
-† **Measured, and it depends on the task** — full numbers in [Does it pay for itself?](#does-it-pay-for-itself). Small/familiar repos + shallow queries *add* overhead; larger codebases + deep questions are a net win (−7%→−21% cost, −26% tool-calls, scaling with repo size), at 100% answer correctness in both arms. The savings hold where OpenLore is designed to help, not on toy queries.
+† **Measured, and it depends on the task** — full numbers in the [Value Scorecard](#value-scorecard--does-it-pay-for-itself). Small/familiar repos + shallow queries *add* overhead; larger codebases + deep questions are a net win (−7%→−21% cost, −26% tool-calls, scaling with repo size), at 100% answer correctness in both arms. The savings hold where OpenLore is designed to help, not on toy queries.
 
 ---
 
@@ -363,7 +365,7 @@ Crucially, application code, Infrastructure-as-Code, and architectural **decisio
 
 **Decisions on the graph** *(API key for consolidation)* — Agents call `record_decision` before writing code; a pre-commit hook gates the commit until verified decisions are reviewed and written back as requirements. Decisions are also **first-class graph nodes**: projected into `decision::<id>` nodes joined to the files they govern by `affects` edges, so `analyze_impact` and `get_subgraph` return the governing decisions of a symbol and its blast radius as typed neighbors. → [docs/specs/openlore-spec-16-decisions-as-graph-nodes.md](docs/specs/openlore-spec-16-decisions-as-graph-nodes.md)
 
-**Epistemic Lease** *(no API key)* — Models architectural drift as a **navigation** phenomenon, not a knowledge one: decay is driven by where the agent goes (cross-module trajectory), time since `orient()`, and weighted cognitive load. Once context ages or the repo moves, every MCP response carries a brief, **factual** freshness note — *"informational signal; you decide whether to act on it"* — never a command. Calling `orient()` resets it; when fresh, injection is zero-overhead.
+**Epistemic Lease** *(no API key)* — Models architectural drift as a **navigation** phenomenon, not a knowledge one: decay is driven by where the agent goes (cross-module trajectory), time since `orient()`, and weighted cognitive load. Once context ages or the repo moves, every MCP response carries a brief, factual freshness note — *"informational signal; you decide whether to act on it"* — never a command. Calling `orient()` resets it; when fresh, injection is zero-overhead.
 
 **Structural change analysis** *(no API key)* — `structural_diff` is the structural complement to `git diff`: functions and edges added/removed, signature changes, and the callers in *other* files now **stale** because a callee's signature moved. → [docs/structural-diff.md](docs/structural-diff.md)
 
