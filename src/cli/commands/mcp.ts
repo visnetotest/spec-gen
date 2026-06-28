@@ -48,7 +48,7 @@ import { readPanicState, mutatePanicStateLocked, getPanicSignalText } from '../.
 import { emit } from '../../core/services/telemetry.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { MCP_TOOL_MAX_BYTES, LEAN_DEFAULT_PRESET, FULL_PRESET, FULL_PRESET_ALIAS } from '../../constants.js';
-import { capabilityFamily, groupToolsByFamily } from '../../core/services/mcp-handlers/tool-contract.js';
+import { capabilityFamily, groupToolsByFamily, resolveCanonicalToolName } from '../../core/services/mcp-handlers/tool-contract.js';
 import {
   handleGetCallGraph,
   handleGetSubgraph,
@@ -138,6 +138,18 @@ export {
 // constant trims that lossless repeat from the cached tools/list prefix without
 // dropping the one fact that matters (it must be absolute, not relative).
 const DIR_DESC = 'Absolute project path';
+
+/**
+ * Shared inputSchema property for the concise/detailed verbosity contract
+ * (ConciseByDefaultDetailedOnRequest). A verbose list tool returns a concise
+ * summary (total + a sample + a truncation receipt) by default and the full
+ * payload only when `responseFormat:"detailed"` is requested.
+ */
+const RESPONSE_FORMAT_PROP = {
+  type: 'string',
+  enum: ['concise', 'detailed'],
+  description: 'Output verbosity. "concise" (default): total + a sample + a truncation receipt. "detailed": the full inventory.',
+} as const;
 
 // Optional federation scope, shared by the four federation-aware conclusion tools
 // (analyze_impact, select_tests, find_dead_code, find_path). Inert unless an
@@ -280,6 +292,8 @@ export const TOOL_DEFINITIONS = [
       'Type 3 (near-clones with Jaccard similarity ≥ 0.7 on token n-grams). ' +
       'This is the WHOLE-REPO audit of every clone group; for the pre-write "does a near-duplicate ' +
       'of THIS function already exist?" one-vs-all query, use find_clones instead. ' +
+      'Returns a concise summary (stats + top clone groups + a truncation receipt) by default; ' +
+      'pass responseFormat:"detailed" for the full report. ' +
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
@@ -287,6 +301,11 @@ export const TOOL_DEFINITIONS = [
         directory: {
           type: 'string',
           description: 'Absolute path to the project directory (must have been analyzed first)',
+        },
+        responseFormat: {
+          type: 'string',
+          enum: ['concise', 'detailed'],
+          description: 'Output verbosity. "concise" (default): stats + the top clone groups + a truncation receipt. "detailed": the full report.',
         },
       },
       required: ['directory'],
@@ -1168,11 +1187,13 @@ export const TOOL_DEFINITIONS = [
       'Reads the pre-computed middleware-inventory.json artifact when available, ' +
       'otherwise scans source files live. ' +
       'Supports Express, Hono, Fastify, NestJS, Next.js, and more. ' +
+      'Returns a concise summary by default; pass responseFormat:"detailed" for the full inventory. ' +
       'Run analyze_codebase first for the fastest results.',
     inputSchema: {
       type: 'object',
       properties: {
         directory: { type: 'string', description: DIR_DESC },
+        responseFormat: RESPONSE_FORMAT_PROP,
       },
       required: ['directory'],
     },
@@ -1185,28 +1206,32 @@ export const TOOL_DEFINITIONS = [
       'Reads the pre-computed schema-inventory.json artifact when available, ' +
       'otherwise scans source files live. ' +
       'Supports Prisma, TypeORM, Drizzle ORM, and SQLAlchemy. ' +
+      'Returns a concise summary by default; pass responseFormat:"detailed" for the full inventory. ' +
       'Run analyze_codebase first for the fastest results.',
     inputSchema: {
       type: 'object',
       properties: {
         directory: { type: 'string', description: DIR_DESC },
+        responseFormat: RESPONSE_FORMAT_PROP,
       },
       required: ['directory'],
     },
   },
   {
-    name: 'get_ui_components',
+    name: 'get_ui_component_inventory',
     description:
       'Return the UI component inventory for the project: all detected components with ' +
       'their framework, props, source file, and line number. ' +
       'Reads the pre-computed ui-inventory.json artifact when available, ' +
       'otherwise scans source files live. ' +
       'Supports React, Vue, Svelte, and Angular. ' +
+      'Returns a concise summary by default; pass responseFormat:"detailed" for the full inventory. ' +
       'Run analyze_codebase first for the fastest results.',
     inputSchema: {
       type: 'object',
       properties: {
         directory: { type: 'string', description: DIR_DESC },
+        responseFormat: RESPONSE_FORMAT_PROP,
       },
       required: ['directory'],
     },
@@ -1220,11 +1245,13 @@ export const TOOL_DEFINITIONS = [
       'Reads the pre-computed env-inventory.json artifact when available, ' +
       'otherwise scans source files live. ' +
       'Supports JS/TS (process.env), Python (os.environ/os.getenv), Go (os.Getenv), Ruby (ENV[]). ' +
+      'Returns a concise summary by default; pass responseFormat:"detailed" for the full inventory. ' +
       'Run analyze_codebase first for the fastest results.',
     inputSchema: {
       type: 'object',
       properties: {
         directory: { type: 'string', description: DIR_DESC },
+        responseFormat: RESPONSE_FORMAT_PROP,
       },
       required: ['directory'],
     },
@@ -2040,7 +2067,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   search_specs: _RO, search_unified: _RO, get_spec: _RO, get_function_body: _RO,
   get_file_dependencies: _RO, generate_change_proposal: _RW, annotate_story: _RW,
   get_route_inventory: _RO, get_middleware_inventory: _RO,
-  get_schema_inventory: _RO, get_ui_components: _RO, get_env_vars: _RO,
+  get_schema_inventory: _RO, get_ui_component_inventory: _RO, get_env_vars: _RO,
   get_external_packages: _RO, audit_spec_coverage: _RO, generate_tests: _RW,
   get_test_coverage: _RO, get_minimal_context: _RO, get_cluster: _RO,
   detect_changes: _RO, get_health_map: _RO, get_surprising_connections: _RO, record_decision: _RW, list_decisions: _RO,
@@ -2251,12 +2278,12 @@ interface McpServerOptions {
  * `openlore install`. Adds zero tool schemas (change: default-to-lean-tool-surface).
  */
 export const BREADTH_POINTER =
-  'OpenLore is running its lean default tool surface (the navigation core). ' +
-  'More tools are available behind named presets — both faces of the substrate ' +
-  '(`--preset substrate` = navigation + recall + verify_claim + blast_radius), ' +
-  'governance (`--preset minimal`), memory (`--preset memory`), claim verification ' +
-  '(`--preset verify`), multi-repo federation (`--preset federation`), or the full ' +
-  'surface (`--preset full`). Re-wire with `openlore install --preset <name>`.';
+  'OpenLore is running its default tool surface (the substrate core: navigate + ' +
+  'recall + verify_claim + blast_radius — both faces of the substrate). More tools ' +
+  'are available behind named presets — the full surface (`--preset full`), multi-repo ' +
+  'federation (`--preset federation`), parallel-work coordination (`--preset coordination`), ' +
+  'or the lean navigate-only core (`--preset navigation`). Re-wire with ' +
+  '`openlore install --preset <name>`.';
 
 /**
  * True when the active surface IS the lean default (the `navigation` preset) —
@@ -2396,7 +2423,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args = {} } = request.params;
+    const { name: _rawName, arguments: args = {} } = request.params;
+    // Resolve a deprecated tool-name alias to its canonical name up front, so the
+    // schema lookup, arg validation, tracking, and dispatch all see one name.
+    const name = resolveCanonicalToolName(_rawName);
 
     if (options.watchAuto && !autoWatcher) {
       const dir = (args as Record<string, unknown>).directory;

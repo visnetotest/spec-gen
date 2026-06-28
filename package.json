@@ -1,6 +1,6 @@
 {
   "name": "openlore",
-  "version": "2.1.4",
+  "version": "2.1.5",
   "description": "Persistent architectural memory and structural cognition for AI coding agents.",
   "type": "module",
   "main": "dist/api/index.js",
@@ -29,6 +29,9 @@
     "bench:mcp": "tsx scripts/bench-mcp.ts",
     "bench:watch": "tsx scripts/bench-watch.ts",
     "bench:agent": "tsx scripts/bench-agent.ts",
+    "bench:surface": "tsx scripts/bench-preset-surface.ts",
+    "bench:selection": "tsx scripts/bench-preset-selection.ts",
+    "bench:completion": "tsx scripts/bench-preset-completion.ts",
     "test": "vitest",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",

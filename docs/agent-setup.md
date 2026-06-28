@@ -1,5 +1,9 @@
 ## Agent Setup
 
+> **Just want the setup steps?** Run one command — see [install.md](install.md), the canonical
+> setup guide (`openlore install` auto-detects and wires your agent). This page explains *why* the
+> wiring helps and what an agent gains; the concrete steps live there.
+
 Agents working on an unfamiliar codebase spend the first quarter of every session on discovery: reading files, running grep, inferring architecture from directory names. Each of those file reads costs tokens. On a large codebase, an agent can burn **tens of thousands of tokens** just answering "where do I even start?" — before writing a single line of useful code.
 
 openlore eliminates this overhead. Run it once, wire two files into your agent's context, and every subsequent session starts with the agent already knowing:
@@ -98,7 +102,7 @@ Wire the generated digest into your agent's context:
 
 1. **`orient "<task description>"`** — always start here. Returns relevant functions, files, spec domains, call paths, and insertion points in one call.
 2. **If the task involves data models, APIs, or config** — call the relevant inventory tool:
-   `get_schema_inventory` · `get_route_inventory` · `get_env_vars` · `get_ui_components` · `get_middleware_inventory`
+   `get_schema_inventory` · `get_route_inventory` · `get_env_vars` · `get_ui_component_inventory` · `get_middleware_inventory`
 3. **If debugging a call flow** ("how does X reach Y?") — `trace_execution_path`
 4. **Before modifying a function** — `get_subgraph` to understand blast radius
 5. **Before opening a PR** — `check_spec_drift`
@@ -133,9 +137,9 @@ The recommended setup uses two server entries: one always-visible core server an
 ```
 
 - **`openlore-core`** exposes 6 tools always visible in context (~600 tokens): `orient`, `search_code`, `record_decision`, `detect_changes`, `check_spec_drift`, `get_health_map`. These are the tools most likely to be called at session start.
-- **`openlore`** exposes all 72 tools deferred — loaded on demand when the agent uses Tool Search (e.g. "find tool for BFS graph traversal"). The `--preset full` is required here: since the `default-to-lean-tool-surface` change a bare `openlore mcp` exposes only the lean 10-tool `navigation` surface, so without it the deferred server would advertise only the 10-tool navigation surface, not the full 72 you want searchable. (Deferral makes the full surface's up-front schema cost ~0, so wiring `full` on the *deferred* server is the right trade — the lean default targets the *eager* case.)
+- **`openlore`** exposes all 72 tools deferred — loaded on demand when the agent uses Tool Search (e.g. "find tool for BFS graph traversal"). The `--preset full` is required here: a bare `openlore mcp` exposes only the 13-tool `substrate` default surface, so without it the deferred server would advertise only those 13 tools, not the full 72 you want searchable. (Deferral makes the full surface's up-front schema cost ~0, so wiring `full` on the *deferred* server is the right trade — the eager default targets the *non-deferred* case.)
 
-If you only need one server entry and want every tool searchable, use `alwaysLoad: false` (the default) with `openlore mcp --preset full` — all 72 tools are deferred and searchable via Tool Search. A bare `openlore mcp` instead gives the lean 10-tool navigation surface (the recommended eager default).
+If you only need one server entry and want every tool searchable, use `alwaysLoad: false` (the default) with `openlore mcp --preset full` — all 72 tools are deferred and searchable via Tool Search. A bare `openlore mcp` instead gives the 13-tool `substrate` default surface (both faces; use `--preset navigation` for the lean 10-tool core).
 
 The full surface stays navigable despite its size because every tool declares one of six **capability families** — `navigate` · `change` · `remember` · `verify` · `coordinate` · `federate` — carried in its MCP `annotations.family`, so a client (or Tool Search) can group rather than face a flat list. Inspect any surface grouped by family with `openlore mcp --preset full --list-tools`.
 
@@ -160,7 +164,7 @@ Always use these before writing or modifying code.
 
 1. **`orient "<task description>"`** — always start here. Returns relevant functions, files, spec domains, call paths, and insertion points in one call.
 2. **If the task involves data models, APIs, or config** — call the relevant inventory tool:
-   `get_schema_inventory` · `get_route_inventory` · `get_env_vars` · `get_ui_components` · `get_middleware_inventory`
+   `get_schema_inventory` · `get_route_inventory` · `get_env_vars` · `get_ui_component_inventory` · `get_middleware_inventory`
 3. **If debugging a call flow** ("how does X reach Y?") — `trace_execution_path`
 4. **Before modifying a function** — `get_subgraph` to understand blast radius
 5. **Before opening a PR** — `check_spec_drift`
